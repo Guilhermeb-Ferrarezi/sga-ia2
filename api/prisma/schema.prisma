@@ -1,0 +1,133 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  ADMIN
+  AGENT
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String?
+  passwordHash String
+  role         UserRole @default(ADMIN)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model Contact {
+  id                Int            @id @default(autoincrement())
+  waId              String         @unique
+  name              String?
+  stageId           Int?
+  stage             PipelineStage? @relation(fields: [stageId], references: [id], onDelete: SetNull)
+  leadStatus        String         @default("open")
+  source            String?
+  notes             String?
+  botEnabled        Boolean        @default(true)
+  customBotPersona  String?
+  aiSummary         String?
+  age               String?
+  level             String?
+  objective         String?
+  lastInteractionAt DateTime?
+  createdAt         DateTime       @default(now())
+  messages          Message[]
+  tasks             Task[]
+  tags              ContactTag[]
+
+  @@index([stageId])
+  @@index([leadStatus])
+  @@index([lastInteractionAt])
+}
+
+model Message {
+  id          Int      @id @default(autoincrement())
+  contactId   Int
+  contact     Contact  @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  direction   String
+  body        String
+  waMessageId String?
+  createdAt   DateTime @default(now())
+
+  @@index([contactId, createdAt])
+  @@unique([contactId, waMessageId])
+}
+
+model Faq {
+  id        Int      @id @default(autoincrement())
+  question  String   @unique
+  answer    String
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([isActive])
+}
+
+model PipelineStage {
+  id        Int       @id @default(autoincrement())
+  name      String    @unique
+  position  Int       @unique
+  color     String    @default("#06b6d4")
+  isActive  Boolean   @default(true)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  contacts  Contact[]
+}
+
+model Task {
+  id          Int      @id @default(autoincrement())
+  contactId   Int
+  contact     Contact  @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  title       String
+  description String?
+  dueAt       DateTime
+  status      String   @default("open")
+  priority    String   @default("medium")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  completedAt DateTime?
+
+  @@index([contactId, status])
+  @@index([dueAt, status])
+}
+
+model MessageTemplate {
+  id        Int      @id @default(autoincrement())
+  title     String
+  body      String
+  category  String   @default("geral")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([category])
+}
+
+model Tag {
+  id        Int          @id @default(autoincrement())
+  name      String       @unique
+  color     String       @default("#06b6d4")
+  createdAt DateTime     @default(now())
+  contacts  ContactTag[]
+}
+
+model ContactTag {
+  id        Int      @id @default(autoincrement())
+  contactId Int
+  tagId     Int
+  contact   Contact  @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  tag       Tag      @relation(fields: [tagId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([contactId, tagId])
+  @@index([contactId])
+  @@index([tagId])
+}

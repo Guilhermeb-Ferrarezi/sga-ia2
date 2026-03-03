@@ -37,6 +37,7 @@ const normalizeBasePath = (value: string | undefined): string => {
 export const config = {
   apiPort: parsePort(Bun.env.PORT ?? Bun.env.API_PORT, 5000),
   apiBasePath: normalizeBasePath(Bun.env.API_BASE_PATH),
+  webOrigin: Bun.env.WEB_ORIGIN ?? "http://localhost:5173",
   appName: Bun.env.APP_NAME ?? "WhatsApp AI Bot",
   webhookVerifyToken: required("WEBHOOK_VERIFY_TOKEN"),
   whatsappToken: required("WHATSAPP_TOKEN"),
@@ -54,6 +55,10 @@ export const config = {
     Bun.env.ASSISTANT_STYLE ??
     "respostas curtas, objetivas e orientadas a acao",
   assistantSystemPrompt: optional(Bun.env.ASSISTANT_SYSTEM_PROMPT),
+  jwtSecret: Bun.env.JWT_SECRET ?? "dev-change-this-secret",
+  jwtTtlSeconds: parseNumber(Bun.env.JWT_TTL_SECONDS, 60 * 60 * 24 * 7),
+  adminEmail: optional(Bun.env.ADMIN_EMAIL),
+  adminPassword: optional(Bun.env.ADMIN_PASSWORD),
   replyDelayPerCharMs: parseNumber(Bun.env.REPLY_DELAY_PER_CHAR_MS, 35),
   replyDelayMinMs: parseNumber(Bun.env.REPLY_DELAY_MIN_MS, 700),
   replyDelayMaxMs: parseNumber(Bun.env.REPLY_DELAY_MAX_MS, 7000),
