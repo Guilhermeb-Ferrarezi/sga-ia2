@@ -116,6 +116,15 @@ const server = Bun.serve({
   },
 });
 
+const shutdown = (signal: string) => {
+  console.log(`Received ${signal}, shutting down`);
+  server.stop(true);
+  process.exit(0);
+};
+
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
+
 console.log(
   `Server running on http://localhost:${server.port}${config.apiBasePath} (webhook: ${config.apiBasePath}/webhook)`,
 );

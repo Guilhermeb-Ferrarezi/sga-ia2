@@ -6,11 +6,14 @@ COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile
 
 COPY tsconfig.json ./
+COPY tsconfig.build.json ./
 COPY prisma ./prisma
+RUN bun run prisma:generate
+
 COPY src ./src
 
-RUN bun run prisma:generate
+RUN bun run build
 
 EXPOSE 5000
 
-CMD ["bun", "run", "start"]
+CMD ["bun", "dist/index.js"]
