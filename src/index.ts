@@ -21,6 +21,9 @@ const json = (body: unknown, status = 200): Response =>
     headers: { "Content-Type": "application/json" },
   });
 
+const healthPath = `${config.apiBasePath}/health`;
+const webhookPath = `${config.apiBasePath}/webhook`;
+
 const processedMessageIds = new Map<string, number>();
 const MESSAGE_ID_TTL_MS = 10 * 60 * 1000;
 
@@ -91,11 +94,11 @@ const server = Bun.serve({
   async fetch(req) {
     const url = new URL(req.url);
 
-    if (url.pathname === "/health") {
+    if (url.pathname === healthPath) {
       return json({ ok: true, app: config.appName, dbEnabled: config.enableDb });
     }
 
-    if (url.pathname !== "/webhook") {
+    if (url.pathname !== webhookPath) {
       return new Response("Not found", { status: 404 });
     }
 
@@ -106,4 +109,6 @@ const server = Bun.serve({
   },
 });
 
-console.log(`Server running on http://localhost:${server.port}`);
+console.log(
+  `Server running on http://localhost:${server.port}${config.apiBasePath} (webhook: ${webhookPath})`,
+);
