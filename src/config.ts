@@ -6,6 +6,12 @@ const parsePort = (value: string | undefined, fallback: number): number => {
   return Number.isFinite(parsed) ? parsed : fallback;
 };
 
+const parseNumber = (value: string | undefined, fallback: number): number => {
+  if (!value) return fallback;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
+
 const required = (name: string): string => {
   const value = Bun.env[name]?.trim();
   if (!value) {
@@ -33,5 +39,10 @@ export const config = {
   whatsappGraphVersion: Bun.env.WHATSAPP_GRAPH_VERSION ?? "v21.0",
   openaiApiKey: required("OPENAI_API_KEY"),
   openaiModel: Bun.env.OPENAI_MODEL ?? "gpt-4o-mini",
+  openaiTranscriptionModel:
+    Bun.env.OPENAI_TRANSCRIPTION_MODEL ?? "gpt-4o-mini-transcribe",
+  replyDelayPerCharMs: parseNumber(Bun.env.REPLY_DELAY_PER_CHAR_MS, 35),
+  replyDelayMinMs: parseNumber(Bun.env.REPLY_DELAY_MIN_MS, 700),
+  replyDelayMaxMs: parseNumber(Bun.env.REPLY_DELAY_MAX_MS, 7000),
   enableDb: Bun.env.ENABLE_DB === "true",
 } as const;

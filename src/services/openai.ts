@@ -11,6 +11,10 @@ interface OpenAIResponseBody {
   output?: OpenAIOutputItem[];
 }
 
+interface OpenAITranscriptionBody {
+  text?: string;
+}
+
 const MAX_WHATSAPP_TEXT_SIZE = 3500;
 
 const trimForWhatsApp = (text: string): string => {
@@ -40,7 +44,40 @@ export class OpenAIService {
     private readonly apiKey: string,
     private readonly model: string,
     private readonly appName: string,
+    private readonly transcriptionModel: string,
   ) {}
+
+  async transcribeAudio(audio: {
+    arrayBuffer: ArrayBuffer;
+    mimeType: string;
+    fileName: string;
+  }): Promise<string> {
+    const formData = new FormData();
+    const file = new File([audio.arrayBuffer], audio.fileName, {
+      type: audio.mimeType,
+    });
+
+    formData.set("file", file);
+    formData.set("model", this.transcriptionModel);
+
+    const response = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${this.apiKey}`,
+      },
+      body: formData,
+    });
+
+    if (!response.ok) {
+      const details = await response.text();
+      throw new Error(
+        `OpenAI transcription failed (${response.status}): ${details || "no details"}`,
+      );
+    }
+
+    const payload = (await response.json()) as OpenAITranscriptionBody;
+    return payload.text?.trim() ?? "";
+  }
 
   async generateReply(userMessage: string): Promise<string> {
     const response = await fetch("https://api.openai.com/v1/responses", {

@@ -34,6 +34,10 @@ export interface WhatsAppMessage {
   text?: {
     body?: string;
   };
+  audio?: {
+    id?: string;
+    mime_type?: string;
+  };
 }
 
 export interface InboundTextMessage {
@@ -41,3 +45,14 @@ export interface InboundTextMessage {
   messageId: string;
   text: string;
 }
+
+export interface InboundAudioMessage {
+  from: string;
+  messageId: string;
+  mediaId: string;
+  mimeType?: string;
+}
+
+export type InboundMessage =
+  | (InboundTextMessage & { type: "text" })
+  | (InboundAudioMessage & { type: "audio" });

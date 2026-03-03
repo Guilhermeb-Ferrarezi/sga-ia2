@@ -1,12 +1,13 @@
 import { config } from "./config";
 import { OpenAIService } from "./services/openai";
-import { extractInboundTextMessages, WhatsAppService } from "./services/whatsapp";
-import type { WhatsAppWebhookPayload } from "./types/whatsapp";
+import { extractInboundMessages, WhatsAppService } from "./services/whatsapp";
+import type { InboundMessage, WhatsAppWebhookPayload } from "./types/whatsapp";
 
 const openAI = new OpenAIService(
   config.openaiApiKey,
   config.openaiModel,
   config.appName,
+  config.openaiTranscriptionModel,
 );
 
 const whatsapp = new WhatsAppService(
@@ -33,6 +34,26 @@ const webhookPaths = new Set<string>([
 
 const processedMessageIds = new Map<string, number>();
 const MESSAGE_ID_TTL_MS = 10 * 60 * 1000;
+
+const sleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
+
+const computeReplyDelayMs = (text: string): number => {
+  const proportionalDelay = Math.round(text.length * config.replyDelayPerCharMs);
+  return Math.min(
+    config.replyDelayMaxMs,
+    Math.max(config.replyDelayMinMs, proportionalDelay),
+  );
+};
+
+const resolveInboundText = async (message: InboundMessage): Promise<string> => {
+  if (message.type === "text") {
+    return message.text;
+  }
+
+  const media = await whatsapp.downloadMedia(message.mediaId, message.mimeType);
+  return openAI.transcribeAudio(media);
+};
 
 const shouldProcessMessage = (messageId: string): boolean => {
   const now = Date.now();
@@ -73,7 +94,7 @@ const webhookEvent = async (req: Request): Promise<Response> => {
     return json({ error: "Invalid JSON payload" }, 400);
   }
 
-  const inbound = extractInboundTextMessages(payload);
+  const inbound = extractInboundMessages(payload);
 
   void (async () => {
     for (const message of inbound) {
@@ -82,7 +103,26 @@ const webhookEvent = async (req: Request): Promise<Response> => {
       }
 
       try {
-        const aiReply = await openAI.generateReply(message.text);
+        try {
+          await whatsapp.markAsRead(message.messageId);
+        } catch (error) {
+          console.warn(
+            `[message:${message.messageId}] could not mark as read`,
+            error,
+          );
+        }
+
+        const userText = (await resolveInboundText(message)).trim();
+        if (!userText) {
+          await whatsapp.sendTextMessage(
+            message.from,
+            "Nao consegui entender o audio. Pode enviar novamente ou mandar em texto?",
+          );
+          continue;
+        }
+
+        const aiReply = await openAI.generateReply(userText);
+        await sleep(computeReplyDelayMs(userText));
         await whatsapp.sendTextMessage(message.from, aiReply);
       } catch (error) {
         console.error(
