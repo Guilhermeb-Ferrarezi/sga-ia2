@@ -24,7 +24,7 @@ const normalizeBasePath = (value: string | undefined): string => {
 };
 
 export const config = {
-  apiPort: parsePort(Bun.env.API_PORT ?? Bun.env.PORT, 5000),
+  apiPort: parsePort(Bun.env.PORT ?? Bun.env.API_PORT, 5000),
   apiBasePath: normalizeBasePath(Bun.env.API_BASE_PATH),
   appName: Bun.env.APP_NAME ?? "WhatsApp AI Bot",
   webhookVerifyToken: required("WEBHOOK_VERIFY_TOKEN"),
