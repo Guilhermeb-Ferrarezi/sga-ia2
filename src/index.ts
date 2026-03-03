@@ -8,6 +8,10 @@ const openAI = new OpenAIService(
   config.openaiModel,
   config.appName,
   config.openaiTranscriptionModel,
+  config.assistantLanguage,
+  config.assistantPersonality,
+  config.assistantStyle,
+  config.assistantSystemPrompt,
 );
 
 const whatsapp = new WhatsAppService(

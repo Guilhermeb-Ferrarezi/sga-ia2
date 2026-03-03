@@ -12,6 +12,11 @@ const parseNumber = (value: string | undefined, fallback: number): number => {
   return Number.isFinite(parsed) ? parsed : fallback;
 };
 
+const optional = (value: string | undefined): string | undefined => {
+  const normalized = value?.trim();
+  return normalized ? normalized : undefined;
+};
+
 const required = (name: string): string => {
   const value = Bun.env[name]?.trim();
   if (!value) {
@@ -41,6 +46,14 @@ export const config = {
   openaiModel: Bun.env.OPENAI_MODEL ?? "gpt-4o-mini",
   openaiTranscriptionModel:
     Bun.env.OPENAI_TRANSCRIPTION_MODEL ?? "gpt-4o-mini-transcribe",
+  assistantLanguage: Bun.env.ASSISTANT_LANGUAGE ?? "pt-BR",
+  assistantPersonality:
+    Bun.env.ASSISTANT_PERSONALITY ??
+    "amigavel, profissional e confiante em esports",
+  assistantStyle:
+    Bun.env.ASSISTANT_STYLE ??
+    "respostas curtas, objetivas e orientadas a acao",
+  assistantSystemPrompt: optional(Bun.env.ASSISTANT_SYSTEM_PROMPT),
   replyDelayPerCharMs: parseNumber(Bun.env.REPLY_DELAY_PER_CHAR_MS, 35),
   replyDelayMinMs: parseNumber(Bun.env.REPLY_DELAY_MIN_MS, 700),
   replyDelayMaxMs: parseNumber(Bun.env.REPLY_DELAY_MAX_MS, 7000),

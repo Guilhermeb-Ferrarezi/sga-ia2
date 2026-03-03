@@ -45,7 +45,29 @@ export class OpenAIService {
     private readonly model: string,
     private readonly appName: string,
     private readonly transcriptionModel: string,
+    private readonly assistantLanguage: string,
+    private readonly assistantPersonality: string,
+    private readonly assistantStyle: string,
+    private readonly assistantSystemPrompt?: string,
   ) {}
+
+  private buildSystemPrompt(): string {
+    if (this.assistantSystemPrompt) {
+      return this.assistantSystemPrompt;
+    }
+
+    return [
+      `Voce e ${this.appName}, uma assistente de WhatsApp para atendimento de campeonatos de esports.`,
+      `Idioma principal: ${this.assistantLanguage}.`,
+      `Personalidade: ${this.assistantPersonality}.`,
+      `Estilo de resposta: ${this.assistantStyle}.`,
+      "Regras de comportamento:",
+      "- Seja clara, rapida e util.",
+      "- Faca perguntas objetivas quando faltar contexto.",
+      "- Evite texto longo e sem acao.",
+      "- Nao invente informacoes.",
+    ].join("\n");
+  }
 
   async transcribeAudio(audio: {
     arrayBuffer: ArrayBuffer;
@@ -94,7 +116,7 @@ export class OpenAIService {
             content: [
               {
                 type: "input_text",
-                text: `You are ${this.appName}, an assistant replying inside WhatsApp. Keep responses concise and practical.`,
+                text: this.buildSystemPrompt(),
               },
             ],
           },
