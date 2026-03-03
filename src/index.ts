@@ -1,0 +1,109 @@
+import { config } from "./config";
+import { OpenAIService } from "./services/openai";
+import { extractInboundTextMessages, WhatsAppService } from "./services/whatsapp";
+import type { WhatsAppWebhookPayload } from "./types/whatsapp";
+
+const openAI = new OpenAIService(
+  config.openaiApiKey,
+  config.openaiModel,
+  config.appName,
+);
+
+const whatsapp = new WhatsAppService(
+  config.whatsappToken,
+  config.whatsappPhoneNumberId,
+  config.whatsappGraphVersion,
+);
+
+const json = (body: unknown, status = 200): Response =>
+  new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+
+const processedMessageIds = new Map<string, number>();
+const MESSAGE_ID_TTL_MS = 10 * 60 * 1000;
+
+const shouldProcessMessage = (messageId: string): boolean => {
+  const now = Date.now();
+
+  for (const [id, seenAt] of processedMessageIds) {
+    if (now - seenAt > MESSAGE_ID_TTL_MS) {
+      processedMessageIds.delete(id);
+    }
+  }
+
+  if (processedMessageIds.has(messageId)) {
+    return false;
+  }
+
+  processedMessageIds.set(messageId, now);
+  return true;
+};
+
+const webhookVerify = (req: Request): Response => {
+  const url = new URL(req.url);
+  const mode = url.searchParams.get("hub.mode");
+  const token = url.searchParams.get("hub.verify_token");
+  const challenge = url.searchParams.get("hub.challenge");
+
+  if (mode !== "subscribe" || token !== config.webhookVerifyToken || !challenge) {
+    return new Response("Forbidden", { status: 403 });
+  }
+
+  return new Response(challenge, { status: 200 });
+};
+
+const webhookEvent = async (req: Request): Promise<Response> => {
+  let payload: WhatsAppWebhookPayload;
+
+  try {
+    payload = (await req.json()) as WhatsAppWebhookPayload;
+  } catch {
+    return json({ error: "Invalid JSON payload" }, 400);
+  }
+
+  const inbound = extractInboundTextMessages(payload);
+
+  void (async () => {
+    for (const message of inbound) {
+      if (!shouldProcessMessage(message.messageId)) {
+        continue;
+      }
+
+      try {
+        const aiReply = await openAI.generateReply(message.text);
+        await whatsapp.sendTextMessage(message.from, aiReply);
+      } catch (error) {
+        console.error(
+          `[message:${message.messageId}] failed processing from ${message.from}`,
+          error,
+        );
+      }
+    }
+  })();
+
+  return new Response("EVENT_RECEIVED", { status: 200 });
+};
+
+const server = Bun.serve({
+  port: config.apiPort,
+  async fetch(req) {
+    const url = new URL(req.url);
+
+    if (url.pathname === "/health") {
+      return json({ ok: true, app: config.appName, dbEnabled: config.enableDb });
+    }
+
+    if (url.pathname !== "/webhook") {
+      return new Response("Not found", { status: 404 });
+    }
+
+    if (req.method === "GET") return webhookVerify(req);
+    if (req.method === "POST") return webhookEvent(req);
+
+    return new Response("Method Not Allowed", { status: 405 });
+  },
+});
+
+console.log(`Server running on http://localhost:${server.port}`);
