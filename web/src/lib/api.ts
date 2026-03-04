@@ -141,6 +141,30 @@ export interface ContactUpdateInput {
   stageId?: number | null;
 }
 
+export interface ContactCreateInput {
+  waId: string;
+  name?: string | null;
+  email?: string | null;
+  tournament?: string | null;
+  eventDate?: string | null;
+  category?: string | null;
+  city?: string | null;
+  teamName?: string | null;
+  playersCount?: number | null;
+  source?: string | null;
+  notes?: string | null;
+  age?: string | null;
+  level?: string | null;
+  objective?: string | null;
+  triageCompleted?: boolean;
+  handoffRequested?: boolean;
+  handoffReason?: string | null;
+  handoffAt?: string | null;
+  botEnabled?: boolean;
+  leadStatus?: "open" | "won" | "lost";
+  stageId?: number | null;
+}
+
 export type TaskStatus = "open" | "in_progress" | "done" | "cancelled";
 export type TaskPriority = "low" | "medium" | "high" | "urgent";
 
@@ -369,6 +393,17 @@ export const api = {
 
   async pipelineBoard(token: string): Promise<PipelineBoard> {
     return request<PipelineBoard>("/pipeline/board", { method: "GET" }, token);
+  },
+
+  async createContact(
+    token: string,
+    data: ContactCreateInput,
+  ): Promise<PipelineContact> {
+    return request<PipelineContact>(
+      "/contacts",
+      { method: "POST", body: JSON.stringify(data) },
+      token,
+    );
   },
 
   async updateContactStage(

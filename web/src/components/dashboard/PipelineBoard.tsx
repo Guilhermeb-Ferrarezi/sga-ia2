@@ -55,6 +55,31 @@ const leadStatusMeta: Record<LeadStatus, { label: string; badgeClass: string }> 
   },
 };
 
+const statusFilterLabel: Record<"all" | LeadStatus, string> = {
+  all: "todos",
+  open: "aberto",
+  won: "ganho",
+  lost: "perdido",
+};
+
+const handoffFilterLabel: Record<"all" | "yes" | "no", string> = {
+  all: "todos",
+  yes: "sim",
+  no: "nao",
+};
+
+const botFilterLabel: Record<"all" | "on" | "off", string> = {
+  all: "todos",
+  on: "ligado",
+  off: "desligado",
+};
+
+const triageFilterLabel: Record<"all" | "done" | "pending", string> = {
+  all: "todos",
+  done: "concluida",
+  pending: "pendente",
+};
+
 const normalizeLeadStatus = (value: string | null | undefined): LeadStatus => {
   if (value === "won" || value === "lost") return value;
   return "open";
@@ -113,6 +138,30 @@ type DetailsFormState = {
   botEnabled: boolean;
 };
 
+type ManualLeadFormState = {
+  waId: string;
+  name: string;
+  stageId: string;
+  email: string;
+  tournament: string;
+  category: string;
+  city: string;
+  teamName: string;
+  playersCount: string;
+};
+
+const buildManualLeadForm = (): ManualLeadFormState => ({
+  waId: "",
+  name: "",
+  stageId: "",
+  email: "",
+  tournament: "",
+  category: "",
+  city: "",
+  teamName: "",
+  playersCount: "",
+});
+
 const toText = (value: string | null | undefined): string => value ?? "";
 const toNullableText = (value: string): string | null => {
   const trimmed = value.trim();
@@ -167,6 +216,15 @@ export default function PipelineBoardView() {
   const [botFilter, setBotFilter] = useState<"all" | "on" | "off">("all");
   const [triageFilter, setTriageFilter] = useState<"all" | "done" | "pending">("all");
   const [columnPage, setColumnPage] = useState<Record<string, number>>({});
+  const [columnPageInput, setColumnPageInput] = useState<Record<string, string>>({});
+  const [deletingStageId, setDeletingStageId] = useState<number | null>(null);
+  const [deletingLeadWaId, setDeletingLeadWaId] = useState<string | null>(null);
+  const [inlineStageTitle, setInlineStageTitle] = useState<{ id: number; name: string } | null>(
+    null,
+  );
+  const [savingInlineStageTitle, setSavingInlineStageTitle] = useState(false);
+  const [manualLeadForm, setManualLeadForm] = useState<ManualLeadFormState | null>(null);
+  const [savingManualLead, setSavingManualLead] = useState(false);
 
   const PAGE_SIZE = 10;
 
@@ -251,6 +309,7 @@ export default function PipelineBoardView() {
 
   useEffect(() => {
     setColumnPage({});
+    setColumnPageInput({});
   }, [searchTerm, statusFilter, handoffFilter, botFilter, triageFilter]);
 
   const availableTagsForDetails = useMemo(() => {
@@ -345,6 +404,52 @@ export default function PipelineBoardView() {
     });
   };
 
+  const openManualLeadCreate = () => {
+    setManualLeadForm(buildManualLeadForm());
+  };
+
+  const startInlineStageTitleEdit = (stage: PipelineStage) => {
+    setInlineStageTitle({
+      id: stage.id,
+      name: stage.name,
+    });
+  };
+
+  const cancelInlineStageTitleEdit = () => {
+    setInlineStageTitle(null);
+  };
+
+  const saveInlineStageTitle = async () => {
+    if (!token || !inlineStageTitle) return;
+    const normalizedName = inlineStageTitle.name.trim();
+    if (!normalizedName) {
+      toast({
+        title: "Titulo da etapa invalido",
+        description: "Informe um nome para a etapa.",
+        variant: "error",
+      });
+      return;
+    }
+
+    setSavingInlineStageTitle(true);
+    try {
+      await api.updatePipelineStage(token, inlineStageTitle.id, {
+        name: normalizedName,
+      });
+      toast({ title: "Titulo da etapa atualizado", variant: "success" });
+      setInlineStageTitle(null);
+      await load();
+    } catch (err: unknown) {
+      toast({
+        title: "Falha ao atualizar titulo da etapa",
+        description: err instanceof Error ? err.message : "Tente novamente.",
+        variant: "error",
+      });
+    } finally {
+      setSavingInlineStageTitle(false);
+    }
+  };
+
   const saveStage = async () => {
     if (!token || !stageForm || !stageForm.name.trim()) return;
 
@@ -379,6 +484,72 @@ export default function PipelineBoardView() {
     }
   };
 
+  const saveManualLead = async () => {
+    if (!token || !manualLeadForm) return;
+
+    const waId = manualLeadForm.waId.trim();
+    if (!waId) {
+      toast({
+        title: "Numero do lead obrigatorio",
+        description: "Informe o numero do WhatsApp do lead.",
+        variant: "error",
+      });
+      return;
+    }
+
+    const playersRaw = manualLeadForm.playersCount.trim();
+    if (playersRaw && !Number.isFinite(Number(playersRaw))) {
+      toast({
+        title: "Quantidade de jogadores invalida",
+        description: "Use apenas numeros.",
+        variant: "error",
+      });
+      return;
+    }
+
+    const parsedStageId = manualLeadForm.stageId
+      ? Number(manualLeadForm.stageId)
+      : null;
+    if (parsedStageId !== null && !Number.isInteger(parsedStageId)) {
+      toast({
+        title: "Etapa invalida",
+        description: "Selecione uma etapa valida.",
+        variant: "error",
+      });
+      return;
+    }
+
+    setSavingManualLead(true);
+    try {
+      await api.createContact(token, {
+        waId,
+        name: toNullableText(manualLeadForm.name),
+        email: toNullableText(manualLeadForm.email),
+        tournament: toNullableText(manualLeadForm.tournament),
+        category: toNullableText(manualLeadForm.category),
+        city: toNullableText(manualLeadForm.city),
+        teamName: toNullableText(manualLeadForm.teamName),
+        playersCount: playersRaw ? Number(playersRaw) : null,
+        stageId: parsedStageId,
+      });
+      toast({
+        title: "Lead adicionado ao pipeline",
+        description: manualLeadForm.name.trim() || waId,
+        variant: "success",
+      });
+      setManualLeadForm(null);
+      await load();
+    } catch (err: unknown) {
+      toast({
+        title: "Falha ao criar lead manual",
+        description: err instanceof Error ? err.message : "Tente novamente.",
+        variant: "error",
+      });
+    } finally {
+      setSavingManualLead(false);
+    }
+  };
+
   const deleteStage = async (stage: PipelineStage) => {
     if (!token) return;
     const confirmed = window.confirm(
@@ -387,7 +558,9 @@ export default function PipelineBoardView() {
     if (!confirmed) return;
 
     setSavingStage(true);
+    setDeletingStageId(stage.id);
     try {
+      await new Promise((resolve) => setTimeout(resolve, 180));
       await api.deletePipelineStage(token, stage.id);
       toast({ title: "Etapa excluida", variant: "success" });
       await load();
@@ -399,6 +572,7 @@ export default function PipelineBoardView() {
       });
     } finally {
       setSavingStage(false);
+      setDeletingStageId((current) => (current === stage.id ? null : current));
     }
   };
 
@@ -481,7 +655,10 @@ export default function PipelineBoardView() {
     if (!confirmed) return;
 
     setProcessingWaId(contact.waId);
+    setDeletingLeadWaId(contact.waId);
     try {
+      setContextMenu(null);
+      await new Promise((resolve) => setTimeout(resolve, 180));
       await api.deleteContact(token, contact.waId);
       toast({ title: "Lead excluido", variant: "success" });
       setDetailsContact((current) => (current?.waId === contact.waId ? null : current));
@@ -495,6 +672,7 @@ export default function PipelineBoardView() {
     } finally {
       setProcessingWaId(null);
       setContextMenu(null);
+      setDeletingLeadWaId((current) => (current === contact.waId ? null : current));
     }
   };
 
@@ -686,6 +864,18 @@ export default function PipelineBoardView() {
     return { items, totalPages, currentPage };
   };
 
+  const setStagePage = (stageKey: string, page: number, totalPages: number) => {
+    const nextPage = Math.max(1, Math.min(totalPages, page));
+    setColumnPage((prev) => ({
+      ...prev,
+      [stageKey]: nextPage,
+    }));
+    setColumnPageInput((prev) => ({
+      ...prev,
+      [stageKey]: String(nextPage),
+    }));
+  };
+
   const renderContactCard = (contact: PipelineContact, stageId: number | null) => {
     const status = normalizeLeadStatus(contact.leadStatus);
 
@@ -702,7 +892,10 @@ export default function PipelineBoardView() {
             contact,
           });
         }}
-        className="cursor-grab rounded-lg border border-border bg-background/60 p-3 transition hover:border-primary/40 active:cursor-grabbing"
+        className={cn(
+          "cursor-grab rounded-lg border border-border bg-background/60 p-3 transition hover:border-primary/40 active:cursor-grabbing",
+          deletingLeadWaId === contact.waId && "anim-remove pointer-events-none opacity-70",
+        )}
         title="Clique com o botao direito para abrir o menu de acoes"
       >
         <div className="flex items-start gap-2">
@@ -710,7 +903,7 @@ export default function PipelineBoardView() {
           <div className="min-w-0 flex-1">
             <div className="flex items-center justify-between gap-2">
               <p className="truncate text-sm font-medium">
-                {contact.name || contact.waId}
+                {contact.name ? `${contact.name} (${contact.waId})` : contact.waId}
               </p>
               {movedLeadWaId === contact.waId && (
                 <Badge variant="secondary" className="h-5 animate-pulse px-2 text-[10px]">
@@ -724,9 +917,6 @@ export default function PipelineBoardView() {
                 {leadStatusMeta[status].label}
               </Badge>
             </div>
-            {contact.name && (
-              <p className="text-xs text-muted-foreground">{contact.waId}</p>
-            )}
             {contact.messages[0] && (
               <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
                 {contact.messages[0].body.slice(0, 80)}
@@ -753,11 +943,12 @@ export default function PipelineBoardView() {
   };
 
   const renderColumn = (
-    title: string,
-    color: string,
-    stageId: number | null,
+    stage: PipelineStage | null,
     contacts: PipelineContact[],
   ) => {
+    const title = stage?.name ?? "Sem Estagio";
+    const color = stage?.color ?? "#6b7280";
+    const stageId = stage?.id ?? null;
     const stageKey = String(stageId ?? "unassigned");
     const filteredContacts = applyContactFilters(contacts);
     const { items, totalPages, currentPage } = paginateContacts(
@@ -767,27 +958,88 @@ export default function PipelineBoardView() {
 
     return (
     <div
-      key={stageId ?? "unassigned"}
-      className={cn(
-        "flex w-72 shrink-0 flex-col rounded-xl border border-border/60 bg-card/50 transition",
-        leadDropTargetKey === stageKey && "border-primary shadow-[0_0_0_2px_hsl(var(--primary)/0.35)]",
-      )}
-      onDragOver={(e) => e.preventDefault()}
-      onDrop={() => void handleDrop(stageId)}
-    >
-      <div
-        className="flex items-center gap-2 rounded-t-xl px-3 py-2.5"
-        style={{ borderBottom: `3px solid ${color}` }}
+        key={stageId ?? "unassigned"}
+        className={cn(
+          "flex w-72 shrink-0 flex-col rounded-xl border border-border/60 bg-card/50 transition",
+          leadDropTargetKey === stageKey && "border-primary shadow-[0_0_0_2px_hsl(var(--primary)/0.35)]",
+          deletingStageId === stageId && "anim-remove pointer-events-none opacity-70",
+        )}
+        onDragOver={(e) => e.preventDefault()}
+        onDrop={() => void handleDrop(stageId)}
       >
-        <span
-          className="h-3 w-3 rounded-full"
-          style={{ backgroundColor: color }}
-        />
-        <span className="text-sm font-semibold">{title}</span>
-        <span className="ml-auto rounded-full bg-muted px-2 py-0.5 text-xs">
-          {filteredContacts.length}
-        </span>
-      </div>
+        <div
+          className="flex items-center gap-2 rounded-t-xl px-3 py-2.5"
+          style={{ borderBottom: `3px solid ${color}` }}
+        >
+          <span
+            className="h-3 w-3 rounded-full"
+            style={{ backgroundColor: color }}
+          />
+          {inlineStageTitle?.id === stageId && stageId !== null ? (
+            <div className="flex min-w-0 flex-1 items-center gap-1">
+              <Input
+                value={inlineStageTitle.name}
+                onChange={(event) =>
+                  setInlineStageTitle((current) =>
+                    current ? { ...current, name: event.target.value } : current,
+                  )
+                }
+                className="h-8"
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    void saveInlineStageTitle();
+                  }
+                  if (event.key === "Escape") {
+                    event.preventDefault();
+                    cancelInlineStageTitleEdit();
+                  }
+                }}
+                autoFocus
+              />
+              <Button
+                type="button"
+                size="icon"
+                variant="ghost"
+                className="h-7 w-7 shrink-0"
+                onClick={() => void saveInlineStageTitle()}
+                disabled={savingInlineStageTitle || !inlineStageTitle.name.trim()}
+              >
+                <Check className="h-3.5 w-3.5 text-emerald-300" />
+              </Button>
+              <Button
+                type="button"
+                size="icon"
+                variant="ghost"
+                className="h-7 w-7 shrink-0"
+                onClick={cancelInlineStageTitleEdit}
+                disabled={savingInlineStageTitle}
+              >
+                <X className="h-3.5 w-3.5" />
+              </Button>
+            </div>
+          ) : (
+            <>
+              <span className="text-sm font-semibold">{title}</span>
+              {stageId !== null && (
+                <Button
+                  type="button"
+                  size="icon"
+                  variant="ghost"
+                  className="h-7 w-7"
+                  onClick={() => {
+                    if (stage) startInlineStageTitleEdit(stage);
+                  }}
+                >
+                  <Edit2 className="h-3.5 w-3.5 text-muted-foreground" />
+                </Button>
+              )}
+            </>
+          )}
+          <span className="ml-auto rounded-full bg-muted px-2 py-0.5 text-xs">
+            {filteredContacts.length}
+          </span>
+        </div>
       <ScrollArea className="flex-1 p-2" style={{ maxHeight: "calc(100vh - 260px)" }}>
         <div className="space-y-2">
           {items.map((c) => renderContactCard(c, stageId))}
@@ -798,20 +1050,27 @@ export default function PipelineBoardView() {
           )}
         </div>
       </ScrollArea>
-      <div className="flex items-center justify-between border-t border-border/60 px-2 py-1.5 text-[11px] text-muted-foreground">
-        <span>Pagina {currentPage}/{totalPages}</span>
+      <div className="space-y-1.5 border-t border-border/60 px-2 py-1.5 text-[11px] text-muted-foreground">
+        <div className="flex items-center justify-between">
+          <span>Pagina {currentPage}/{totalPages}</span>
+          <span>{filteredContacts.length} lead(s)</span>
+        </div>
         <div className="flex items-center gap-1">
           <Button
             size="sm"
             variant="ghost"
             className="h-6 px-2 text-[11px]"
             disabled={currentPage <= 1}
-            onClick={() =>
-              setColumnPage((prev) => ({
-                ...prev,
-                [stageKey]: Math.max(1, (prev[stageKey] ?? 1) - 1),
-              }))
-            }
+            onClick={() => setStagePage(stageKey, 1, totalPages)}
+          >
+            Primeiro
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-6 px-2 text-[11px]"
+            disabled={currentPage <= 1}
+            onClick={() => setStagePage(stageKey, currentPage - 1, totalPages)}
           >
             Prev
           </Button>
@@ -820,14 +1079,52 @@ export default function PipelineBoardView() {
             variant="ghost"
             className="h-6 px-2 text-[11px]"
             disabled={currentPage >= totalPages}
-            onClick={() =>
-              setColumnPage((prev) => ({
-                ...prev,
-                [stageKey]: Math.min(totalPages, (prev[stageKey] ?? 1) + 1),
-              }))
-            }
+            onClick={() => setStagePage(stageKey, currentPage + 1, totalPages)}
           >
             Prox
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-6 px-2 text-[11px]"
+            disabled={currentPage >= totalPages}
+            onClick={() => setStagePage(stageKey, totalPages, totalPages)}
+          >
+            Ultima
+          </Button>
+        </div>
+        <div className="flex items-center gap-1">
+          <Input
+            type="number"
+            min={1}
+            max={totalPages}
+            value={columnPageInput[stageKey] ?? ""}
+            onChange={(event) =>
+              setColumnPageInput((prev) => ({
+                ...prev,
+                [stageKey]: event.target.value,
+              }))
+            }
+            onKeyDown={(event) => {
+              if (event.key !== "Enter") return;
+              const nextPage = Number(columnPageInput[stageKey] ?? "");
+              if (!Number.isFinite(nextPage)) return;
+              setStagePage(stageKey, nextPage, totalPages);
+            }}
+            className="h-7 w-20 px-2 text-[11px]"
+            placeholder="Ir para"
+          />
+          <Button
+            size="sm"
+            variant="secondary"
+            className="h-7 px-2 text-[11px]"
+            onClick={() => {
+              const nextPage = Number(columnPageInput[stageKey] ?? "");
+              if (!Number.isFinite(nextPage)) return;
+              setStagePage(stageKey, nextPage, totalPages);
+            }}
+          >
+            Ir
           </Button>
         </div>
       </div>
@@ -864,6 +1161,15 @@ export default function PipelineBoardView() {
         <div className="flex items-center gap-2">
           <Button
             size="sm"
+            variant="secondary"
+            onClick={openManualLeadCreate}
+            disabled={savingManualLead}
+          >
+            <Plus className="h-4 w-4" />
+            Novo Lead
+          </Button>
+          <Button
+            size="sm"
             onClick={openCreateStageForm}
             disabled={savingStage}
           >
@@ -888,6 +1194,149 @@ export default function PipelineBoardView() {
         </p>
       )}
 
+      {manualLeadForm && (
+        <Card className="anim-pop border-primary/40 bg-primary/5">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-base">Adicionar Lead Manual</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+              <div className="space-y-1">
+                <label className="text-xs text-muted-foreground">Numero WhatsApp *</label>
+                <Input
+                  value={manualLeadForm.waId}
+                  onChange={(event) =>
+                    setManualLeadForm((current) =>
+                      current ? { ...current, waId: event.target.value } : current,
+                    )
+                  }
+                  placeholder="5511999999999"
+                />
+              </div>
+              <div className="space-y-1">
+                <label className="text-xs text-muted-foreground">Nome</label>
+                <Input
+                  value={manualLeadForm.name}
+                  onChange={(event) =>
+                    setManualLeadForm((current) =>
+                      current ? { ...current, name: event.target.value } : current,
+                    )
+                  }
+                  placeholder="Nome do lead"
+                />
+              </div>
+              <div className="space-y-1">
+                <label className="text-xs text-muted-foreground">Etapa</label>
+                <select
+                  value={manualLeadForm.stageId}
+                  onChange={(event) =>
+                    setManualLeadForm((current) =>
+                      current ? { ...current, stageId: event.target.value } : current,
+                    )
+                  }
+                  className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                >
+                  <option value="">Sem Estagio</option>
+                  {board.stages.map((stage) => (
+                    <option key={stage.id} value={String(stage.id)}>
+                      {stage.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="space-y-1">
+                <label className="text-xs text-muted-foreground">Email</label>
+                <Input
+                  value={manualLeadForm.email}
+                  onChange={(event) =>
+                    setManualLeadForm((current) =>
+                      current ? { ...current, email: event.target.value } : current,
+                    )
+                  }
+                  placeholder="email@exemplo.com"
+                />
+              </div>
+              <div className="space-y-1">
+                <label className="text-xs text-muted-foreground">Campeonato</label>
+                <Input
+                  value={manualLeadForm.tournament}
+                  onChange={(event) =>
+                    setManualLeadForm((current) =>
+                      current ? { ...current, tournament: event.target.value } : current,
+                    )
+                  }
+                />
+              </div>
+              <div className="space-y-1">
+                <label className="text-xs text-muted-foreground">Categoria</label>
+                <Input
+                  value={manualLeadForm.category}
+                  onChange={(event) =>
+                    setManualLeadForm((current) =>
+                      current ? { ...current, category: event.target.value } : current,
+                    )
+                  }
+                />
+              </div>
+              <div className="space-y-1">
+                <label className="text-xs text-muted-foreground">Cidade</label>
+                <Input
+                  value={manualLeadForm.city}
+                  onChange={(event) =>
+                    setManualLeadForm((current) =>
+                      current ? { ...current, city: event.target.value } : current,
+                    )
+                  }
+                />
+              </div>
+              <div className="space-y-1">
+                <label className="text-xs text-muted-foreground">Time / Jogadores</label>
+                <div className="grid grid-cols-2 gap-2">
+                  <Input
+                    value={manualLeadForm.teamName}
+                    onChange={(event) =>
+                      setManualLeadForm((current) =>
+                        current ? { ...current, teamName: event.target.value } : current,
+                      )
+                    }
+                    placeholder="Time"
+                  />
+                  <Input
+                    inputMode="numeric"
+                    value={manualLeadForm.playersCount}
+                    onChange={(event) =>
+                      setManualLeadForm((current) =>
+                        current
+                          ? { ...current, playersCount: event.target.value }
+                          : current,
+                      )
+                    }
+                    placeholder="Jogadores"
+                  />
+                </div>
+              </div>
+            </div>
+            <div className="flex justify-end gap-2">
+              <Button
+                variant="outline"
+                onClick={() => setManualLeadForm(null)}
+                disabled={savingManualLead}
+              >
+                <X className="h-4 w-4" />
+                Cancelar
+              </Button>
+              <Button
+                onClick={() => void saveManualLead()}
+                disabled={savingManualLead || !manualLeadForm.waId.trim()}
+              >
+                <Save className="h-4 w-4" />
+                Salvar Lead
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
       <Card className="border-border/70">
         <CardHeader className="pb-3">
           <CardTitle className="text-base">Organizar Etapas</CardTitle>
@@ -904,6 +1353,7 @@ export default function PipelineBoardView() {
                 className={cn(
                   "flex items-center gap-2 rounded-lg border border-border/70 bg-background/50 px-3 py-2 transition",
                   dragStageId === stage.id && "opacity-60",
+                  deletingStageId === stage.id && "anim-remove pointer-events-none opacity-70",
                 )}
               >
                 <GripVertical className="h-4 w-4 text-muted-foreground/60" />
@@ -942,8 +1392,8 @@ export default function PipelineBoardView() {
 
           {stageForm && (
             <div className="anim-pop rounded-lg border border-primary/30 bg-primary/5 p-3">
-              <div className="grid gap-3 md:grid-cols-[1fr_auto_auto_auto] md:items-end">
-                <div className="space-y-1">
+              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-12">
+                <div className="space-y-1 md:col-span-2 xl:col-span-6">
                   <label className="text-xs text-muted-foreground">Nome da etapa</label>
                   <Input
                     value={stageForm.name}
@@ -955,7 +1405,7 @@ export default function PipelineBoardView() {
                     placeholder="Ex: Qualificado"
                   />
                 </div>
-                <div className="space-y-1">
+                <div className="space-y-1 xl:col-span-2">
                   <label className="text-xs text-muted-foreground">Cor</label>
                   <input
                     type="color"
@@ -965,21 +1415,24 @@ export default function PipelineBoardView() {
                         current ? { ...current, color: e.target.value } : current,
                       )
                     }
-                    className="h-10 w-14 cursor-pointer rounded-md border border-border bg-background"
+                    className="h-10 w-full max-w-[92px] cursor-pointer rounded-md border border-border bg-background"
                   />
                 </div>
-                <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                  <Switch
-                    checked={stageForm.isActive}
-                    onCheckedChange={(checked) =>
-                      setStageForm((current) =>
-                        current ? { ...current, isActive: checked } : current,
-                      )
-                    }
-                  />
-                  Ativa
+                <div className="space-y-1 xl:col-span-2">
+                  <label className="text-xs text-muted-foreground">Status</label>
+                  <div className="flex h-10 items-center gap-2 rounded-md border border-border/70 px-2">
+                    <Switch
+                      checked={stageForm.isActive}
+                      onCheckedChange={(checked) =>
+                        setStageForm((current) =>
+                          current ? { ...current, isActive: checked } : current,
+                        )
+                      }
+                    />
+                    <span className="text-xs text-muted-foreground">Ativa</span>
+                  </div>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex items-end gap-2 md:col-span-2 xl:col-span-2">
                   <Button
                     size="sm"
                     onClick={() => void saveStage()}
@@ -1006,61 +1459,80 @@ export default function PipelineBoardView() {
 
       <Card className="border-border/70">
         <CardHeader className="pb-3">
-          <CardTitle className="text-base">Filtros do Pipeline</CardTitle>
+          <CardTitle className="text-base">Filtros Principais</CardTitle>
         </CardHeader>
-        <CardContent>
+        <CardContent className="space-y-3">
+          <div className="flex flex-wrap gap-1.5">
+            <Badge variant="outline">Status: {statusFilterLabel[statusFilter]}</Badge>
+            <Badge variant="outline">Handoff: {handoffFilterLabel[handoffFilter]}</Badge>
+            <Badge variant="outline">Bot: {botFilterLabel[botFilter]}</Badge>
+            <Badge variant="outline">Triagem: {triageFilterLabel[triageFilter]}</Badge>
+          </div>
           <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
-            <Input
-              value={searchTerm}
-              onChange={(event) => setSearchTerm(event.target.value)}
-              placeholder="Buscar lead, telefone, cidade..."
-            />
-            <select
-              value={statusFilter}
-              onChange={(event) => setStatusFilter(event.target.value as "all" | LeadStatus)}
-              className="h-11 rounded-lg border border-input bg-background px-3 text-sm"
-            >
-              <option value="all">Status: todos</option>
-              <option value="open">Status: aberto</option>
-              <option value="won">Status: ganho</option>
-              <option value="lost">Status: perdido</option>
-            </select>
-            <select
-              value={handoffFilter}
-              onChange={(event) => setHandoffFilter(event.target.value as "all" | "yes" | "no")}
-              className="h-11 rounded-lg border border-input bg-background px-3 text-sm"
-            >
-              <option value="all">Handoff: todos</option>
-              <option value="yes">Handoff: sim</option>
-              <option value="no">Handoff: nao</option>
-            </select>
-            <select
-              value={botFilter}
-              onChange={(event) => setBotFilter(event.target.value as "all" | "on" | "off")}
-              className="h-11 rounded-lg border border-input bg-background px-3 text-sm"
-            >
-              <option value="all">Bot: todos</option>
-              <option value="on">Bot: ligado</option>
-              <option value="off">Bot: desligado</option>
-            </select>
-            <select
-              value={triageFilter}
-              onChange={(event) => setTriageFilter(event.target.value as "all" | "done" | "pending")}
-              className="h-11 rounded-lg border border-input bg-background px-3 text-sm"
-            >
-              <option value="all">Triagem: todos</option>
-              <option value="done">Triagem: concluida</option>
-              <option value="pending">Triagem: pendente</option>
-            </select>
+            <div className="space-y-1">
+              <label className="text-xs text-muted-foreground">Busca</label>
+              <Input
+                value={searchTerm}
+                onChange={(event) => setSearchTerm(event.target.value)}
+                placeholder="Buscar lead, telefone, cidade..."
+              />
+            </div>
+            <div className="space-y-1">
+              <label className="text-xs text-muted-foreground">Status</label>
+              <select
+                value={statusFilter}
+                onChange={(event) => setStatusFilter(event.target.value as "all" | LeadStatus)}
+                className="h-10 w-full rounded-lg border border-input bg-background px-3 text-sm"
+              >
+                <option value="all">Todos</option>
+                <option value="open">Aberto</option>
+                <option value="won">Ganho</option>
+                <option value="lost">Perdido</option>
+              </select>
+            </div>
+            <div className="space-y-1">
+              <label className="text-xs text-muted-foreground">Handoff</label>
+              <select
+                value={handoffFilter}
+                onChange={(event) => setHandoffFilter(event.target.value as "all" | "yes" | "no")}
+                className="h-10 w-full rounded-lg border border-input bg-background px-3 text-sm"
+              >
+                <option value="all">Todos</option>
+                <option value="yes">Sim</option>
+                <option value="no">Nao</option>
+              </select>
+            </div>
+            <div className="space-y-1">
+              <label className="text-xs text-muted-foreground">Bot</label>
+              <select
+                value={botFilter}
+                onChange={(event) => setBotFilter(event.target.value as "all" | "on" | "off")}
+                className="h-10 w-full rounded-lg border border-input bg-background px-3 text-sm"
+              >
+                <option value="all">Todos</option>
+                <option value="on">Ligado</option>
+                <option value="off">Desligado</option>
+              </select>
+            </div>
+            <div className="space-y-1">
+              <label className="text-xs text-muted-foreground">Triagem</label>
+              <select
+                value={triageFilter}
+                onChange={(event) => setTriageFilter(event.target.value as "all" | "done" | "pending")}
+                className="h-10 w-full rounded-lg border border-input bg-background px-3 text-sm"
+              >
+                <option value="all">Todos</option>
+                <option value="done">Concluida</option>
+                <option value="pending">Pendente</option>
+              </select>
+            </div>
           </div>
         </CardContent>
       </Card>
 
       <div className="flex gap-4 overflow-x-auto pb-4">
-        {renderColumn("Sem Estagio", "#6b7280", null, board.unassigned)}
-        {board.stages.map((stage) =>
-          renderColumn(stage.name, stage.color, stage.id, stage.contacts),
-        )}
+        {renderColumn(null, board.unassigned)}
+        {board.stages.map((stage) => renderColumn(stage, stage.contacts))}
       </div>
 
       {contextMenu && contextMenuPosition && (

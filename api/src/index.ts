@@ -143,6 +143,10 @@ const pipelineBoardPaths = new Set<string>([
   `${config.apiBasePath}/pipeline/board`,
   "/pipeline/board",
 ]);
+const contactsPaths = new Set<string>([
+  `${config.apiBasePath}/contacts`,
+  "/contacts",
+]);
 const contactsPrefix = [
   `${config.apiBasePath}/contacts/`,
   "/contacts/",
@@ -996,6 +1000,241 @@ const handlePipelineBoard = async (req: Request): Promise<Response> => {
   });
 
   return json({ stages, unassigned }, 200, req);
+};
+
+const handleContactCreate = async (req: Request): Promise<Response> => {
+  const current = await getAuthenticatedUser(req);
+  if (current instanceof Response) return current;
+
+  let body: unknown;
+  try {
+    body = await req.json();
+  } catch {
+    return json({ error: "Invalid JSON" }, 400, req);
+  }
+
+  const input =
+    typeof body === "object" && body !== null
+      ? (body as Record<string, unknown>)
+      : {};
+
+  const waId = typeof input.waId === "string" ? input.waId.trim() : "";
+  if (!waId) {
+    return json({ error: "waId is required" }, 400, req);
+  }
+
+  const data: Prisma.ContactUncheckedCreateInput = {
+    waId,
+    leadStatus: "open",
+    triageCompleted: false,
+    handoffRequested: false,
+    handoffAt: null,
+    handoffReason: null,
+    botEnabled: true,
+  };
+
+  if (hasOwn(input, "name")) {
+    const value = normalizeNullableText(input.name);
+    if (value === undefined) return json({ error: "name must be a string or null" }, 400, req);
+    data.name = value;
+  }
+  if (hasOwn(input, "email")) {
+    const value = normalizeNullableText(input.email);
+    if (value === undefined) return json({ error: "email must be a string or null" }, 400, req);
+    data.email = value;
+  }
+  if (hasOwn(input, "tournament")) {
+    const value = normalizeNullableText(input.tournament);
+    if (value === undefined) {
+      return json({ error: "tournament must be a string or null" }, 400, req);
+    }
+    data.tournament = value;
+  }
+  if (hasOwn(input, "eventDate")) {
+    const value = normalizeNullableText(input.eventDate);
+    if (value === undefined) {
+      return json({ error: "eventDate must be a string or null" }, 400, req);
+    }
+    data.eventDate = value;
+  }
+  if (hasOwn(input, "category")) {
+    const value = normalizeNullableText(input.category);
+    if (value === undefined) {
+      return json({ error: "category must be a string or null" }, 400, req);
+    }
+    data.category = value;
+  }
+  if (hasOwn(input, "city")) {
+    const value = normalizeNullableText(input.city);
+    if (value === undefined) return json({ error: "city must be a string or null" }, 400, req);
+    data.city = value;
+  }
+  if (hasOwn(input, "teamName")) {
+    const value = normalizeNullableText(input.teamName);
+    if (value === undefined) {
+      return json({ error: "teamName must be a string or null" }, 400, req);
+    }
+    data.teamName = value;
+  }
+  if (hasOwn(input, "playersCount")) {
+    const value = normalizePositiveInt(input.playersCount);
+    if (value === undefined) {
+      return json({ error: "playersCount must be numeric or null" }, 400, req);
+    }
+    data.playersCount = value;
+  }
+  if (hasOwn(input, "source")) {
+    const value = normalizeNullableText(input.source);
+    if (value === undefined) return json({ error: "source must be a string or null" }, 400, req);
+    data.source = value;
+  }
+  if (hasOwn(input, "notes")) {
+    const value = normalizeNullableText(input.notes);
+    if (value === undefined) return json({ error: "notes must be a string or null" }, 400, req);
+    data.notes = value;
+  }
+  if (hasOwn(input, "age")) {
+    const value = normalizeNullableText(input.age);
+    if (value === undefined) return json({ error: "age must be a string or null" }, 400, req);
+    data.age = value;
+  }
+  if (hasOwn(input, "level")) {
+    const value = normalizeNullableText(input.level);
+    if (value === undefined) return json({ error: "level must be a string or null" }, 400, req);
+    data.level = value;
+  }
+  if (hasOwn(input, "objective")) {
+    const value = normalizeNullableText(input.objective);
+    if (value === undefined) {
+      return json({ error: "objective must be a string or null" }, 400, req);
+    }
+    data.objective = value;
+  }
+
+  if (hasOwn(input, "stageId")) {
+    const stageId = input.stageId === null ? null : Number(input.stageId);
+    if (stageId !== null && !Number.isInteger(stageId)) {
+      return json({ error: "stageId must be an integer or null" }, 400, req);
+    }
+    if (stageId !== null) {
+      const stage = await current.prisma.pipelineStage.findUnique({
+        where: { id: stageId },
+        select: { id: true },
+      });
+      if (!stage) {
+        return json({ error: "Pipeline stage not found" }, 404, req);
+      }
+    }
+    data.stageId = stageId;
+  }
+
+  if (hasOwn(input, "leadStatus")) {
+    const leadStatus =
+      typeof input.leadStatus === "string" ? input.leadStatus.trim().toLowerCase() : "";
+    if (!VALID_LEAD_STATUS.has(leadStatus)) {
+      return json({ error: "leadStatus must be one of: open, won, lost" }, 400, req);
+    }
+    data.leadStatus = leadStatus;
+  }
+
+  let triageCompleted: boolean | undefined;
+  if (hasOwn(input, "triageCompleted")) {
+    if (typeof input.triageCompleted !== "boolean") {
+      return json({ error: "triageCompleted must be a boolean" }, 400, req);
+    }
+    triageCompleted = input.triageCompleted;
+  }
+
+  let handoffRequested: boolean | undefined;
+  if (hasOwn(input, "handoffRequested")) {
+    if (typeof input.handoffRequested !== "boolean") {
+      return json({ error: "handoffRequested must be a boolean" }, 400, req);
+    }
+    handoffRequested = input.handoffRequested;
+  }
+
+  let handoffReason: string | null | undefined;
+  if (hasOwn(input, "handoffReason")) {
+    const value = normalizeNullableText(input.handoffReason);
+    if (value === undefined) {
+      return json({ error: "handoffReason must be a string or null" }, 400, req);
+    }
+    handoffReason = value;
+  }
+
+  let handoffAt: Date | null | undefined;
+  if (hasOwn(input, "handoffAt")) {
+    const parsed = parseDateInput(input.handoffAt);
+    if (parsed === undefined) {
+      return json({ error: "handoffAt must be a valid date string or null" }, 400, req);
+    }
+    handoffAt = parsed;
+  }
+
+  let botEnabled = true;
+  if (hasOwn(input, "botEnabled")) {
+    if (typeof input.botEnabled !== "boolean") {
+      return json({ error: "botEnabled must be a boolean" }, 400, req);
+    }
+    botEnabled = input.botEnabled;
+  }
+  data.botEnabled = botEnabled;
+
+  const computedTriageSnapshot: ContactTriageSnapshot = {
+    name: data.name ?? null,
+    email: data.email ?? null,
+    tournament: data.tournament ?? null,
+    eventDate: data.eventDate ?? null,
+    category: data.category ?? null,
+    city: data.city ?? null,
+    teamName: data.teamName ?? null,
+    playersCount: typeof data.playersCount === "number" ? data.playersCount : null,
+  };
+  data.triageCompleted =
+    triageCompleted ?? computeMissingLeadFields(computedTriageSnapshot).length === 0;
+
+  const finalHandoffRequested = !botEnabled ? true : (handoffRequested ?? false);
+  data.handoffRequested = finalHandoffRequested;
+  if (finalHandoffRequested) {
+    data.handoffAt = handoffAt ?? new Date();
+    if (handoffReason !== undefined) {
+      data.handoffReason = handoffReason;
+    } else if (!botEnabled) {
+      data.handoffReason = "Bot desativado manualmente no cadastro";
+    }
+  } else {
+    data.handoffAt = null;
+    data.handoffReason = null;
+  }
+
+  let contact;
+  try {
+    contact = await current.prisma.contact.create({
+      data,
+      include: {
+        tags: { include: { tag: true } },
+        messages: {
+          orderBy: { createdAt: "desc" },
+          take: 1,
+          select: { body: true, createdAt: true },
+        },
+      },
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message.toLowerCase().includes("unique")) {
+      return json({ error: "Contact with this waId already exists" }, 409, req);
+    }
+    console.error("Failed to create contact", error);
+    return json({ error: "Failed to create contact" }, 500, req);
+  }
+
+  broadcast("contact:updated", {
+    waId: contact.waId,
+    action: "contact:created",
+    contact: contact as unknown as Record<string, unknown>,
+  });
+  void emitAlertsSummary(current.prisma);
+  return json(contact, 201, req);
 };
 
 const handleContactStageUpdate = async (
@@ -2260,6 +2499,9 @@ const server = Bun.serve<WsUserData>({
     }
     if (pipelineBoardPaths.has(url.pathname) && req.method === "GET") {
       return handlePipelineBoard(req);
+    }
+    if (contactsPaths.has(url.pathname) && req.method === "POST") {
+      return handleContactCreate(req);
     }
 
     // ── Contact-level routes (/contacts/:waId/...) ───────────
