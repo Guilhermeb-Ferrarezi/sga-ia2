@@ -9,6 +9,7 @@ export interface DashboardOverview {
 
 export interface DashboardConversation {
   phone: string;
+  name: string | null;
   messagesCount: number;
   lastMessageAt: string;
   lastMessagePreview: string;
@@ -65,11 +66,12 @@ export class DashboardService {
       select: {
         id: true,
         waId: true,
+        name: true,
       },
     });
-    const contactById = new Map<number, { waId: string }>();
+    const contactById = new Map<number, { waId: string; name: string | null }>();
     for (const contact of contacts) {
-      contactById.set(contact.id, { waId: contact.waId });
+      contactById.set(contact.id, { waId: contact.waId, name: contact.name });
     }
 
     const latestTurns = await prisma.message.findMany({
@@ -95,6 +97,7 @@ export class DashboardService {
       return [
         {
           phone: contact.waId,
+          name: contact.name,
           messagesCount: item._count._all,
           lastMessageAt: (item._max.createdAt ?? new Date(0)).toISOString(),
           lastMessagePreview: previewMap.get(item.contactId) ?? "",

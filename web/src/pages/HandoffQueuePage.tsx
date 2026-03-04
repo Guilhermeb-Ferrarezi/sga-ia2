@@ -1,0 +1,322 @@
+import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  ArrowRightCircle,
+  MessageCircle,
+  RefreshCcw,
+  UserCheck,
+  UserMinus,
+} from "lucide-react";
+import { useNavigate } from "react-router-dom";
+import { useAuth } from "@/contexts/AuthContext";
+import { useToast } from "@/contexts/ToastContext";
+import { useOperationalAlerts } from "@/contexts/OperationalAlertsContext";
+import { useWebSocket, type WsEventPayload } from "@/contexts/WebSocketContext";
+import { api, type HandoffQueueItem } from "@/lib/api";
+import { cn } from "@/lib/utils";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+
+const formatDate = (value: string | null): string => {
+  if (!value) return "-";
+  return new Intl.DateTimeFormat("pt-BR", {
+    dateStyle: "short",
+    timeStyle: "short",
+  }).format(new Date(value));
+};
+
+const formatWait = (minutes: number): string => {
+  const hours = Math.floor(minutes / 60);
+  const remain = minutes % 60;
+  if (hours <= 0) return `${remain} min`;
+  return `${hours}h ${remain}m`;
+};
+
+const slaBadgeClass: Record<string, string> = {
+  ok: "border-emerald-500/50 bg-emerald-500/10 text-emerald-200",
+  warning: "border-amber-500/50 bg-amber-500/10 text-amber-200",
+  critical: "border-rose-500/50 bg-rose-500/10 text-rose-200",
+};
+
+const slaLabel: Record<string, string> = {
+  ok: "SLA ok",
+  warning: "SLA atencao",
+  critical: "SLA critico",
+};
+
+export default function HandoffQueuePage() {
+  const navigate = useNavigate();
+  const { token, user } = useAuth();
+  const { toast } = useToast();
+  const { subscribe } = useWebSocket();
+  const { refresh: refreshAlerts } = useOperationalAlerts();
+  const [items, setItems] = useState<HandoffQueueItem[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [updatingWaId, setUpdatingWaId] = useState<string | null>(null);
+  const [onlyMine, setOnlyMine] = useState(false);
+
+  const load = useCallback(async () => {
+    if (!token) return;
+    setLoading(true);
+    try {
+      const data = await api.handoffQueue(token, { onlyMine });
+      setItems(data);
+    } catch (err: unknown) {
+      toast({
+        title: "Falha ao carregar fila",
+        description: err instanceof Error ? err.message : "Tente novamente.",
+        variant: "error",
+      });
+    } finally {
+      setLoading(false);
+    }
+  }, [token, onlyMine, toast]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  useEffect(() => {
+    return subscribe((event: WsEventPayload) => {
+      if (
+        event.type === "contact:updated" ||
+        event.type === "contact:deleted" ||
+        event.type === "handoff:updated" ||
+        event.type === "task:updated"
+      ) {
+        void load();
+      }
+    });
+  }, [subscribe, load]);
+
+  const assume = async (item: HandoffQueueItem) => {
+    if (!token || !user) return;
+    setUpdatingWaId(item.waId);
+    try {
+      await api.assignHandoff(token, item.waId, user.email);
+      toast({ title: "Atendimento assumido", variant: "success" });
+      await Promise.all([load(), refreshAlerts()]);
+    } catch (err: unknown) {
+      toast({
+        title: "Falha ao assumir atendimento",
+        description: err instanceof Error ? err.message : "Tente novamente.",
+        variant: "error",
+      });
+    } finally {
+      setUpdatingWaId(null);
+    }
+  };
+
+  const release = async (item: HandoffQueueItem) => {
+    if (!token) return;
+    setUpdatingWaId(item.waId);
+    try {
+      await api.assignHandoff(token, item.waId, null);
+      toast({ title: "Atendimento liberado", variant: "success" });
+      await Promise.all([load(), refreshAlerts()]);
+    } catch (err: unknown) {
+      toast({
+        title: "Falha ao liberar atendimento",
+        description: err instanceof Error ? err.message : "Tente novamente.",
+        variant: "error",
+      });
+    } finally {
+      setUpdatingWaId(null);
+    }
+  };
+
+  const resumeBot = async (item: HandoffQueueItem) => {
+    if (!token) return;
+    setUpdatingWaId(item.waId);
+    try {
+      await api.updateContact(token, item.waId, {
+        handoffRequested: false,
+        handoffReason: null,
+        handoffAt: null,
+        botEnabled: true,
+      });
+      toast({ title: "Bot retomado para o contato", variant: "success" });
+      await Promise.all([load(), refreshAlerts()]);
+    } catch (err: unknown) {
+      toast({
+        title: "Falha ao retomar bot",
+        description: err instanceof Error ? err.message : "Tente novamente.",
+        variant: "error",
+      });
+    } finally {
+      setUpdatingWaId(null);
+    }
+  };
+
+  const summary = useMemo(
+    () => ({
+      total: items.length,
+      critical: items.filter((item) => item.slaLevel === "critical").length,
+      warning: items.filter((item) => item.slaLevel === "warning").length,
+      assigned: items.filter((item) => Boolean(item.assignedTo)).length,
+    }),
+    [items],
+  );
+
+  return (
+    <div className="stagger space-y-5">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="text-xl font-bold">Fila de Handoff Humano</h2>
+        <div className="flex items-center gap-2">
+          <label className="flex items-center gap-2 text-xs text-muted-foreground">
+            <input
+              type="checkbox"
+              checked={onlyMine}
+              onChange={(event) => setOnlyMine(event.target.checked)}
+            />
+            Mostrar so meus atendimentos
+          </label>
+          <Button variant="secondary" size="sm" onClick={() => void load()} disabled={loading}>
+            <RefreshCcw className={cn("h-4 w-4", loading && "animate-spin")} />
+            Atualizar
+          </Button>
+        </div>
+      </div>
+
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <Card className="border-border/70">
+          <CardContent className="p-3">
+            <p className="text-[11px] uppercase tracking-[0.12em] text-muted-foreground">Total</p>
+            <p className="mt-1 text-2xl font-bold">{summary.total}</p>
+          </CardContent>
+        </Card>
+        <Card className="border-border/70">
+          <CardContent className="p-3">
+            <p className="text-[11px] uppercase tracking-[0.12em] text-muted-foreground">Criticos</p>
+            <p className="mt-1 text-2xl font-bold text-rose-300">{summary.critical}</p>
+          </CardContent>
+        </Card>
+        <Card className="border-border/70">
+          <CardContent className="p-3">
+            <p className="text-[11px] uppercase tracking-[0.12em] text-muted-foreground">Em atencao</p>
+            <p className="mt-1 text-2xl font-bold text-amber-300">{summary.warning}</p>
+          </CardContent>
+        </Card>
+        <Card className="border-border/70">
+          <CardContent className="p-3">
+            <p className="text-[11px] uppercase tracking-[0.12em] text-muted-foreground">Atribuidos</p>
+            <p className="mt-1 text-2xl font-bold text-cyan-300">{summary.assigned}</p>
+          </CardContent>
+        </Card>
+      </div>
+
+      <div className="space-y-3">
+        {!loading && !items.length && (
+          <p className="text-sm text-muted-foreground">
+            Nenhum contato aguardando atendimento humano.
+          </p>
+        )}
+        {items.map((item) => {
+          const isUpdating = updatingWaId === item.waId;
+          return (
+            <Card key={item.waId} className="border-border/70">
+              <CardHeader className="pb-2">
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div>
+                    <CardTitle className="text-base">{item.name || item.waId}</CardTitle>
+                    <p className="text-xs text-muted-foreground">{item.waId}</p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <Badge
+                      variant="outline"
+                      className={cn("h-5 px-2 text-[10px]", slaBadgeClass[item.slaLevel])}
+                    >
+                      {slaLabel[item.slaLevel]}
+                    </Badge>
+                    <Badge variant="outline" className="h-5 px-2 text-[10px]">
+                      {formatWait(item.waitMinutes)}
+                    </Badge>
+                    {item.stage && (
+                      <Badge variant="outline" className="h-5 px-2 text-[10px]">
+                        {item.stage.name}
+                      </Badge>
+                    )}
+                  </div>
+                </div>
+              </CardHeader>
+              <CardContent className="space-y-2 pt-0">
+                <p className="text-sm text-foreground/90">
+                  <span className="text-muted-foreground">Motivo: </span>
+                  {item.handoffReason || "Nao informado"}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  Solicitado em: {formatDate(item.handoffAt)}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  Atribuido para: {item.assignedTo || "Nao atribuido"}
+                </p>
+                {item.latestMessage && (
+                  <p className="rounded-md border border-border/60 bg-background/50 px-2 py-1 text-sm text-foreground/90">
+                    "{item.latestMessage.body}"
+                  </p>
+                )}
+                {item.openTasks.length > 0 && (
+                  <div className="space-y-1">
+                    <p className="text-xs uppercase tracking-[0.12em] text-muted-foreground">
+                      Tarefas abertas
+                    </p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {item.openTasks.map((task) => (
+                        <Badge key={task.id} variant="outline" className="h-5 px-2 text-[10px]">
+                          {task.title}
+                        </Badge>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                <div className="flex flex-wrap justify-end gap-2 pt-1">
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    onClick={() =>
+                      navigate(
+                        `/dashboard/conversations?phone=${encodeURIComponent(item.waId)}`,
+                      )
+                    }
+                  >
+                    <MessageCircle className="h-4 w-4" />
+                    Abrir chat
+                  </Button>
+                  {!item.assignedTo || item.assignedTo !== user?.email ? (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => void assume(item)}
+                      disabled={isUpdating}
+                    >
+                      <UserCheck className="h-4 w-4" />
+                      Assumir
+                    </Button>
+                  ) : (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => void release(item)}
+                      disabled={isUpdating}
+                    >
+                      <UserMinus className="h-4 w-4" />
+                      Liberar
+                    </Button>
+                  )}
+                  <Button
+                    size="sm"
+                    onClick={() => void resumeBot(item)}
+                    disabled={isUpdating}
+                  >
+                    <ArrowRightCircle className="h-4 w-4" />
+                    Retomar bot
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          );
+        })}
+      </div>
+    </div>
+  );
+}

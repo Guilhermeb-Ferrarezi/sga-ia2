@@ -26,9 +26,20 @@ model Contact {
   id                Int            @id @default(autoincrement())
   waId              String         @unique
   name              String?
+  email             String?
+  tournament        String?
+  eventDate         String?
+  category          String?
+  city              String?
+  teamName          String?
+  playersCount      Int?
   stageId           Int?
   stage             PipelineStage? @relation(fields: [stageId], references: [id], onDelete: SetNull)
   leadStatus        String         @default("open")
+  triageCompleted   Boolean        @default(false)
+  handoffRequested  Boolean        @default(false)
+  handoffReason     String?
+  handoffAt         DateTime?
   source            String?
   notes             String?
   botEnabled        Boolean        @default(true)

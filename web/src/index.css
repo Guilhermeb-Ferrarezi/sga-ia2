@@ -28,18 +28,52 @@
     --radius: 0.85rem;
   }
 
+  html {
+    font-size: 15.5px;
+    scroll-behavior: smooth;
+  }
+
   * {
     @apply border-border;
+  }
+
+  #root {
+    min-height: 100vh;
+    animation: appReveal 420ms ease both;
   }
 
   body {
     @apply bg-background text-foreground antialiased;
     font-family: "Space Grotesk", "Poppins", "Segoe UI", sans-serif;
+    line-height: 1.48;
     min-height: 100vh;
     background-image:
       radial-gradient(circle at 15% -10%, rgba(242, 163, 90, 0.22), transparent 35%),
       radial-gradient(circle at 85% 0%, rgba(41, 209, 189, 0.16), transparent 30%),
       linear-gradient(180deg, rgba(10, 16, 24, 0.98) 0%, rgba(12, 20, 30, 0.98) 100%);
+  }
+
+  @media (min-width: 1280px) {
+    html {
+      font-size: 16px;
+    }
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    button,
+    [role="button"],
+    a,
+    input,
+    select,
+    textarea {
+      transition:
+        transform 180ms ease,
+        box-shadow 260ms ease,
+        background-color 260ms ease,
+        border-color 260ms ease,
+        color 220ms ease,
+        opacity 220ms ease;
+    }
   }
 }
 
@@ -52,12 +86,13 @@
     );
     backdrop-filter: blur(8px);
     border: 1px solid rgba(148, 163, 184, 0.18);
+    box-shadow: 0 18px 44px rgba(8, 14, 24, 0.35);
   }
 
   .stagger > * {
     opacity: 0;
-    transform: translateY(16px);
-    animation: fadeUp 0.55s ease forwards;
+    transform: translateY(20px);
+    animation: fadeUp 0.55s cubic-bezier(0.19, 1, 0.22, 1) forwards;
   }
 
   .stagger > *:nth-child(2) {
@@ -67,12 +102,59 @@
   .stagger > *:nth-child(3) {
     animation-delay: 0.16s;
   }
+
+  .stagger > *:nth-child(4) {
+    animation-delay: 0.24s;
+  }
+
+  .stagger > *:nth-child(5) {
+    animation-delay: 0.32s;
+  }
+
+  .interactive-lift {
+    transition: transform 200ms ease, box-shadow 260ms ease;
+  }
+
+  .interactive-lift:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 16px 36px rgba(9, 16, 28, 0.34);
+  }
+
+  .interactive-lift:active {
+    transform: translateY(-1px) scale(0.99);
+  }
+
+  .anim-pop {
+    animation: popIn 300ms cubic-bezier(0.17, 0.89, 0.32, 1.28) both;
+  }
 }
 
 @keyframes fadeUp {
   from {
     opacity: 0;
     transform: translateY(16px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes popIn {
+  0% {
+    opacity: 0;
+    transform: scale(0.95) translateY(8px);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+@keyframes appReveal {
+  from {
+    opacity: 0.72;
+    transform: translateY(10px);
   }
   to {
     opacity: 1;
