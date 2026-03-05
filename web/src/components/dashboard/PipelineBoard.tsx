@@ -962,7 +962,7 @@ export default function PipelineBoardView() {
         className={cn(
           "flex w-72 shrink-0 flex-col rounded-xl border border-border/60 bg-card/50 transition",
           leadDropTargetKey === stageKey && "border-primary shadow-[0_0_0_2px_hsl(var(--primary)/0.35)]",
-          deletingStageId === stageId && "anim-remove pointer-events-none opacity-70",
+          stageId !== null && deletingStageId === stageId && "anim-remove pointer-events-none opacity-70",
         )}
         onDragOver={(e) => e.preventDefault()}
         onDrop={() => void handleDrop(stageId)}
