@@ -1,4 +1,4 @@
-import { AlertTriangle, Clock3, LogOut } from "lucide-react";
+import { AlertTriangle, Clock3, LogOut, Menu, X } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { useOperationalAlerts } from "@/contexts/OperationalAlertsContext";
 import { useWebSocket, type WsConnectionStatus } from "@/contexts/WebSocketContext";
@@ -18,7 +18,15 @@ const statusLabel: Record<WsConnectionStatus, string> = {
   disconnected: "Desconectado",
 };
 
-export default function Header() {
+interface HeaderProps {
+  mobileMenuOpen: boolean;
+  onToggleMobileMenu: () => void;
+}
+
+export default function Header({
+  mobileMenuOpen,
+  onToggleMobileMenu,
+}: HeaderProps) {
   const { user, logout } = useAuth();
   const { status } = useWebSocket();
   const { summary } = useOperationalAlerts();
@@ -28,14 +36,34 @@ export default function Header() {
   return (
     <header className="glass-panel sticky top-0 z-40 border-b border-border/40 animate-fade-up">
       <div className="container flex h-16 items-center justify-between gap-4 px-5">
-        <div className="space-y-0.5">
-          <p className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
-            SG Esports IA
-          </p>
-          <h1 className="text-lg font-bold leading-tight">Central de Conversas</h1>
+        <div className="flex min-w-0 items-center gap-2.5">
+          <Button
+            type="button"
+            size="icon"
+            variant="outline"
+            className="shrink-0 lg:hidden"
+            onClick={onToggleMobileMenu}
+            aria-label={mobileMenuOpen ? "Fechar menu" : "Abrir menu"}
+            aria-expanded={mobileMenuOpen}
+            aria-controls="mobile-sidebar"
+          >
+            {mobileMenuOpen ? (
+              <X className="h-4 w-4" />
+            ) : (
+              <Menu className="h-4 w-4" />
+            )}
+          </Button>
+          <div className="min-w-0 space-y-0.5">
+            <p className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
+              SG Esports IA
+            </p>
+            <h1 className="truncate text-base font-bold leading-tight sm:text-lg">
+              Central de Conversas
+            </h1>
+          </div>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex shrink-0 items-center gap-2 sm:gap-3">
           {/* WS connection indicator */}
           <div className="flex items-center gap-1.5" title={statusLabel[status]}>
             <span className={cn("h-2.5 w-2.5 rounded-full", statusColor[status])} />
@@ -73,13 +101,13 @@ export default function Header() {
               {user.email.slice(0, 2).toUpperCase()}
             </AvatarFallback>
           </Avatar>
-          <div className="hidden text-right sm:block">
+          <div className="hidden text-right lg:block">
             <p className="text-sm font-medium">{user.email}</p>
             <p className="text-xs text-muted-foreground">{user.role}</p>
           </div>
           <Button variant="outline" size="sm" className="ml-1" onClick={logout}>
             <LogOut className="h-4 w-4" />
-            <span className="hidden sm:inline ml-1">Sair</span>
+            <span className="ml-1 hidden md:inline">Sair</span>
           </Button>
         </div>
       </div>
