@@ -1095,16 +1095,17 @@ export default function PipelineBoardView() {
         </div>
         <div className="flex items-center gap-1">
           <Input
-            type="number"
-            min={1}
-            max={totalPages}
+            type="text"
+            inputMode="numeric"
+            pattern="[0-9]*"
             value={columnPageInput[stageKey] ?? ""}
-            onChange={(event) =>
+            onChange={(event) => {
+              const sanitized = event.target.value.replace(/\D+/g, "");
               setColumnPageInput((prev) => ({
                 ...prev,
-                [stageKey]: event.target.value,
-              }))
-            }
+                [stageKey]: sanitized,
+              }));
+            }}
             onKeyDown={(event) => {
               if (event.key !== "Enter") return;
               const nextPage = Number(columnPageInput[stageKey] ?? "");

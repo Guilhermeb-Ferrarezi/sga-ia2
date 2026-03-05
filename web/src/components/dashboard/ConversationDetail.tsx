@@ -15,6 +15,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
+import LoadingScreen from "@/components/ui/loading-screen";
 
 const formatDateTime = (value: string): string =>
   new Intl.DateTimeFormat("pt-BR", {
@@ -152,17 +153,20 @@ export default function ConversationDetail({
       <CardContent className="flex-1 p-0">
         <ScrollArea className="h-[460px]">
           <div className="space-y-3 p-4">
-            {loading && (
-              <p className="text-sm text-muted-foreground">
-                Carregando mensagens...
-              </p>
-            )}
+            {loading ? (
+              <LoadingScreen
+                variant="content"
+                className="min-h-[360px] px-2 py-6"
+                title="Carregando chat"
+                description="Buscando mensagens desta conversa."
+              />
+            ) : null}
             {!loading && !turns.length && (
               <p className="text-sm text-muted-foreground">
                 Sem mensagens para este contato.
               </p>
             )}
-            {turns.map((turn) => (
+            {!loading && turns.map((turn) => (
               <div
                 key={turn.id}
                 className={cn(
