@@ -1,4 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   Bot,
   BotOff,
@@ -18,7 +20,9 @@ import {
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/contexts/AuthContext";
 import { useToast } from "@/contexts/ToastContext";
-import { useWebSocket, type WsEventPayload } from "@/contexts/WebSocketContext";
+import { useRetry } from "@/hooks/useRetry";
+import { useSavedFilters } from "@/hooks/useSavedFilters";
+import { useWebSocket } from "@/contexts/WebSocketContext";
 import {
   api,
   type ContactUpdateInput,
@@ -32,7 +36,6 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Switch } from "@/components/ui/switch";
@@ -80,6 +83,17 @@ const triageFilterLabel: Record<"all" | "done" | "pending", string> = {
   pending: "pendente",
 };
 
+const colorPresets = [
+  "#06b6d4",
+  "#22c55e",
+  "#3b82f6",
+  "#eab308",
+  "#f97316",
+  "#ef4444",
+  "#a855f7",
+  "#6b7280",
+];
+
 const normalizeLeadStatus = (value: string | null | undefined): LeadStatus => {
   if (value === "won" || value === "lost") return value;
   return "open";
@@ -106,6 +120,63 @@ const findContactInBoard = (
   }
 
   return null;
+};
+
+const moveContactInBoard = (
+  board: PipelineBoard,
+  waId: string,
+  targetStageId: number | null,
+): PipelineBoard => {
+  const nextStages = board.stages.map((stage) => ({
+    ...stage,
+    contacts: [...stage.contacts],
+  }));
+  let nextUnassigned = [...board.unassigned];
+  let sourceStageId: number | null = null;
+  let contactToMove: PipelineContact | null = null;
+
+  const unassignedIndex = nextUnassigned.findIndex((contact) => contact.waId === waId);
+  if (unassignedIndex >= 0) {
+    sourceStageId = null;
+    [contactToMove] = nextUnassigned.splice(unassignedIndex, 1);
+  } else {
+    for (const stage of nextStages) {
+      const contactIndex = stage.contacts.findIndex((contact) => contact.waId === waId);
+      if (contactIndex < 0) continue;
+      sourceStageId = stage.id;
+      [contactToMove] = stage.contacts.splice(contactIndex, 1);
+      break;
+    }
+  }
+
+  if (!contactToMove || sourceStageId === targetStageId) {
+    return board;
+  }
+
+  const movedContact: PipelineContact = {
+    ...contactToMove,
+    stageId: targetStageId,
+  };
+
+  if (targetStageId === null) {
+    nextUnassigned = [movedContact, ...nextUnassigned];
+    return {
+      ...board,
+      unassigned: nextUnassigned,
+      stages: nextStages,
+    };
+  }
+
+  const targetStage = nextStages.find((stage) => stage.id === targetStageId);
+  if (!targetStage) return board;
+
+  targetStage.contacts = [movedContact, ...targetStage.contacts];
+
+  return {
+    ...board,
+    unassigned: nextUnassigned,
+    stages: nextStages,
+  };
 };
 
 type ContextMenuState = {
@@ -186,11 +257,56 @@ const buildDetailsForm = (contact: PipelineContact): DetailsFormState => ({
   botEnabled: contact.botEnabled,
 });
 
+type VirtualizedContactListProps = {
+  contacts: PipelineContact[];
+  stageId: number | null;
+  renderContactCard: (contact: PipelineContact, stageId: number | null) => JSX.Element;
+};
+
+function VirtualizedContactList({ contacts, stageId, renderContactCard }: VirtualizedContactListProps) {
+  const parentRef = useRef<HTMLDivElement | null>(null);
+  const rowVirtualizer = useVirtualizer({
+    count: contacts.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => 132,
+    overscan: 8,
+  });
+
+  if (!contacts.length) {
+    return (
+      <p className="px-2 py-4 text-center text-xs text-muted-foreground">
+        Nenhum contato
+      </p>
+    );
+  }
+
+  return (
+    <div ref={parentRef} className="h-full overflow-y-auto p-2">
+      <div className="relative" style={{ height: `${rowVirtualizer.getTotalSize()}px` }}>
+        {rowVirtualizer.getVirtualItems().map((virtualRow) => {
+          const contact = contacts[virtualRow.index];
+          if (!contact) return null;
+          return (
+            <div
+              key={contact.waId}
+              className="absolute left-0 top-0 w-full"
+              style={{ transform: `translateY(${virtualRow.start}px)` }}
+            >
+              {renderContactCard(contact, stageId)}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 export default function PipelineBoardView() {
   const navigate = useNavigate();
-  const { token, logout } = useAuth();
+  const { token, logout, user } = useAuth();
   const { toast } = useToast();
-  const { subscribe } = useWebSocket();
+  const { run: retryRun } = useRetry();
+  const { subscribeFiltered } = useWebSocket();
   const [board, setBoard] = useState<PipelineBoard | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -201,6 +317,7 @@ export default function PipelineBoardView() {
   const [dragStageId, setDragStageId] = useState<number | null>(null);
   const [leadDropTargetKey, setLeadDropTargetKey] = useState<string | null>(null);
   const [movedLeadWaId, setMovedLeadWaId] = useState<string | null>(null);
+  const [movingLeadWaId, setMovingLeadWaId] = useState<string | null>(null);
   const [stageForm, setStageForm] = useState<StageFormState | null>(null);
   const [savingStage, setSavingStage] = useState(false);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
@@ -210,13 +327,17 @@ export default function PipelineBoardView() {
   const [savingDetails, setSavingDetails] = useState(false);
   const [tagsCatalog, setTagsCatalog] = useState<Tag[]>([]);
   const [processingWaId, setProcessingWaId] = useState<string | null>(null);
-  const [searchTerm, setSearchTerm] = useState("");
-  const [statusFilter, setStatusFilter] = useState<"all" | LeadStatus>("all");
-  const [handoffFilter, setHandoffFilter] = useState<"all" | "yes" | "no">("all");
-  const [botFilter, setBotFilter] = useState<"all" | "on" | "off">("all");
-  const [triageFilter, setTriageFilter] = useState<"all" | "done" | "pending">("all");
-  const [columnPage, setColumnPage] = useState<Record<string, number>>({});
-  const [columnPageInput, setColumnPageInput] = useState<Record<string, string>>({});
+
+  const pipelineFilterDefaults = {
+    searchTerm: "" as string,
+    statusFilter: "all" as "all" | LeadStatus,
+    handoffFilter: "all" as "all" | "yes" | "no",
+    botFilter: "all" as "all" | "on" | "off",
+    triageFilter: "all" as "all" | "done" | "pending",
+  };
+  const [pFilters, setPFilter] = useSavedFilters("pipeline", pipelineFilterDefaults);
+  const { searchTerm, statusFilter, handoffFilter, botFilter, triageFilter } = pFilters;
+
   const [deletingStageId, setDeletingStageId] = useState<number | null>(null);
   const [deletingLeadWaId, setDeletingLeadWaId] = useState<string | null>(null);
   const [inlineStageTitle, setInlineStageTitle] = useState<{ id: number; name: string } | null>(
@@ -225,8 +346,16 @@ export default function PipelineBoardView() {
   const [savingInlineStageTitle, setSavingInlineStageTitle] = useState(false);
   const [manualLeadForm, setManualLeadForm] = useState<ManualLeadFormState | null>(null);
   const [savingManualLead, setSavingManualLead] = useState(false);
+  const canManageLeads = user?.role === "ADMIN";
+  const contextMenuRef = useRef<HTMLDivElement | null>(null);
+  const [contextMenuMeasuredHeight, setContextMenuMeasuredHeight] = useState<number | null>(
+    null,
+  );
 
-  const PAGE_SIZE = 10;
+  const ROW_HEIGHT_ESTIMATE = 96;
+  const COLUMN_BASE_HEIGHT = 150;
+  const COLUMN_MIN_HEIGHT = 260;
+  const COLUMN_MAX_HEIGHT = 620;
 
   const load = useCallback(async () => {
     if (!token) return;
@@ -255,16 +384,11 @@ export default function PipelineBoardView() {
   }, [load]);
 
   useEffect(() => {
-    return subscribe((event: WsEventPayload) => {
-      if (
-        event.type === "contact:updated" ||
-        event.type === "contact:deleted" ||
-        event.type === "pipeline:updated"
-      ) {
-        void load();
-      }
-    });
-  }, [subscribe, load]);
+    return subscribeFiltered(
+      () => { void load(); },
+      { types: ["contact:updated", "contact:deleted", "pipeline:updated"] },
+    );
+  }, [subscribeFiltered, load]);
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -287,6 +411,25 @@ export default function PipelineBoardView() {
     };
   }, [contextMenu]);
 
+  useLayoutEffect(() => {
+    if (!contextMenu) {
+      setContextMenuMeasuredHeight(null);
+      return;
+    }
+
+    const measure = () => {
+      const nextHeight = contextMenuRef.current?.getBoundingClientRect().height;
+      if (!nextHeight) return;
+      setContextMenuMeasuredHeight((prev) =>
+        prev !== null && Math.abs(prev - nextHeight) < 1 ? prev : nextHeight,
+      );
+    };
+
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, [contextMenu, board?.stages.length]);
+
   useEffect(() => {
     if (!board || !detailsContact) return;
     const refreshed = findContactInBoard(board, detailsContact.waId);
@@ -306,11 +449,6 @@ export default function PipelineBoardView() {
     setDetailsForm(buildDetailsForm(detailsContact));
     setDetailsTagId("");
   }, [detailsContact?.waId]);
-
-  useEffect(() => {
-    setColumnPage({});
-    setColumnPageInput({});
-  }, [searchTerm, statusFilter, handoffFilter, botFilter, triageFilter]);
 
   const availableTagsForDetails = useMemo(() => {
     if (!detailsContact) return [];
@@ -358,8 +496,61 @@ export default function PipelineBoardView() {
     }
   };
 
+  const persistLeadStageMove = useCallback(
+    async (waId: string, targetStageId: number | null, successTitle: string) => {
+      if (!token) return false;
+
+      let previousBoard: PipelineBoard | null = null;
+      let appliedOptimisticMove = false;
+
+      setBoard((current) => {
+        if (!current) return current;
+        const next = moveContactInBoard(current, waId, targetStageId);
+        if (next === current) return current;
+        previousBoard = current;
+        appliedOptimisticMove = true;
+        return next;
+      });
+
+      setProcessingWaId(waId);
+      setMovingLeadWaId(waId);
+      setMovedLeadWaId(waId);
+
+      try {
+        await api.updateContactStage(token, waId, targetStageId);
+        toast({ title: successTitle, variant: "success" });
+        void load();
+        return true;
+      } catch (err: unknown) {
+        if (appliedOptimisticMove && previousBoard) {
+          setBoard(previousBoard);
+        }
+        setMovedLeadWaId(null);
+        toast({
+          title: "Falha ao mover lead",
+          description: err instanceof Error ? err.message : "Tente novamente.",
+          variant: "error",
+        });
+        return false;
+      } finally {
+        setProcessingWaId((current) => (current === waId ? null : current));
+        setMovingLeadWaId((current) => (current === waId ? null : current));
+        setTimeout(() => {
+          setMovedLeadWaId((current) => (current === waId ? null : current));
+        }, 1200);
+      }
+    },
+    [token, toast, load],
+  );
+
   const handleDrop = async (targetStageId: number | null) => {
     if (!dragData || !token) return;
+    if (!canManageLeads) {
+      toast({ title: "Sem permissão para mover lead", variant: "error" });
+      setDragData(null);
+      setLeadDropTargetKey(null);
+      return;
+    }
     if (dragData.fromStageId === targetStageId) {
       setDragData(null);
       setLeadDropTargetKey(null);
@@ -369,20 +560,10 @@ export default function PipelineBoardView() {
     setLeadDropTargetKey(String(targetStageId ?? "unassigned"));
 
     try {
-      await api.updateContactStage(token, dragData.waId, targetStageId);
-      toast({ title: "Lead movido com sucesso", variant: "success" });
-      setMovedLeadWaId(dragData.waId);
-      await load();
-    } catch (err: unknown) {
-      toast({
-        title: "Falha ao mover lead",
-        description: err instanceof Error ? err.message : "Tente novamente.",
-        variant: "error",
-      });
+      await persistLeadStageMove(dragData.waId, targetStageId, "Lead movido com sucesso");
     } finally {
       setDragData(null);
       setLeadDropTargetKey(null);
-      setTimeout(() => setMovedLeadWaId(null), 1200);
     }
   };
 
@@ -607,6 +788,10 @@ export default function PipelineBoardView() {
 
   const updateLeadStatus = async (contact: PipelineContact, status: LeadStatus) => {
     if (!token) return;
+    if (!canManageLeads) {
+      toast({ title: "Sem permissão para editar status", variant: "error" });
+      return;
+    }
     setProcessingWaId(contact.waId);
     try {
       await api.updateContactLeadStatus(token, contact.waId, status);
@@ -630,25 +815,29 @@ export default function PipelineBoardView() {
 
   const moveLeadToStage = async (contact: PipelineContact, stageId: number | null) => {
     if (!token) return;
-    setProcessingWaId(contact.waId);
+    if (!canManageLeads) {
+      toast({ title: "Sem permissão para mover lead", variant: "error" });
+      return;
+    }
+    if (contact.stageId === stageId) {
+      setContextMenu(null);
+      return;
+    }
+
+    setContextMenu(null);
     try {
-      await api.updateContactStage(token, contact.waId, stageId);
-      toast({ title: "Lead movido", variant: "success" });
-      await load();
-    } catch (err: unknown) {
-      toast({
-        title: "Falha ao mover lead",
-        description: err instanceof Error ? err.message : "Tente novamente.",
-        variant: "error",
-      });
+      await persistLeadStageMove(contact.waId, stageId, "Lead movido");
     } finally {
-      setProcessingWaId(null);
       setContextMenu(null);
     }
   };
 
   const deleteLead = async (contact: PipelineContact) => {
     if (!token) return;
+    if (!canManageLeads) {
+      toast({ title: "Sem permissão para excluir lead", variant: "error" });
+      return;
+    }
     const confirmed = window.confirm(
       `Excluir o lead "${contact.name || contact.waId}"? Esta acao remove mensagens e historico.`,
     );
@@ -659,16 +848,14 @@ export default function PipelineBoardView() {
     try {
       setContextMenu(null);
       await new Promise((resolve) => setTimeout(resolve, 180));
-      await api.deleteContact(token, contact.waId);
-      toast({ title: "Lead excluido", variant: "success" });
-      setDetailsContact((current) => (current?.waId === contact.waId ? null : current));
-      await load();
-    } catch (err: unknown) {
-      toast({
-        title: "Falha ao excluir lead",
-        description: err instanceof Error ? err.message : "Tente novamente.",
-        variant: "error",
-      });
+      const result = await retryRun(
+        () => api.deleteContact(token, contact.waId),
+        { actionLabel: "Excluir lead" },
+      );
+      if (result !== undefined) {
+        setDetailsContact((current) => (current?.waId === contact.waId ? null : current));
+        await load();
+      }
     } finally {
       setProcessingWaId(null);
       setContextMenu(null);
@@ -732,16 +919,14 @@ export default function PipelineBoardView() {
 
     setSavingDetails(true);
     try {
-      const updated = await api.updateContact(token, detailsContact.waId, payload);
-      upsertDetailsContact(updated);
-      toast({ title: "Contato atualizado", variant: "success" });
-      await load();
-    } catch (err: unknown) {
-      toast({
-        title: "Falha ao salvar detalhes",
-        description: err instanceof Error ? err.message : "Tente novamente.",
-        variant: "error",
-      });
+      const updated = await retryRun(
+        () => api.updateContact(token, detailsContact.waId, payload),
+        { actionLabel: "Salvar detalhes" },
+      );
+      if (updated) {
+        upsertDetailsContact(updated);
+        await load();
+      }
     } finally {
       setSavingDetails(false);
     }
@@ -856,34 +1041,17 @@ export default function PipelineBoardView() {
     });
   };
 
-  const paginateContacts = (stageKey: string, contacts: PipelineContact[]) => {
-    const totalPages = Math.max(1, Math.ceil(contacts.length / PAGE_SIZE));
-    const currentPage = Math.min(columnPage[stageKey] ?? 1, totalPages);
-    const start = (currentPage - 1) * PAGE_SIZE;
-    const items = contacts.slice(start, start + PAGE_SIZE);
-    return { items, totalPages, currentPage };
-  };
-
-  const setStagePage = (stageKey: string, page: number, totalPages: number) => {
-    const nextPage = Math.max(1, Math.min(totalPages, page));
-    setColumnPage((prev) => ({
-      ...prev,
-      [stageKey]: nextPage,
-    }));
-    setColumnPageInput((prev) => ({
-      ...prev,
-      [stageKey]: String(nextPage),
-    }));
-  };
-
   const renderContactCard = (contact: PipelineContact, stageId: number | null) => {
     const status = normalizeLeadStatus(contact.leadStatus);
 
     return (
       <div
         key={contact.waId}
-        draggable
-        onDragStart={() => handleDragStart(contact.waId, stageId)}
+        draggable={canManageLeads}
+        onDragStart={() => {
+          if (!canManageLeads) return;
+          handleDragStart(contact.waId, stageId);
+        }}
         onContextMenu={(event) => {
           event.preventDefault();
           setContextMenu({
@@ -893,7 +1061,8 @@ export default function PipelineBoardView() {
           });
         }}
         className={cn(
-          "cursor-grab rounded-lg border border-border bg-background/60 p-3 transition hover:border-primary/40 active:cursor-grabbing",
+          "overflow-hidden rounded-xl border border-border/80 bg-background/55 p-3 transition hover:border-primary/40",
+          canManageLeads ? "cursor-grab active:cursor-grabbing" : "cursor-default",
           deletingLeadWaId === contact.waId && "anim-remove pointer-events-none opacity-70",
         )}
         title="Clique com o botao direito para abrir o menu de acoes"
@@ -901,24 +1070,36 @@ export default function PipelineBoardView() {
         <div className="flex items-start gap-2">
           <GripVertical className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground/50" />
           <div className="min-w-0 flex-1">
-            <div className="flex items-center justify-between gap-2">
-              <p className="truncate text-sm font-medium">
-                {contact.name ? `${contact.name} (${contact.waId})` : contact.waId}
+            <div className="flex items-start justify-between gap-2">
+              <p className="min-w-0 flex-1 whitespace-normal break-words text-sm font-medium leading-tight">
+                {contact.name || "Sem nome"}
               </p>
-              {movedLeadWaId === contact.waId && (
-                <Badge variant="secondary" className="h-5 animate-pulse px-2 text-[10px]">
-                  Movido
+              <div className="flex shrink-0 items-center gap-1">
+                {movingLeadWaId === contact.waId ? (
+                  <Badge variant="secondary" className="h-5 gap-1 px-2 text-[10px]">
+                    <RefreshCcw className="h-3 w-3 animate-spin" />
+                    Movendo
+                  </Badge>
+                ) : (
+                  movedLeadWaId === contact.waId && (
+                    <Badge variant="secondary" className="h-5 animate-pulse px-2 text-[10px]">
+                      Movido
+                    </Badge>
+                  )
+                )}
+                <Badge
+                  variant="outline"
+                  className={cn("h-5 px-2 text-[10px]", leadStatusMeta[status].badgeClass)}
+                >
+                  {leadStatusMeta[status].label}
                 </Badge>
-              )}
-              <Badge
-                variant="outline"
-                className={cn("h-5 px-2 text-[10px]", leadStatusMeta[status].badgeClass)}
-              >
-                {leadStatusMeta[status].label}
-              </Badge>
+              </div>
             </div>
+            <p className="mt-0.5 break-all text-xs text-muted-foreground">
+              {contact.waId}
+            </p>
             {contact.messages[0] && (
-              <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
+              <p className="mt-1 line-clamp-2 break-words text-xs text-muted-foreground">
                 {contact.messages[0].body.slice(0, 80)}
               </p>
             )}
@@ -951,21 +1132,27 @@ export default function PipelineBoardView() {
     const stageId = stage?.id ?? null;
     const stageKey = String(stageId ?? "unassigned");
     const filteredContacts = applyContactFilters(contacts);
-    const { items, totalPages, currentPage } = paginateContacts(
-      stageKey,
-      filteredContacts,
+
+    const columnHeight = Math.min(
+      COLUMN_MAX_HEIGHT,
+      Math.max(COLUMN_MIN_HEIGHT, COLUMN_BASE_HEIGHT + filteredContacts.length * ROW_HEIGHT_ESTIMATE),
     );
 
     return (
     <div
         key={stageId ?? "unassigned"}
         className={cn(
-          "flex w-72 shrink-0 flex-col rounded-xl border border-border/60 bg-card/50 transition",
+          "flex w-72 shrink-0 flex-col self-start overflow-hidden rounded-xl border border-border/60 bg-card/50 transition",
           leadDropTargetKey === stageKey && "border-primary shadow-[0_0_0_2px_hsl(var(--primary)/0.35)]",
           stageId !== null && deletingStageId === stageId && "anim-remove pointer-events-none opacity-70",
         )}
-        onDragOver={(e) => e.preventDefault()}
-        onDrop={() => void handleDrop(stageId)}
+        style={{ height: columnHeight }}
+        onDragOver={(e) => {
+          if (canManageLeads) e.preventDefault();
+        }}
+        onDrop={() => {
+          if (canManageLeads) void handleDrop(stageId);
+        }}
       >
         <div
           className="flex items-center gap-2 rounded-t-xl px-3 py-2.5"
@@ -1040,93 +1227,17 @@ export default function PipelineBoardView() {
             {filteredContacts.length}
           </span>
         </div>
-      <ScrollArea className="flex-1 p-2" style={{ maxHeight: "calc(100vh - 260px)" }}>
-        <div className="space-y-2">
-          {items.map((c) => renderContactCard(c, stageId))}
-          {!items.length && (
-            <p className="px-2 py-4 text-center text-xs text-muted-foreground">
-              Nenhum contato
-            </p>
-          )}
-        </div>
-      </ScrollArea>
-      <div className="space-y-1.5 border-t border-border/60 px-2 py-1.5 text-[11px] text-muted-foreground">
+      <div className="flex-1">
+        <VirtualizedContactList
+          contacts={filteredContacts}
+          stageId={stageId}
+          renderContactCard={renderContactCard}
+        />
+      </div>
+      <div className="border-t border-border/60 px-2 py-1.5 text-[11px] text-muted-foreground">
         <div className="flex items-center justify-between">
-          <span>Pagina {currentPage}/{totalPages}</span>
           <span>{filteredContacts.length} lead(s)</span>
-        </div>
-        <div className="flex items-center gap-1">
-          <Button
-            size="sm"
-            variant="ghost"
-            className="h-6 px-2 text-[11px]"
-            disabled={currentPage <= 1}
-            onClick={() => setStagePage(stageKey, 1, totalPages)}
-          >
-            Primeiro
-          </Button>
-          <Button
-            size="sm"
-            variant="ghost"
-            className="h-6 px-2 text-[11px]"
-            disabled={currentPage <= 1}
-            onClick={() => setStagePage(stageKey, currentPage - 1, totalPages)}
-          >
-            Prev
-          </Button>
-          <Button
-            size="sm"
-            variant="ghost"
-            className="h-6 px-2 text-[11px]"
-            disabled={currentPage >= totalPages}
-            onClick={() => setStagePage(stageKey, currentPage + 1, totalPages)}
-          >
-            Prox
-          </Button>
-          <Button
-            size="sm"
-            variant="ghost"
-            className="h-6 px-2 text-[11px]"
-            disabled={currentPage >= totalPages}
-            onClick={() => setStagePage(stageKey, totalPages, totalPages)}
-          >
-            Ultima
-          </Button>
-        </div>
-        <div className="flex items-center gap-1">
-          <Input
-            type="text"
-            inputMode="numeric"
-            pattern="[0-9]*"
-            value={columnPageInput[stageKey] ?? ""}
-            onChange={(event) => {
-              const sanitized = event.target.value.replace(/\D+/g, "");
-              setColumnPageInput((prev) => ({
-                ...prev,
-                [stageKey]: sanitized,
-              }));
-            }}
-            onKeyDown={(event) => {
-              if (event.key !== "Enter") return;
-              const nextPage = Number(columnPageInput[stageKey] ?? "");
-              if (!Number.isFinite(nextPage)) return;
-              setStagePage(stageKey, nextPage, totalPages);
-            }}
-            className="h-7 w-20 px-2 text-[11px]"
-            placeholder="Ir para"
-          />
-          <Button
-            size="sm"
-            variant="secondary"
-            className="h-7 px-2 text-[11px]"
-            onClick={() => {
-              const nextPage = Number(columnPageInput[stageKey] ?? "");
-              if (!Number.isFinite(nextPage)) return;
-              setStagePage(stageKey, nextPage, totalPages);
-            }}
-          >
-            Ir
-          </Button>
+          <span>Rolagem otimizada</span>
         </div>
       </div>
     </div>
@@ -1136,21 +1247,48 @@ export default function PipelineBoardView() {
   const contextMenuPosition = useMemo(() => {
     if (!contextMenu) return null;
     const width = 320;
-    const height = 430;
+    const height = contextMenuMeasuredHeight ?? 430;
+    const viewportPadding = 12;
     const maxLeft = window.innerWidth - width - 12;
-    const maxTop = window.innerHeight - height - 12;
+    const maxTop = window.innerHeight - height - viewportPadding;
+    const spaceBelow = window.innerHeight - contextMenu.y - viewportPadding;
+    const shouldOpenUp = spaceBelow < height;
+    const preferredTop = shouldOpenUp ? contextMenu.y - height : contextMenu.y;
+
     return {
-      left: Math.max(12, Math.min(contextMenu.x, maxLeft)),
-      top: Math.max(12, Math.min(contextMenu.y, maxTop)),
+      left: Math.max(viewportPadding, Math.min(contextMenu.x, maxLeft)),
+      top: Math.max(viewportPadding, Math.min(preferredTop, maxTop)),
     };
-  }, [contextMenu]);
+  }, [contextMenu, contextMenuMeasuredHeight]);
 
   if (!board) {
+    if (loading) {
+      return (
+        <div className="flex gap-4 overflow-x-auto py-4">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <div key={i} className="w-72 shrink-0 rounded-xl border border-border/60 bg-card/50 p-3 space-y-3 animate-pulse">
+              <div className="flex items-center justify-between">
+                <div className="h-4 w-24 rounded-md bg-muted/60" />
+                <div className="h-5 w-8 rounded-full bg-muted/60" />
+              </div>
+              {Array.from({ length: 3 }).map((_, j) => (
+                <div key={j} className="rounded-lg border border-border/40 p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <div className="h-3.5 w-2/3 rounded-md bg-muted/60" />
+                    <div className="h-4 w-12 rounded-full bg-muted/60" />
+                  </div>
+                  <div className="h-3 w-full rounded-md bg-muted/60" />
+                  <div className="h-3 w-1/2 rounded-md bg-muted/60" />
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+      );
+    }
     return (
       <div className="flex items-center justify-center py-16">
-        <p className="text-sm text-muted-foreground">
-          {loading ? "Carregando pipeline..." : "Pipeline vazio."}
-        </p>
+        <p className="text-sm text-muted-foreground">Pipeline vazio.</p>
       </div>
     );
   }
@@ -1172,7 +1310,7 @@ export default function PipelineBoardView() {
           <Button
             size="sm"
             onClick={openCreateStageForm}
-            disabled={savingStage}
+            disabled={savingStage || !canManageLeads}
           >
             <Plus className="h-4 w-4" />
             Nova Etapa
@@ -1347,10 +1485,17 @@ export default function PipelineBoardView() {
             {board.stages.map((stage) => (
               <div
                 key={stage.id}
-                draggable
-                onDragStart={() => handleStageDragStart(stage.id)}
-                onDragOver={(event) => event.preventDefault()}
-                onDrop={() => void handleStageDrop(stage.id)}
+                draggable={canManageLeads}
+                onDragStart={() => {
+                  if (!canManageLeads) return;
+                  handleStageDragStart(stage.id);
+                }}
+                onDragOver={(event) => {
+                  if (canManageLeads) event.preventDefault();
+                }}
+                onDrop={() => {
+                  if (canManageLeads) void handleStageDrop(stage.id);
+                }}
                 className={cn(
                   "flex items-center gap-2 rounded-lg border border-border/70 bg-background/50 px-3 py-2 transition",
                   dragStageId === stage.id && "opacity-60",
@@ -1370,6 +1515,7 @@ export default function PipelineBoardView() {
                   variant="ghost"
                   className="h-7 w-7"
                   onClick={() => openEditStageForm(stage)}
+                  disabled={!canManageLeads}
                 >
                   <Edit2 className="h-3.5 w-3.5" />
                 </Button>
@@ -1378,7 +1524,7 @@ export default function PipelineBoardView() {
                   variant="ghost"
                   className="h-7 w-7"
                   onClick={() => void deleteStage(stage)}
-                  disabled={savingStage}
+                  disabled={savingStage || !canManageLeads}
                 >
                   <Trash2 className="h-3.5 w-3.5 text-destructive" />
                 </Button>
@@ -1408,16 +1554,38 @@ export default function PipelineBoardView() {
                 </div>
                 <div className="space-y-1 xl:col-span-2">
                   <label className="text-xs text-muted-foreground">Cor</label>
-                  <input
-                    type="color"
-                    value={stageForm.color}
-                    onChange={(e) =>
-                      setStageForm((current) =>
-                        current ? { ...current, color: e.target.value } : current,
-                      )
-                    }
-                    className="h-10 w-full max-w-[92px] cursor-pointer rounded-md border border-border bg-background"
-                  />
+                  <div className="space-y-2">
+                    <div className="flex flex-wrap gap-1.5">
+                      {colorPresets.map((preset) => (
+                        <button
+                          key={preset}
+                          type="button"
+                          onClick={() =>
+                            setStageForm((current) =>
+                              current ? { ...current, color: preset } : current,
+                            )
+                          }
+                          className={cn(
+                            "h-6 w-6 rounded-md border border-border/60",
+                            stageForm.color.toLowerCase() === preset.toLowerCase() &&
+                              "ring-2 ring-primary ring-offset-1 ring-offset-background",
+                          )}
+                          style={{ backgroundColor: preset }}
+                          aria-label={`Selecionar cor ${preset}`}
+                        />
+                      ))}
+                    </div>
+                    <Input
+                      value={stageForm.color}
+                      onChange={(e) =>
+                        setStageForm((current) =>
+                          current ? { ...current, color: e.target.value } : current,
+                        )
+                      }
+                      placeholder="#06b6d4"
+                      className="h-8"
+                    />
+                  </div>
                 </div>
                 <div className="space-y-1 xl:col-span-2">
                   <label className="text-xs text-muted-foreground">Status</label>
@@ -1474,7 +1642,7 @@ export default function PipelineBoardView() {
               <label className="text-xs text-muted-foreground">Busca</label>
               <Input
                 value={searchTerm}
-                onChange={(event) => setSearchTerm(event.target.value)}
+                onChange={(event) => setPFilter("searchTerm", event.target.value)}
                 placeholder="Buscar lead, telefone, cidade..."
               />
             </div>
@@ -1482,7 +1650,7 @@ export default function PipelineBoardView() {
               <label className="text-xs text-muted-foreground">Status</label>
               <select
                 value={statusFilter}
-                onChange={(event) => setStatusFilter(event.target.value as "all" | LeadStatus)}
+                onChange={(event) => setPFilter("statusFilter", event.target.value as "all" | LeadStatus)}
                 className="h-10 w-full rounded-lg border border-input bg-background px-3 text-sm"
               >
                 <option value="all">Todos</option>
@@ -1495,7 +1663,7 @@ export default function PipelineBoardView() {
               <label className="text-xs text-muted-foreground">Handoff</label>
               <select
                 value={handoffFilter}
-                onChange={(event) => setHandoffFilter(event.target.value as "all" | "yes" | "no")}
+                onChange={(event) => setPFilter("handoffFilter", event.target.value as "all" | "yes" | "no")}
                 className="h-10 w-full rounded-lg border border-input bg-background px-3 text-sm"
               >
                 <option value="all">Todos</option>
@@ -1507,7 +1675,7 @@ export default function PipelineBoardView() {
               <label className="text-xs text-muted-foreground">Bot</label>
               <select
                 value={botFilter}
-                onChange={(event) => setBotFilter(event.target.value as "all" | "on" | "off")}
+                onChange={(event) => setPFilter("botFilter", event.target.value as "all" | "on" | "off")}
                 className="h-10 w-full rounded-lg border border-input bg-background px-3 text-sm"
               >
                 <option value="all">Todos</option>
@@ -1519,7 +1687,7 @@ export default function PipelineBoardView() {
               <label className="text-xs text-muted-foreground">Triagem</label>
               <select
                 value={triageFilter}
-                onChange={(event) => setTriageFilter(event.target.value as "all" | "done" | "pending")}
+                onChange={(event) => setPFilter("triageFilter", event.target.value as "all" | "done" | "pending")}
                 className="h-10 w-full rounded-lg border border-input bg-background px-3 text-sm"
               >
                 <option value="all">Todos</option>
@@ -1531,7 +1699,7 @@ export default function PipelineBoardView() {
         </CardContent>
       </Card>
 
-      <div className="flex gap-4 overflow-x-auto pb-4">
+      <div className="flex items-start gap-4 overflow-x-auto pb-4">
         {renderColumn(null, board.unassigned)}
         {board.stages.map((stage) => renderColumn(stage, stage.contacts))}
       </div>
@@ -1539,6 +1707,7 @@ export default function PipelineBoardView() {
       {contextMenu && contextMenuPosition && (
         <div className="fixed inset-0 z-50" onClick={() => setContextMenu(null)}>
           <Card
+            ref={contextMenuRef}
             className="absolute w-[320px] border-border/90 bg-card/95 shadow-2xl backdrop-blur-md"
             style={{
               left: contextMenuPosition.left,
@@ -1606,87 +1775,95 @@ export default function PipelineBoardView() {
                   : "Encaminhar para humano"}
               </button>
 
-              <Separator className="my-1" />
+              {canManageLeads ? (
+                <>
+                  <Separator className="my-1" />
 
-              <p className="px-2 text-[10px] uppercase tracking-[0.2em] text-muted-foreground">
-                Status
-              </p>
-              {(["open", "won", "lost"] as LeadStatus[]).map((status) => {
-                const active = normalizeLeadStatus(contextMenu.contact.leadStatus) === status;
-                return (
+                  <p className="px-2 text-[10px] uppercase tracking-[0.2em] text-muted-foreground">
+                    Status
+                  </p>
+                  {(["open", "won", "lost"] as LeadStatus[]).map((status) => {
+                    const active = normalizeLeadStatus(contextMenu.contact.leadStatus) === status;
+                    return (
+                      <button
+                        key={status}
+                        type="button"
+                        className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm transition hover:bg-muted/70"
+                        onClick={() => void updateLeadStatus(contextMenu.contact, status)}
+                        disabled={processingWaId === contextMenu.contact.waId}
+                      >
+                        <span
+                          className={cn(
+                            "h-2.5 w-2.5 rounded-full",
+                            status === "open" && "bg-cyan-400",
+                            status === "won" && "bg-emerald-400",
+                            status === "lost" && "bg-rose-400",
+                          )}
+                        />
+                        <span>{leadStatusMeta[status].label}</span>
+                        {active && <Check className="ml-auto h-4 w-4 text-primary" />}
+                      </button>
+                    );
+                  })}
+
+                  <Separator className="my-1" />
+
+                  <p className="px-2 text-[10px] uppercase tracking-[0.2em] text-muted-foreground">
+                    Mover para etapa
+                  </p>
                   <button
-                    key={status}
                     type="button"
-                    className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm transition hover:bg-muted/70"
-                    onClick={() => void updateLeadStatus(contextMenu.contact, status)}
+                    className="flex w-full items-center rounded-md px-2 py-2 text-left text-sm transition hover:bg-muted/70"
+                    onClick={() => void moveLeadToStage(contextMenu.contact, null)}
                     disabled={processingWaId === contextMenu.contact.waId}
                   >
-                    <span
-                      className={cn(
-                        "h-2.5 w-2.5 rounded-full",
-                        status === "open" && "bg-cyan-400",
-                        status === "won" && "bg-emerald-400",
-                        status === "lost" && "bg-rose-400",
-                      )}
-                    />
-                    <span>{leadStatusMeta[status].label}</span>
-                    {active && <Check className="ml-auto h-4 w-4 text-primary" />}
+                    Sem Estagio
                   </button>
-                );
-              })}
+                  {board.stages.map((stage) => (
+                    <button
+                      key={stage.id}
+                      type="button"
+                      className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm transition hover:bg-muted/70"
+                      onClick={() => void moveLeadToStage(contextMenu.contact, stage.id)}
+                      disabled={processingWaId === contextMenu.contact.waId}
+                    >
+                      <span
+                        className="h-2.5 w-2.5 rounded-full"
+                        style={{ backgroundColor: stage.color }}
+                      />
+                      {stage.name}
+                    </button>
+                  ))}
 
-              <Separator className="my-1" />
+                  <Separator className="my-1" />
 
-              <p className="px-2 text-[10px] uppercase tracking-[0.2em] text-muted-foreground">
-                Mover para etapa
-              </p>
-              <button
-                type="button"
-                className="flex w-full items-center rounded-md px-2 py-2 text-left text-sm transition hover:bg-muted/70"
-                onClick={() => void moveLeadToStage(contextMenu.contact, null)}
-                disabled={processingWaId === contextMenu.contact.waId}
-              >
-                Sem Estagio
-              </button>
-              {board.stages.map((stage) => (
-                <button
-                  key={stage.id}
-                  type="button"
-                  className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm transition hover:bg-muted/70"
-                  onClick={() => void moveLeadToStage(contextMenu.contact, stage.id)}
-                  disabled={processingWaId === contextMenu.contact.waId}
-                >
-                  <span
-                    className="h-2.5 w-2.5 rounded-full"
-                    style={{ backgroundColor: stage.color }}
-                  />
-                  {stage.name}
-                </button>
-              ))}
-
-              <Separator className="my-1" />
-
-              <button
-                type="button"
-                className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm text-destructive transition hover:bg-destructive/10"
-                onClick={() => void deleteLead(contextMenu.contact)}
-                disabled={processingWaId === contextMenu.contact.waId}
-              >
-                <Trash2 className="h-4 w-4" />
-                Excluir lead
-              </button>
+                  <button
+                    type="button"
+                    className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm text-destructive transition hover:bg-destructive/10"
+                    onClick={() => void deleteLead(contextMenu.contact)}
+                    disabled={processingWaId === contextMenu.contact.waId}
+                  >
+                    <Trash2 className="h-4 w-4" />
+                    Excluir lead
+                  </button>
+                </>
+              ) : (
+                <p className="px-2 py-1 text-xs text-muted-foreground">
+                  Sem permissao para editar status, mover etapa ou excluir.
+                </p>
+              )}
             </CardContent>
           </Card>
         </div>
       )}
 
-      {detailsContact && detailsForm && (
+      {detailsContact && detailsForm && createPortal(
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-background/65 p-4 backdrop-blur-sm"
+          className="fixed inset-0 z-[70] flex items-center justify-center overflow-y-auto bg-background/65 px-4 py-6 backdrop-blur-sm"
           onClick={() => setDetailsContact(null)}
         >
           <Card
-            className="anim-pop w-full max-w-3xl border-border/90"
+            className="anim-pop flex max-h-[92vh] w-full max-w-3xl flex-col border-border/90"
             onClick={(event) => event.stopPropagation()}
           >
             <CardHeader className="pb-3">
@@ -1705,7 +1882,7 @@ export default function PipelineBoardView() {
                 </Button>
               </div>
             </CardHeader>
-            <CardContent className="space-y-3">
+            <CardContent className="space-y-3 overflow-y-auto">
               <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                 <div className="rounded-lg border border-border/70 bg-background/40 p-3">
                   <p className="text-[11px] uppercase tracking-[0.12em] text-muted-foreground">Status</p>
@@ -1995,7 +2172,8 @@ export default function PipelineBoardView() {
               </div>
             </CardContent>
           </Card>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );

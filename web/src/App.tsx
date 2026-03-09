@@ -12,6 +12,7 @@ const ConversationsTab = lazy(() => import("@/components/dashboard/Conversations
 const PipelineBoard = lazy(() => import("@/components/dashboard/PipelineBoard"));
 const FaqsPage = lazy(() => import("@/pages/FaqsPage"));
 const HandoffQueuePage = lazy(() => import("@/pages/HandoffQueuePage"));
+const ContactsPage = lazy(() => import("@/pages/ContactsPage"));
 const TemplatesPage = lazy(() => import("@/pages/TemplatesPage"));
 const TagsPage = lazy(() => import("@/pages/TagsPage"));
 const TasksPage = lazy(() => import("@/pages/TasksPage"));
@@ -60,6 +61,7 @@ function AuthGate() {
           <Route path="/dashboard" element={<DashboardPage />}>
             <Route index element={<OverviewTab />} />
             <Route path="conversations" element={<ConversationsTab />} />
+            <Route path="contacts" element={<ContactsPage />} />
             <Route path="pipeline" element={<PipelineBoard />} />
             <Route path="handoffs" element={<HandoffQueuePage />} />
             <Route path="tasks" element={<TasksPage />} />

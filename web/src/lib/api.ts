@@ -222,6 +222,26 @@ export interface HandoffQueueItem {
   }>;
 }
 
+export interface AuditLogEntry {
+  id: number;
+  action: string;
+  field: string | null;
+  oldValue: string | null;
+  newValue: string | null;
+  createdAt: string;
+  user: { name: string | null; email: string } | null;
+}
+
+export interface FunnelStageMetric {
+  stageId: number;
+  stageName: string;
+  total: number;
+  won: number;
+  lost: number;
+  conversionRate: number;
+  avgHoursInStage: number | null;
+}
+
 class ApiError extends Error {
   readonly status: number;
 
@@ -395,6 +415,10 @@ export const api = {
     return request<PipelineBoard>("/pipeline/board", { method: "GET" }, token);
   },
 
+  async funnelMetrics(token: string): Promise<FunnelStageMetric[]> {
+    return request<FunnelStageMetric[]>("/pipeline/funnel", { method: "GET" }, token);
+  },
+
   async createContact(
     token: string,
     data: ContactCreateInput,
@@ -444,6 +468,31 @@ export const api = {
 
   async deleteContact(token: string, waId: string): Promise<void> {
     await request(`/contacts/${encodeURIComponent(waId)}`, { method: "DELETE" }, token);
+  },
+
+  // ── Batch actions ──────────────────────────────────────────
+
+  async batchContacts(
+    token: string,
+    waIds: string[],
+    action: string,
+    extra?: Record<string, unknown>,
+  ): Promise<{ ok: boolean; updated: number }> {
+    return request<{ ok: boolean; updated: number }>(
+      "/contacts/batch",
+      { method: "POST", body: JSON.stringify({ waIds, action, ...extra }) },
+      token,
+    );
+  },
+
+  // ── Audit log ───────────────────────────────────────────────
+
+  async contactAuditLog(token: string, waId: string): Promise<AuditLogEntry[]> {
+    return request<AuditLogEntry[]>(
+      `/contacts/${encodeURIComponent(waId)}/audit`,
+      { method: "GET" },
+      token,
+    );
   },
 
   // ── Bot toggle ─────────────────────────────────────────────

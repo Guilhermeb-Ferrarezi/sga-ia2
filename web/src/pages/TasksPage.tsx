@@ -447,7 +447,18 @@ export default function TasksPage() {
 
       <div className="space-y-2">
         {loading && (
-          <p className="text-sm text-muted-foreground">Carregando tarefas...</p>
+          <div className="space-y-2">
+            {Array.from({ length: 4 }).map((_, i) => (
+              <div key={i} className="rounded-xl border border-border/60 bg-card/50 p-4 space-y-2 animate-pulse">
+                <div className="flex items-center justify-between">
+                  <div className="h-4 w-1/3 rounded-md bg-muted/60" />
+                  <div className="h-5 w-16 rounded-full bg-muted/60" />
+                </div>
+                <div className="h-3 w-2/3 rounded-md bg-muted/60" />
+                <div className="h-3 w-1/4 rounded-md bg-muted/60" />
+              </div>
+            ))}
+          </div>
         )}
         {!loading && !tasks.length && (
           <p className="text-sm text-muted-foreground">

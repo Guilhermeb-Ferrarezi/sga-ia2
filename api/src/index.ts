@@ -1,4 +1,10 @@
 import { config } from "./config";
+import {
+  cacheDeleteByPrefix,
+  cacheGetJson,
+  cacheSetJson,
+  getCacheMetrics,
+} from "./lib/cache";
 import { getPrismaClient } from "./lib/prisma";
 import type { Prisma, PrismaClient } from "@prisma/client";
 import { AuthService } from "./services/auth";
@@ -121,6 +127,14 @@ const dashboardConversationsPaths = new Set<string>([
   `${config.apiBasePath}/dashboard/conversations`,
   "/dashboard/conversations",
 ]);
+const dashboardCacheMetricsPaths = new Set<string>([
+  `${config.apiBasePath}/dashboard/cache/metrics`,
+  "/dashboard/cache/metrics",
+]);
+const funnelMetricsPaths = new Set<string>([
+  `${config.apiBasePath}/pipeline/funnel`,
+  "/pipeline/funnel",
+]);
 const dashboardConversationTurnsPrefix = [
   `${config.apiBasePath}/dashboard/conversations/`,
   "/dashboard/conversations/",
@@ -146,6 +160,10 @@ const pipelineBoardPaths = new Set<string>([
 const contactsPaths = new Set<string>([
   `${config.apiBasePath}/contacts`,
   "/contacts",
+]);
+const contactsBatchPaths = new Set<string>([
+  `${config.apiBasePath}/contacts/batch`,
+  "/contacts/batch",
 ]);
 const contactsPrefix = [
   `${config.apiBasePath}/contacts/`,
@@ -245,6 +263,13 @@ const ALERTS_BROADCAST_INTERVAL_MS = 20_000;
 const handoffAssignments = new Map<string, { owner: string; assignedAt: number }>();
 let lastBroadcastedAlertsSignature = "";
 let alertsBroadcastInterval: ReturnType<typeof setInterval> | null = null;
+const DASHBOARD_CACHE_PREFIX = "esports:dashboard:";
+const DASHBOARD_CACHE_TTL_SECONDS = 20;
+const PIPELINE_CACHE_TTL_SECONDS = 10;
+
+const invalidateDashboardCaches = async (): Promise<void> => {
+  await cacheDeleteByPrefix(DASHBOARD_CACHE_PREFIX);
+};
 
 const hasOwn = (obj: Record<string, unknown>, key: string): boolean =>
   Object.prototype.hasOwnProperty.call(obj, key);
@@ -391,6 +416,7 @@ const persistTurn = async (
   role: "user" | "assistant",
   content: string,
   externalMessageId?: string,
+  contactName?: string,
 ): Promise<void> => {
   const prisma = await getPrismaClient();
   if (!prisma) return;
@@ -403,9 +429,17 @@ const persistTurn = async (
       },
       create: {
         waId: phone,
+        name: contactName || null,
         lastInteractionAt: new Date(),
       },
     });
+
+    if (contactName && (!contact.name || !contact.name.trim())) {
+      await prisma.contact.update({
+        where: { id: contact.id },
+        data: { name: contactName },
+      });
+    }
 
     const direction = role === "user" ? "in" : "out";
     const waMessageId = direction === "in" ? externalMessageId : undefined;
@@ -429,6 +463,7 @@ const persistTurn = async (
         waMessageId,
       },
     });
+    void invalidateDashboardCaches();
   } catch (error) {
     console.error(`[phone:${phone}] failed to persist ${role} turn`, error);
   }
@@ -518,6 +553,16 @@ const getAuthenticatedUser = async (
   return { prisma: db.prisma, user };
 };
 
+const requireAdmin = (
+  current: { user: PublicUser },
+  req: Request,
+): Response | null => {
+  if (current.user.role !== "ADMIN") {
+    return json({ error: "Forbidden: admin only" }, 403, req);
+  }
+  return null;
+};
+
 const authLogin = async (req: Request): Promise<Response> => {
   let body: unknown;
   try {
@@ -561,7 +606,16 @@ const dashboardOverview = async (req: Request): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
 
+  const cacheKey = `${DASHBOARD_CACHE_PREFIX}overview`;
+  const cached = await cacheGetJson<Awaited<ReturnType<DashboardService["getOverview"]>>>(
+    cacheKey,
+  );
+  if (cached) {
+    return json(cached, 200, req);
+  }
+
   const overview = await dashboard.getOverview(current.prisma);
+  void cacheSetJson(cacheKey, overview, DASHBOARD_CACHE_TTL_SECONDS);
   return json(overview, 200, req);
 };
 
@@ -569,7 +623,14 @@ const dashboardAlerts = async (req: Request): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
 
+  const cacheKey = `${DASHBOARD_CACHE_PREFIX}alerts`;
+  const cached = await cacheGetJson<OperationalAlertsSummary>(cacheKey);
+  if (cached) {
+    return json(cached, 200, req);
+  }
+
   const summary = await getOperationalAlertsSummary(current.prisma);
+  void cacheSetJson(cacheKey, summary, DASHBOARD_CACHE_TTL_SECONDS);
   return json(summary, 200, req);
 };
 
@@ -584,7 +645,16 @@ const dashboardConversations = async (req: Request): Promise<Response> => {
     Math.max(1, Number.isFinite(Number(limitParam)) ? Number(limitParam) : 25),
   );
 
+  const cacheKey = `${DASHBOARD_CACHE_PREFIX}conversations:${limit}`;
+  const cached = await cacheGetJson<Awaited<ReturnType<DashboardService["getConversations"]>>>(
+    cacheKey,
+  );
+  if (cached) {
+    return json(cached, 200, req);
+  }
+
   const conversations = await dashboard.getConversations(current.prisma, limit);
+  void cacheSetJson(cacheKey, conversations, DASHBOARD_CACHE_TTL_SECONDS);
   return json(conversations, 200, req);
 };
 
@@ -623,6 +693,59 @@ const dashboardConversationTurns = async (req: Request): Promise<Response> => {
   return json(turns, 200, req);
 };
 
+const dashboardCacheMetrics = async (req: Request): Promise<Response> => {
+  const current = await getAuthenticatedUser(req);
+  if (current instanceof Response) return current;
+
+  return json(
+    {
+      metrics: getCacheMetrics(),
+      cachePrefix: DASHBOARD_CACHE_PREFIX,
+      ttlSeconds: {
+        dashboard: DASHBOARD_CACHE_TTL_SECONDS,
+        pipeline: PIPELINE_CACHE_TTL_SECONDS,
+      },
+      user: current.user.email,
+    },
+    200,
+    req,
+  );
+};
+
+// ── Funnel metrics by pipeline stage ─────────────────────────
+const handleFunnelMetrics = async (req: Request): Promise<Response> => {
+  const current = await getAuthenticatedUser(req);
+  if (current instanceof Response) return current;
+
+  const stages = await current.prisma.pipelineStage.findMany({
+    orderBy: { position: "asc" },
+    select: { id: true, name: true },
+  });
+
+  const result = await Promise.all(
+    stages.map(async (stage) => {
+      const total = await current.prisma.contact.count({ where: { stageId: stage.id } });
+      const won = await current.prisma.contact.count({ where: { stageId: stage.id, leadStatus: "won" } });
+      const lost = await current.prisma.contact.count({ where: { stageId: stage.id, leadStatus: "lost" } });
+      const avgTime = await current.prisma.$queryRawUnsafe<Array<{ avg_hours: number | null }>>(
+        `SELECT AVG(EXTRACT(EPOCH FROM (NOW() - "createdAt")) / 3600) as avg_hours FROM "Contact" WHERE "stageId" = $1`,
+        stage.id,
+      );
+      return {
+        stageId: stage.id,
+        stageName: stage.name,
+        total,
+        won,
+        lost,
+        conversionRate: total > 0 ? Math.round((won / total) * 100) : 0,
+        avgHoursInStage: avgTime[0]?.avg_hours ? Math.round(avgTime[0].avg_hours) : null,
+      };
+    }),
+  );
+
+  return json(result, 200, req);
+};
+
 const webhookEvent = async (req: Request): Promise<Response> => {
   let payload: WhatsAppWebhookPayload;
 
@@ -659,7 +782,13 @@ const webhookEvent = async (req: Request): Promise<Response> => {
           continue;
         }
 
-        await persistTurn(message.from, "user", userText, message.messageId);
+        await persistTurn(
+          message.from,
+          "user",
+          userText,
+          message.messageId,
+          message.contactName,
+        );
 
         // Emit WS events: new user message + AI processing
         broadcast("message:new", { phone: message.from, role: "user", content: userText });
@@ -815,6 +944,8 @@ const handlePipelineStages = async (req: Request): Promise<Response> => {
 const handlePipelineStageCreate = async (req: Request): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
+  const denied = requireAdmin(current, req);
+  if (denied) return denied;
 
   let body: unknown;
   try {
@@ -842,6 +973,7 @@ const handlePipelineStageCreate = async (req: Request): Promise<Response> => {
       data: { name, color, isActive, position },
     });
     broadcast("pipeline:updated", { action: "stage:created", stageId: stage.id });
+    void invalidateDashboardCaches();
     return json(stage, 201, req);
   } catch {
     return json({ error: "Could not create pipeline stage" }, 400, req);
@@ -854,6 +986,8 @@ const handlePipelineStageUpdate = async (
 ): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
+  const denied = requireAdmin(current, req);
+  if (denied) return denied;
 
   let body: unknown;
   try {
@@ -888,6 +1022,7 @@ const handlePipelineStageUpdate = async (
       data,
     });
     broadcast("pipeline:updated", { action: "stage:updated", stageId: stage.id });
+    void invalidateDashboardCaches();
     return json(stage, 200, req);
   } catch {
     return json({ error: "Could not update pipeline stage" }, 400, req);
@@ -900,10 +1035,13 @@ const handlePipelineStageDelete = async (
 ): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
+  const denied = requireAdmin(current, req);
+  if (denied) return denied;
 
   try {
     await current.prisma.pipelineStage.delete({ where: { id } });
     broadcast("pipeline:updated", { action: "stage:deleted", stageId: id });
+    void invalidateDashboardCaches();
     return json({ ok: true }, 200, req);
   } catch {
     return json({ error: "Could not delete pipeline stage" }, 400, req);
@@ -913,6 +1051,8 @@ const handlePipelineStageDelete = async (
 const handlePipelineStagesReorder = async (req: Request): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
+  const denied = requireAdmin(current, req);
+  if (denied) return denied;
 
   let body: unknown;
   try {
@@ -953,6 +1093,7 @@ const handlePipelineStagesReorder = async (req: Request): Promise<Response> => {
   );
 
   broadcast("pipeline:updated", { action: "stage:reordered" });
+  void invalidateDashboardCaches();
   return json({ ok: true }, 200, req);
 };
 
@@ -965,6 +1106,12 @@ const handlePipelineBoard = async (req: Request): Promise<Response> => {
   const contactLimit = Number.isInteger(contactLimitParam)
     ? Math.min(100, Math.max(5, contactLimitParam))
     : 50;
+
+  const cacheKey = `${DASHBOARD_CACHE_PREFIX}pipeline:board:${contactLimit}`;
+  const cached = await cacheGetJson<{ stages: unknown[]; unassigned: unknown[] }>(cacheKey);
+  if (cached) {
+    return json(cached, 200, req);
+  }
 
   const stages = await current.prisma.pipelineStage.findMany({
     orderBy: { position: "asc" },
@@ -999,7 +1146,9 @@ const handlePipelineBoard = async (req: Request): Promise<Response> => {
     take: contactLimit,
   });
 
-  return json({ stages, unassigned }, 200, req);
+  const payload = { stages, unassigned };
+  void cacheSetJson(cacheKey, payload, PIPELINE_CACHE_TTL_SECONDS);
+  return json(payload, 200, req);
 };
 
 const handleContactCreate = async (req: Request): Promise<Response> => {
@@ -1233,6 +1382,7 @@ const handleContactCreate = async (req: Request): Promise<Response> => {
     action: "contact:created",
     contact: contact as unknown as Record<string, unknown>,
   });
+  void invalidateDashboardCaches();
   void emitAlertsSummary(current.prisma);
   return json(contact, 201, req);
 };
@@ -1243,6 +1393,8 @@ const handleContactStageUpdate = async (
 ): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
+  const denied = requireAdmin(current, req);
+  if (denied) return denied;
 
   let body: unknown;
   try {
@@ -1279,7 +1431,46 @@ const handleContactStageUpdate = async (
   }
 
   broadcast("contact:updated", { waId, stageId, contact: contact as unknown as Record<string, unknown> });
+  void invalidateDashboardCaches();
   return json(contact, 200, req);
+};
+
+// ── Audit logging helper ─────────────────────────────────────
+const logContactChanges = async (
+  prisma: PrismaClient,
+  contactId: number,
+  userId: string | null,
+  action: string,
+  oldData: Record<string, unknown>,
+  newData: Record<string, unknown>,
+) => {
+  const entries: Array<{
+    contactId: number;
+    userId: string | null;
+    action: string;
+    field: string;
+    oldValue: string | null;
+    newValue: string | null;
+  }> = [];
+
+  for (const key of Object.keys(newData)) {
+    const oldVal = oldData[key];
+    const newVal = newData[key];
+    if (String(oldVal ?? "") !== String(newVal ?? "")) {
+      entries.push({
+        contactId,
+        userId,
+        action,
+        field: key,
+        oldValue: oldVal != null ? String(oldVal) : null,
+        newValue: newVal != null ? String(newVal) : null,
+      });
+    }
+  }
+
+  if (entries.length > 0) {
+    await (prisma as any).contactAuditLog.createMany({ data: entries });
+  }
 };
 
 const handleContactUpdate = async (
@@ -1300,10 +1491,16 @@ const handleContactUpdate = async (
     typeof body === "object" && body !== null
       ? (body as Record<string, unknown>)
       : {};
+  const isAdmin = current.user.role === "ADMIN";
+
+  if (!isAdmin && (hasOwn(input, "leadStatus") || hasOwn(input, "stageId"))) {
+    return json({ error: "Forbidden: admin only" }, 403, req);
+  }
 
   const existing = await current.prisma.contact.findUnique({
     where: { waId },
     select: {
+      id: true,
       name: true,
       email: true,
       tournament: true,
@@ -1312,6 +1509,13 @@ const handleContactUpdate = async (
       city: true,
       teamName: true,
       playersCount: true,
+      leadStatus: true,
+      stageId: true,
+      botEnabled: true,
+      handoffRequested: true,
+      triageCompleted: true,
+      source: true,
+      notes: true,
     },
   });
   if (!existing) {
@@ -1483,11 +1687,22 @@ const handleContactUpdate = async (
     handoffAssignments.delete(contact.waId);
   }
 
+  // Audit log
+  void logContactChanges(
+    current.prisma as any,
+    existing.id,
+    current.user.id,
+    "update",
+    existing as unknown as Record<string, unknown>,
+    data as unknown as Record<string, unknown>,
+  );
+
   broadcast("contact:updated", {
     waId,
     action: "contact:updated",
     contact: contact as unknown as Record<string, unknown>,
   });
+  void invalidateDashboardCaches();
   void emitAlertsSummary(current.prisma);
   return json(contact, 200, req);
 };
@@ -1498,6 +1713,8 @@ const handleContactStatusUpdate = async (
 ): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
+  const denied = requireAdmin(current, req);
+  if (denied) return denied;
 
   let body: unknown;
   try {
@@ -1523,6 +1740,7 @@ const handleContactStatusUpdate = async (
   }
 
   broadcast("contact:updated", { waId, leadStatus, contact: contact as unknown as Record<string, unknown> });
+  void invalidateDashboardCaches();
   return json(contact, 200, req);
 };
 
@@ -1532,6 +1750,8 @@ const handleContactDelete = async (
 ): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
+  const denied = requireAdmin(current, req);
+  if (denied) return denied;
 
   try {
     await current.prisma.contact.delete({ where: { waId } });
@@ -1541,7 +1761,82 @@ const handleContactDelete = async (
   handoffAssignments.delete(waId);
 
   broadcast("contact:deleted", { waId });
+  void invalidateDashboardCaches();
   return json({ ok: true }, 200, req);
+};
+
+// ── Batch actions on contacts ────────────────────────────────
+const handleContactsBatch = async (req: Request): Promise<Response> => {
+  const current = await getAuthenticatedUser(req);
+  if (current instanceof Response) return current;
+
+  let body: unknown;
+  try {
+    body = await req.json();
+  } catch {
+    return json({ error: "Invalid JSON" }, 400, req);
+  }
+
+  const input = body as Record<string, unknown>;
+  const waIds = Array.isArray(input.waIds) ? (input.waIds as string[]) : [];
+  if (!waIds.length || waIds.length > 200) {
+    return json({ error: "waIds must be an array with 1–200 items" }, 400, req);
+  }
+
+  const action = typeof input.action === "string" ? input.action : "";
+  let updated = 0;
+
+  if (action === "changeStatus") {
+    const denied = requireAdmin(current, req);
+    if (denied) return denied;
+    const status = typeof input.status === "string" ? input.status : "";
+    if (!["open", "won", "lost"].includes(status)) {
+      return json({ error: "Invalid status" }, 400, req);
+    }
+    const result = await current.prisma.contact.updateMany({
+      where: { waId: { in: waIds } },
+      data: { leadStatus: status },
+    });
+    updated = result.count;
+  } else if (action === "addTag") {
+    const tagId = typeof input.tagId === "number" ? input.tagId : Number(input.tagId);
+    if (!Number.isFinite(tagId)) {
+      return json({ error: "tagId required" }, 400, req);
+    }
+    const contacts = await current.prisma.contact.findMany({
+      where: { waId: { in: waIds } },
+      select: { id: true },
+    });
+    const data = contacts.map((c) => ({ contactId: c.id, tagId }));
+    if (data.length) {
+      await current.prisma.contactTag.createMany({ data, skipDuplicates: true });
+      updated = data.length;
+    }
+  } else if (action === "toggleBot") {
+    const botEnabled = input.botEnabled === true;
+    const result = await current.prisma.contact.updateMany({
+      where: { waId: { in: waIds } },
+      data: { botEnabled },
+    });
+    updated = result.count;
+  } else if (action === "requestHandoff") {
+    const result = await current.prisma.contact.updateMany({
+      where: { waId: { in: waIds } },
+      data: {
+        handoffRequested: true,
+        handoffAt: new Date(),
+        handoffReason: "Solicitação em lote via painel",
+        botEnabled: false,
+      },
+    });
+    updated = result.count;
+  } else {
+    return json({ error: "Unknown action" }, 400, req);
+  }
+
+  broadcast("contacts:batch", { action, count: updated });
+  void invalidateDashboardCaches();
+  return json({ ok: true, updated }, 200, req);
 };
 
 const handleContactBotToggle = async (
@@ -1582,6 +1877,7 @@ const handleContactBotToggle = async (
   }
 
   broadcast("contact:updated", { waId, botEnabled });
+  void invalidateDashboardCaches();
   return json(contact, 200, req);
 };
 
@@ -1848,6 +2144,7 @@ const handleTagCreate = async (req: Request): Promise<Response> => {
       color: typeof input.color === "string" ? input.color.trim() : "#06b6d4",
     },
   });
+  void invalidateDashboardCaches();
   return json(tag, 201, req);
 };
 
@@ -1856,6 +2153,7 @@ const handleTagDelete = async (req: Request, id: number): Promise<Response> => {
   if (current instanceof Response) return current;
 
   await current.prisma.tag.delete({ where: { id } });
+  void invalidateDashboardCaches();
   return json({ ok: true }, 200, req);
 };
 
@@ -1889,7 +2187,32 @@ const handleTagUpdate = async (req: Request, id: number): Promise<Response> => {
 
   const tag = await current.prisma.tag.update({ where: { id }, data });
   broadcast("contact:updated", { action: "tag:updated", tagId: id });
+  void invalidateDashboardCaches();
   return json(tag, 200, req);
+};
+
+// ── Contact audit log endpoint ───────────────────────────────
+const handleContactAuditLog = async (
+  req: Request,
+  waId: string,
+): Promise<Response> => {
+  const current = await getAuthenticatedUser(req);
+  if (current instanceof Response) return current;
+
+  const contact = await current.prisma.contact.findUnique({
+    where: { waId },
+    select: { id: true },
+  });
+  if (!contact) return json({ error: "Contact not found" }, 404, req);
+
+  const logs = await (current.prisma as any).contactAuditLog.findMany({
+    where: { contactId: contact.id },
+    orderBy: { createdAt: "desc" },
+    take: 100,
+    include: { user: { select: { name: true, email: true } } },
+  });
+
+  return json(logs, 200, req);
 };
 
 const handleContactTagAdd = async (
@@ -1921,6 +2244,7 @@ const handleContactTagAdd = async (
   });
 
   broadcast("contact:updated", { waId, action: "tag:added", tagId });
+  void invalidateDashboardCaches();
   return json(contactTag, 201, req);
 };
 
@@ -1940,6 +2264,7 @@ const handleContactTagRemove = async (
   });
 
   broadcast("contact:updated", { waId, action: "tag:removed", tagId });
+  void invalidateDashboardCaches();
   return json({ ok: true }, 200, req);
 };
 
@@ -2081,6 +2406,7 @@ const handleHandoffAssign = async (
   };
 
   broadcast("handoff:updated", payload as unknown as Record<string, unknown>);
+  void invalidateDashboardCaches();
   return json(payload, 200, req);
 };
 
@@ -2236,6 +2562,7 @@ const handleTaskCreate = async (req: Request): Promise<Response> => {
     taskId: task.id,
     waId: task.contact.waId,
   });
+  void invalidateDashboardCaches();
   void emitAlertsSummary(current.prisma);
   return json(task, 201, req);
 };
@@ -2359,6 +2686,7 @@ const handleTaskUpdate = async (req: Request, id: number): Promise<Response> => 
     taskId: task.id,
     waId: task.contact.waId,
   });
+  void invalidateDashboardCaches();
   void emitAlertsSummary(current.prisma);
   return json(task, 200, req);
 };
@@ -2387,6 +2715,7 @@ const handleTaskDelete = async (req: Request, id: number): Promise<Response> => 
     taskId: task.id,
     waId: task.contact.waId,
   });
+  void invalidateDashboardCaches();
   void emitAlertsSummary(current.prisma);
   return json({ ok: true }, 200, req);
 };
@@ -2472,6 +2801,9 @@ const server = Bun.serve<WsUserData>({
     if (dashboardConversationsPaths.has(url.pathname) && req.method === "GET") {
       return dashboardConversations(req);
     }
+    if (dashboardCacheMetricsPaths.has(url.pathname) && req.method === "GET") {
+      return dashboardCacheMetrics(req);
+    }
     if (
       req.method === "GET" &&
       dashboardConversationTurnsPrefix.some((pathPrefix) =>
@@ -2482,6 +2814,9 @@ const server = Bun.serve<WsUserData>({
     }
 
     // ── Pipeline / Kanban routes ─────────────────────────────
+    if (funnelMetricsPaths.has(url.pathname) && req.method === "GET") {
+      return handleFunnelMetrics(req);
+    }
     if (pipelineStagesReorderPaths.has(url.pathname) && req.method === "POST") {
       return handlePipelineStagesReorder(req);
     }
@@ -2502,6 +2837,9 @@ const server = Bun.serve<WsUserData>({
     }
     if (contactsPaths.has(url.pathname) && req.method === "POST") {
       return handleContactCreate(req);
+    }
+    if (contactsBatchPaths.has(url.pathname) && req.method === "POST") {
+      return handleContactsBatch(req);
     }
 
     // ── Contact-level routes (/contacts/:waId/...) ───────────
@@ -2529,6 +2867,9 @@ const server = Bun.serve<WsUserData>({
       }
       if (action === "tags" && req.method === "DELETE" && waId && subId) {
         return handleContactTagRemove(req, waId, Number(subId));
+      }
+      if (action === "audit" && req.method === "GET" && waId) {
+        return handleContactAuditLog(req, waId);
       }
       if (!action && req.method === "PUT" && waId) {
         return handleContactUpdate(req, waId);

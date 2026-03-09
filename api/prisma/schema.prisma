@@ -20,6 +20,7 @@ model User {
   role         UserRole @default(ADMIN)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
+  auditLogs    ContactAuditLog[]
 }
 
 model Contact {
@@ -53,6 +54,7 @@ model Contact {
   messages          Message[]
   tasks             Task[]
   tags              ContactTag[]
+  auditLogs         ContactAuditLog[]
 
   @@index([stageId])
   @@index([leadStatus])
@@ -141,4 +143,19 @@ model ContactTag {
   @@unique([contactId, tagId])
   @@index([contactId])
   @@index([tagId])
+}
+
+model ContactAuditLog {
+  id        Int      @id @default(autoincrement())
+  contactId Int
+  contact   Contact  @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  action    String
+  field     String?
+  oldValue  String?
+  newValue  String?
+  createdAt DateTime @default(now())
+
+  @@index([contactId, createdAt])
 }

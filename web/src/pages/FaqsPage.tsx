@@ -175,7 +175,14 @@ export default function FaqsPage() {
 
       <div className="space-y-2">
         {loading && (
-          <p className="text-sm text-muted-foreground">Carregando...</p>
+          <div className="space-y-2">
+            {Array.from({ length: 4 }).map((_, i) => (
+              <div key={i} className="rounded-xl border border-border/60 bg-card/50 p-4 space-y-2 animate-pulse">
+                <div className="h-4 w-2/3 rounded-md bg-muted/60" />
+                <div className="h-3 w-full rounded-md bg-muted/60" />
+              </div>
+            ))}
+          </div>
         )}
         {faqs.map((faq) => (
           <Card key={faq.id}>

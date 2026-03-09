@@ -162,7 +162,17 @@ export const extractInboundMessages = (
 
   for (const entry of payload.entry ?? []) {
     for (const change of entry.changes ?? []) {
+      const profileNameByWaId = new Map<string, string>();
+      for (const contact of change.value?.contacts ?? []) {
+        const waId = contact.wa_id?.trim();
+        const profileName = contact.profile?.name?.trim();
+        if (waId && profileName) {
+          profileNameByWaId.set(waId, profileName);
+        }
+      }
+
       for (const message of change.value?.messages ?? []) {
+        const contactName = profileNameByWaId.get(message.from);
         const text = pickTextMessage(message);
         if (text) {
           inboundMessages.push({
@@ -170,6 +180,7 @@ export const extractInboundMessages = (
             from: message.from,
             messageId: message.id,
             text,
+            contactName,
           });
           continue;
         }
@@ -183,6 +194,7 @@ export const extractInboundMessages = (
           messageId: message.id,
           mediaId: audio.mediaId,
           mimeType: audio.mimeType,
+          contactName,
         });
       }
     }

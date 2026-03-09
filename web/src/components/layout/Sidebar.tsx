@@ -19,6 +19,7 @@ import { cn } from "@/lib/utils";
 const links = [
   { to: "/dashboard", label: "Visao Geral", icon: BarChart3, end: true },
   { to: "/dashboard/conversations", label: "Conversas", icon: MessageSquareText },
+  { to: "/dashboard/contacts", label: "Contatos", icon: Users },
   { to: "/dashboard/pipeline", label: "Pipeline", icon: Columns3 },
   { to: "/dashboard/handoffs", label: "Handoff", icon: Users },
   { to: "/dashboard/tasks", label: "Tarefas", icon: ListTodo },

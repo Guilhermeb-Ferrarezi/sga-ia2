@@ -20,10 +20,17 @@ export interface WsEventPayload {
 
 type WsHandler = (event: WsEventPayload) => void;
 
+interface WsFilter {
+  types?: string[];
+  waId?: string | null;
+  stageId?: number | null;
+}
+
 interface WebSocketContextValue {
   status: WsConnectionStatus;
   lastHeartbeat: number | null;
   subscribe: (handler: WsHandler) => () => void;
+  subscribeFiltered: (handler: WsHandler, filter: WsFilter) => () => void;
 }
 
 const WebSocketContext = createContext<WebSocketContextValue | null>(null);
@@ -125,8 +132,35 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
+  const subscribeFiltered = useCallback(
+    (handler: WsHandler, filter: WsFilter) => {
+      const wrappedHandler: WsHandler = (event) => {
+        if (filter.types && filter.types.length > 0 && !filter.types.includes(event.type)) {
+          return;
+        }
+        const eventWaId = event.payload.waId ?? event.payload.phone;
+        if (filter.waId && eventWaId && eventWaId !== filter.waId) {
+          return;
+        }
+        if (
+          filter.stageId != null &&
+          event.payload.stageId != null &&
+          event.payload.stageId !== filter.stageId
+        ) {
+          return;
+        }
+        handler(event);
+      };
+      handlersRef.current.add(wrappedHandler);
+      return () => {
+        handlersRef.current.delete(wrappedHandler);
+      };
+    },
+    [],
+  );
+
   return (
-    <WebSocketContext.Provider value={{ status, lastHeartbeat, subscribe }}>
+    <WebSocketContext.Provider value={{ status, lastHeartbeat, subscribe, subscribeFiltered }}>
       {children}
     </WebSocketContext.Provider>
   );

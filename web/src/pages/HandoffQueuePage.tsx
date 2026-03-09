@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ArrowRightCircle,
+  Info,
   MessageCircle,
   RefreshCcw,
   UserCheck,
@@ -10,7 +11,7 @@ import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/contexts/AuthContext";
 import { useToast } from "@/contexts/ToastContext";
 import { useOperationalAlerts } from "@/contexts/OperationalAlertsContext";
-import { useWebSocket, type WsEventPayload } from "@/contexts/WebSocketContext";
+import { useWebSocket } from "@/contexts/WebSocketContext";
 import { api, type HandoffQueueItem } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
@@ -48,7 +49,7 @@ export default function HandoffQueuePage() {
   const navigate = useNavigate();
   const { token, user } = useAuth();
   const { toast } = useToast();
-  const { subscribe } = useWebSocket();
+  const { subscribeFiltered } = useWebSocket();
   const { refresh: refreshAlerts } = useOperationalAlerts();
   const [items, setItems] = useState<HandoffQueueItem[]>([]);
   const [loading, setLoading] = useState(false);
@@ -77,17 +78,11 @@ export default function HandoffQueuePage() {
   }, [load]);
 
   useEffect(() => {
-    return subscribe((event: WsEventPayload) => {
-      if (
-        event.type === "contact:updated" ||
-        event.type === "contact:deleted" ||
-        event.type === "handoff:updated" ||
-        event.type === "task:updated"
-      ) {
-        void load();
-      }
-    });
-  }, [subscribe, load]);
+    return subscribeFiltered(
+      () => { void load(); },
+      { types: ["contact:updated", "contact:deleted", "handoff:updated", "task:updated"] },
+    );
+  }, [subscribeFiltered, load]);
 
   const assume = async (item: HandoffQueueItem) => {
     if (!token || !user) return;
@@ -206,6 +201,20 @@ export default function HandoffQueuePage() {
       </div>
 
       <div className="space-y-3">
+        {loading && !items.length && (
+          <div className="space-y-3">
+            {Array.from({ length: 4 }).map((_, i) => (
+              <div key={i} className="rounded-xl border border-border/60 bg-card/50 p-4 space-y-2 animate-pulse">
+                <div className="flex items-center justify-between">
+                  <div className="h-4 w-1/3 rounded-md bg-muted/60" />
+                  <div className="h-5 w-20 rounded-full bg-muted/60" />
+                </div>
+                <div className="h-3 w-2/3 rounded-md bg-muted/60" />
+                <div className="h-3 w-1/2 rounded-md bg-muted/60" />
+              </div>
+            ))}
+          </div>
+        )}
         {!loading && !items.length && (
           <p className="text-sm text-muted-foreground">
             Nenhum contato aguardando atendimento humano.
@@ -225,7 +234,9 @@ export default function HandoffQueuePage() {
                     <Badge
                       variant="outline"
                       className={cn("h-5 px-2 text-[10px]", slaBadgeClass[item.slaLevel])}
+                      title="SLA de atendimento humano"
                     >
+                      <Info className="mr-1 h-3 w-3" />
                       {slaLabel[item.slaLevel]}
                     </Badge>
                     <Badge variant="outline" className="h-5 px-2 text-[10px]">

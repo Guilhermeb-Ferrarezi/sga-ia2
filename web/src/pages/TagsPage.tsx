@@ -7,6 +7,18 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import TagBadge from "@/components/dashboard/TagBadge";
 import { Label } from "@/components/ui/label";
+import { cn } from "@/lib/utils";
+
+const colorPresets = [
+  "#06b6d4",
+  "#22c55e",
+  "#3b82f6",
+  "#eab308",
+  "#f97316",
+  "#ef4444",
+  "#a855f7",
+  "#6b7280",
+];
 
 export default function TagsPage() {
   const { token } = useAuth();
@@ -105,12 +117,30 @@ export default function TagsPage() {
           </div>
           <div className="space-y-1">
             <Label>Cor</Label>
-            <input
-              type="color"
-              value={color}
-              onChange={(e) => setColor(e.target.value)}
-              className="h-9 w-12 cursor-pointer rounded border border-border bg-background"
-            />
+            <div className="space-y-1.5">
+              <div className="flex flex-wrap gap-1.5">
+                {colorPresets.map((preset) => (
+                  <button
+                    key={preset}
+                    type="button"
+                    onClick={() => setColor(preset)}
+                    className={cn(
+                      "h-6 w-6 rounded-md border border-border/60",
+                      color.toLowerCase() === preset.toLowerCase() &&
+                        "ring-2 ring-primary ring-offset-1 ring-offset-background",
+                    )}
+                    style={{ backgroundColor: preset }}
+                    aria-label={`Selecionar cor ${preset}`}
+                  />
+                ))}
+              </div>
+              <Input
+                value={color}
+                onChange={(e) => setColor(e.target.value)}
+                className="h-9 w-28"
+                placeholder="#06b6d4"
+              />
+            </div>
           </div>
           <Button size="sm" onClick={() => void create()} disabled={!name.trim()}>
             {editingId ? (
@@ -145,7 +175,16 @@ export default function TagsPage() {
       </Card>
 
       <div className="flex flex-wrap gap-3">
-        {loading && <p className="text-sm text-muted-foreground">Carregando...</p>}
+        {loading && (
+          <div className="flex flex-wrap gap-3">
+            {Array.from({ length: 8 }).map((_, i) => (
+              <div key={i} className="flex items-center gap-1.5 rounded-lg border border-border/60 bg-card/50 px-3 py-2 animate-pulse">
+                <div className="h-5 w-16 rounded-full bg-muted/60" />
+                <div className="h-6 w-6 rounded bg-muted/60" />
+              </div>
+            ))}
+          </div>
+        )}
         {tags.map((tag) => (
           <div
             key={tag.id}

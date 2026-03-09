@@ -55,6 +55,7 @@ export const config = {
     Bun.env.ASSISTANT_STYLE ??
     "respostas curtas, objetivas e orientadas a acao",
   assistantSystemPrompt: optional(Bun.env.ASSISTANT_SYSTEM_PROMPT),
+  redisUrl: optional(Bun.env.REDIS_URL),
   jwtSecret: Bun.env.JWT_SECRET ?? "dev-change-this-secret",
   jwtTtlSeconds: parseNumber(Bun.env.JWT_TTL_SECONDS, 60 * 60 * 24 * 7),
   adminEmail: optional(Bun.env.ADMIN_EMAIL),

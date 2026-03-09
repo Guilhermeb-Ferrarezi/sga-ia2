@@ -35,7 +35,7 @@ export default function ConversationDetail({
   botEnabled: initialBotEnabled,
 }: ConversationDetailProps) {
   const { token, logout } = useAuth();
-  const { subscribe } = useWebSocket();
+  const { subscribeFiltered } = useWebSocket();
   const [turns, setTurns] = useState<DashboardTurn[]>([]);
   const [loading, setLoading] = useState(false);
   const [aiProcessing, setAiProcessing] = useState(false);
@@ -72,25 +72,28 @@ export default function ConversationDetail({
 
   // Real-time message updates
   useEffect(() => {
-    return subscribe((event: WsEventPayload) => {
-      if (event.type === "message:new" && event.payload.phone === phone) {
-        const newTurn: DashboardTurn = {
-          id: `ws-${Date.now()}`,
-          role: event.payload.role as string,
-          content: event.payload.content as string,
-          createdAt: new Date().toISOString(),
-        };
-        setTurns((prev) => [...prev, newTurn]);
-        scrollToBottom();
-      }
-      if (event.type === "ai:processing" && event.payload.phone === phone) {
-        setAiProcessing(true);
-      }
-      if (event.type === "ai:done" && event.payload.phone === phone) {
-        setAiProcessing(false);
-      }
-    });
-  }, [subscribe, phone]);
+    return subscribeFiltered(
+      (event: WsEventPayload) => {
+        if (event.type === "message:new") {
+          const newTurn: DashboardTurn = {
+            id: `ws-${Date.now()}`,
+            role: event.payload.role as string,
+            content: event.payload.content as string,
+            createdAt: new Date().toISOString(),
+          };
+          setTurns((prev) => [...prev, newTurn]);
+          scrollToBottom();
+        }
+        if (event.type === "ai:processing") {
+          setAiProcessing(true);
+        }
+        if (event.type === "ai:done") {
+          setAiProcessing(false);
+        }
+      },
+      { types: ["message:new", "ai:processing", "ai:done"], waId: phone },
+    );
+  }, [subscribeFiltered, phone]);
 
   const toggleBot = async () => {
     if (!token) return;

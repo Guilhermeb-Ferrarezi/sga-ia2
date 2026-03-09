@@ -55,7 +55,7 @@ export default function Header({
           </Button>
           <div className="min-w-0 space-y-0.5">
             <p className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
-              SG Esports IA
+              SGA
             </p>
             <h1 className="truncate text-base font-bold leading-tight sm:text-lg">
               Central de Conversas

@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
-import { RefreshCcw } from "lucide-react";
+import { Loader2, RefreshCcw } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
 import { useAuth } from "@/contexts/AuthContext";
-import { useWebSocket, type WsEventPayload } from "@/contexts/WebSocketContext";
+import { useWebSocket } from "@/contexts/WebSocketContext";
 import { api, type DashboardConversation } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
@@ -26,7 +26,7 @@ const formatDateTime = (value: string): string =>
 
 export default function ConversationsTab() {
   const { token, logout } = useAuth();
-  const { subscribe } = useWebSocket();
+  const { subscribeFiltered } = useWebSocket();
   const [searchParams, setSearchParams] = useSearchParams();
   const [conversations, setConversations] = useState<DashboardConversation[]>([]);
   const [selectedPhone, setSelectedPhone] = useState<string | null>(null);
@@ -59,13 +59,11 @@ export default function ConversationsTab() {
 
   // Update conversation list on new messages
   useEffect(() => {
-    return subscribe((event: WsEventPayload) => {
-      if (event.type === "message:new") {
-        // Refresh conversation list to update previews and counts
-        void load();
-      }
-    });
-  }, [subscribe, load]);
+    return subscribeFiltered(
+      () => { void load(); },
+      { types: ["message:new"] },
+    );
+  }, [subscribeFiltered, load]);
 
   useEffect(() => {
     if (!selectedFromQuery) return;
@@ -107,13 +105,25 @@ export default function ConversationsTab() {
           <CardHeader className="pb-3">
             <CardTitle>Contatos</CardTitle>
             <CardDescription>
-              {conversations.length} conversa(s) registradas.
+              {loading
+                ? "Carregando conversas..."
+                : `${conversations.length} conversa(s) registradas.`}
             </CardDescription>
           </CardHeader>
           <Separator />
           <CardContent className="p-0">
             <ScrollArea className="h-[520px]">
               <div className="space-y-2 p-3">
+                {loading && (
+                  <div className="space-y-2 p-1">
+                    {Array.from({ length: 6 }).map((_, i) => (
+                      <div key={i} className="rounded-lg border border-border/40 p-3 space-y-2 animate-pulse">
+                        <div className="h-3.5 w-1/2 rounded-md bg-muted/60" />
+                        <div className="h-3 w-3/4 rounded-md bg-muted/60" />
+                      </div>
+                    ))}
+                  </div>
+                )}
                 {conversations.map((conversation) => (
                   <button
                     key={conversation.phone}
@@ -144,7 +154,7 @@ export default function ConversationsTab() {
                     </p>
                   </button>
                 ))}
-                {!conversations.length && (
+                {!loading && !conversations.length && (
                   <p className="px-1 py-4 text-sm text-muted-foreground">
                     Nenhuma conversa registrada ainda.
                   </p>

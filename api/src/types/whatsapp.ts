@@ -44,6 +44,7 @@ export interface InboundTextMessage {
   from: string;
   messageId: string;
   text: string;
+  contactName?: string;
 }
 
 export interface InboundAudioMessage {
@@ -51,6 +52,7 @@ export interface InboundAudioMessage {
   messageId: string;
   mediaId: string;
   mimeType?: string;
+  contactName?: string;
 }
 
 export type InboundMessage =

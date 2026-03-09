@@ -167,7 +167,20 @@ export default function TemplatesPage() {
       </Card>
 
       <div className="space-y-2">
-        {loading && <p className="text-sm text-muted-foreground">Carregando...</p>}
+        {loading && (
+          <div className="space-y-2">
+            {Array.from({ length: 4 }).map((_, i) => (
+              <div key={i} className="rounded-xl border border-border/60 bg-card/50 p-4 space-y-2 animate-pulse">
+                <div className="flex items-center gap-2">
+                  <div className="h-4 w-1/4 rounded-md bg-muted/60" />
+                  <div className="h-5 w-14 rounded-full bg-muted/60" />
+                </div>
+                <div className="h-3 w-full rounded-md bg-muted/60" />
+                <div className="h-3 w-2/3 rounded-md bg-muted/60" />
+              </div>
+            ))}
+          </div>
+        )}
         {templates.map((t) => (
           <Card key={t.id}>
             <CardContent className="flex items-center gap-3 p-4">
