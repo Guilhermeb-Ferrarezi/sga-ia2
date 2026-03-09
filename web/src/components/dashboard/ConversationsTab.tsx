@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { Loader2, RefreshCcw } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
 import { useAuth } from "@/contexts/AuthContext";
@@ -14,7 +15,6 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import ConversationDetail from "./ConversationDetail";
 
@@ -33,6 +33,14 @@ export default function ConversationsTab() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const selectedFromQuery = searchParams.get("phone");
+  const listRef = useRef<HTMLDivElement | null>(null);
+
+  const rowVirtualizer = useVirtualizer({
+    count: conversations.length,
+    getScrollElement: () => listRef.current,
+    estimateSize: () => 110,
+    overscan: 8,
+  });
 
   const load = useCallback(async () => {
     if (!token) return;
@@ -61,7 +69,7 @@ export default function ConversationsTab() {
   useEffect(() => {
     return subscribeFiltered(
       () => { void load(); },
-      { types: ["message:new"] },
+      { types: ["message:new", "message:sent", "contact:updated", "contact:deleted"] },
     );
   }, [subscribeFiltered, load]);
 
@@ -80,7 +88,7 @@ export default function ConversationsTab() {
   };
 
   return (
-    <div className="stagger space-y-5">
+    <div className="stagger flex h-[calc(100dvh-4rem-2rem)] min-h-[620px] flex-col space-y-5 overflow-hidden sm:h-[calc(100dvh-4rem-3rem)] lg:h-[calc(100dvh-4rem-3.5rem)]">
       <div className="flex items-center justify-between">
         <h2 className="text-xl font-bold">Conversas</h2>
         <Button
@@ -100,8 +108,8 @@ export default function ConversationsTab() {
         </p>
       )}
 
-      <div className="grid gap-4 lg:grid-cols-12">
-        <Card className="lg:col-span-4">
+      <div className="grid min-h-0 flex-1 gap-4 lg:grid-cols-12">
+        <Card className="flex min-h-0 flex-col lg:col-span-4">
           <CardHeader className="pb-3">
             <CardTitle>Contatos</CardTitle>
             <CardDescription>
@@ -111,9 +119,9 @@ export default function ConversationsTab() {
             </CardDescription>
           </CardHeader>
           <Separator />
-          <CardContent className="p-0">
-            <ScrollArea className="h-[520px]">
-              <div className="space-y-2 p-3">
+          <CardContent className="min-h-0 flex-1 p-0">
+            <div ref={listRef} className="h-full overflow-y-auto">
+              <div className="p-3">
                 {loading && (
                   <div className="space-y-2 p-1">
                     {Array.from({ length: 6 }).map((_, i) => (
@@ -124,43 +132,57 @@ export default function ConversationsTab() {
                     ))}
                   </div>
                 )}
-                {conversations.map((conversation) => (
-                  <button
-                    key={conversation.phone}
-                    type="button"
-                    onClick={() => handleSelectPhone(conversation.phone)}
-                    className={cn(
-                      "w-full rounded-lg border px-3 py-2 text-left transition",
-                      selectedPhone === conversation.phone
-                        ? "border-primary bg-primary/10"
-                        : "border-border bg-background/50 hover:bg-muted/70",
-                    )}
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <p className="truncate font-medium">
-                        {conversation.name
-                          ? `${conversation.name} (${conversation.phone})`
-                          : conversation.phone}
-                      </p>
-                      <Badge variant="secondary">
-                        {conversation.messagesCount}
-                      </Badge>
-                    </div>
-                    <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
-                      {conversation.lastMessagePreview}
-                    </p>
-                    <p className="mt-1 text-[11px] text-muted-foreground">
-                      {formatDateTime(conversation.lastMessageAt)}
-                    </p>
-                  </button>
-                ))}
+                {!loading && conversations.length > 0 && (
+                  <div className="relative" style={{ height: `${rowVirtualizer.getTotalSize()}px` }}>
+                    {rowVirtualizer.getVirtualItems().map((virtualRow) => {
+                      const conversation = conversations[virtualRow.index];
+                      if (!conversation) return null;
+
+                      return (
+                        <div
+                          key={conversation.phone}
+                          className="absolute left-0 top-0 w-full"
+                          style={{ transform: `translateY(${virtualRow.start}px)` }}
+                        >
+                          <button
+                            type="button"
+                            onClick={() => handleSelectPhone(conversation.phone)}
+                            className={cn(
+                              "w-full rounded-lg border px-3 py-2 text-left transition",
+                              selectedPhone === conversation.phone
+                                ? "border-primary bg-primary/10"
+                                : "border-border bg-background/50 hover:bg-muted/70",
+                            )}
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <p className="truncate font-medium">
+                                {conversation.name
+                                  ? `${conversation.name} (${conversation.phone})`
+                                  : conversation.phone}
+                              </p>
+                              <Badge variant="secondary">
+                                {conversation.messagesCount}
+                              </Badge>
+                            </div>
+                            <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
+                              {conversation.lastMessagePreview}
+                            </p>
+                            <p className="mt-1 text-[11px] text-muted-foreground">
+                              {formatDateTime(conversation.lastMessageAt)}
+                            </p>
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
                 {!loading && !conversations.length && (
                   <p className="px-1 py-4 text-sm text-muted-foreground">
                     Nenhuma conversa registrada ainda.
                   </p>
                 )}
               </div>
-            </ScrollArea>
+            </div>
           </CardContent>
         </Card>
 
@@ -174,7 +196,7 @@ export default function ConversationsTab() {
             }
           />
         ) : (
-          <Card className="flex items-center justify-center lg:col-span-8">
+          <Card className="flex h-full items-center justify-center lg:col-span-8">
             <CardContent>
               <p className="text-sm text-muted-foreground">
                 Selecione um contato para ver as mensagens.

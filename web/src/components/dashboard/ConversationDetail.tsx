@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type UIEvent } from "react";
 import { Bot, BotOff, Loader2, Send } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { useWebSocket, type WsEventPayload } from "@/contexts/WebSocketContext";
@@ -13,9 +13,10 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import LoadingScreen from "@/components/ui/loading-screen";
+
+const TURNS_PAGE_SIZE = 120;
 
 const formatDateTime = (value: string): string =>
   new Intl.DateTimeFormat("pt-BR", {
@@ -38,11 +39,16 @@ export default function ConversationDetail({
   const { subscribeFiltered } = useWebSocket();
   const [turns, setTurns] = useState<DashboardTurn[]>([]);
   const [loading, setLoading] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [aiProcessing, setAiProcessing] = useState(false);
   const [botEnabled, setBotEnabled] = useState(initialBotEnabled ?? true);
   const [messageText, setMessageText] = useState("");
   const [sending, setSending] = useState(false);
+  const [turnsLimit, setTurnsLimit] = useState(TURNS_PAGE_SIZE);
+  const [hasMoreTurns, setHasMoreTurns] = useState(true);
+  const listRef = useRef<HTMLDivElement | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const scrollToBottom = () => {
     setTimeout(() => {
@@ -50,50 +56,115 @@ export default function ConversationDetail({
     }, 50);
   };
 
-  const loadTurns = useCallback(async () => {
+  const loadTurns = useCallback(async (
+    limit: number,
+    opts?: { showLoading?: boolean; preserveOffset?: boolean; scrollToEnd?: boolean },
+  ) => {
     if (!token || !phone) return;
-    setLoading(true);
+    const showLoading = opts?.showLoading ?? false;
+    const preserveOffset = opts?.preserveOffset ?? false;
+    const scrollToEndAfterLoad = opts?.scrollToEnd ?? false;
+
+    const container = listRef.current;
+    const previousScrollHeight = preserveOffset ? container?.scrollHeight ?? 0 : 0;
+    const previousScrollTop = preserveOffset ? container?.scrollTop ?? 0 : 0;
+
+    if (showLoading) setLoading(true);
     try {
-      const data = await api.conversationTurns(token, phone, 500);
+      const data = await api.conversationTurns(token, phone, limit);
       setTurns(data);
-      scrollToBottom();
+      setHasMoreTurns(data.length >= limit);
+
+      if (scrollToEndAfterLoad) {
+        scrollToBottom();
+      } else if (preserveOffset) {
+        setTimeout(() => {
+          const current = listRef.current;
+          if (!current) return;
+          const currentScrollHeight = current.scrollHeight;
+          const delta = currentScrollHeight - previousScrollHeight;
+          current.scrollTop = Math.max(0, previousScrollTop + delta);
+        }, 0);
+      }
     } catch (err: unknown) {
       if (err && typeof err === "object" && "status" in err && (err as { status: number }).status === 401) {
         logout();
       }
     } finally {
-      setLoading(false);
+      if (showLoading) setLoading(false);
     }
   }, [token, phone, logout]);
 
   useEffect(() => {
-    void loadTurns();
-  }, [loadTurns]);
+    setTurnsLimit(TURNS_PAGE_SIZE);
+    setHasMoreTurns(true);
+    void loadTurns(TURNS_PAGE_SIZE, { showLoading: true, scrollToEnd: true });
+  }, [phone, loadTurns]);
+
+  const scheduleTurnsRefresh = useCallback(() => {
+    if (refreshTimerRef.current) {
+      clearTimeout(refreshTimerRef.current);
+    }
+    refreshTimerRef.current = setTimeout(() => {
+      void loadTurns(turnsLimit);
+    }, 220);
+  }, [loadTurns, turnsLimit]);
+
+  useEffect(() => {
+    return () => {
+      if (refreshTimerRef.current) {
+        clearTimeout(refreshTimerRef.current);
+      }
+    };
+  }, []);
 
   // Real-time message updates
   useEffect(() => {
     return subscribeFiltered(
       (event: WsEventPayload) => {
-        if (event.type === "message:new") {
-          const newTurn: DashboardTurn = {
-            id: `ws-${Date.now()}`,
-            role: event.payload.role as string,
-            content: event.payload.content as string,
-            createdAt: new Date().toISOString(),
-          };
-          setTurns((prev) => [...prev, newTurn]);
+        if (event.type === "message:new" || event.type === "message:sent") {
+          const content =
+            typeof event.payload.content === "string" ? event.payload.content : "";
+          const role = typeof event.payload.role === "string" ? event.payload.role : "user";
+
+          if (content) {
+            const newTurn: DashboardTurn = {
+              id: `ws-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+              role,
+              content,
+              createdAt: new Date().toISOString(),
+            };
+            setTurns((prev) => [...prev, newTurn]);
+          }
           scrollToBottom();
+          scheduleTurnsRefresh();
         }
         if (event.type === "ai:processing") {
           setAiProcessing(true);
         }
         if (event.type === "ai:done") {
           setAiProcessing(false);
+          scheduleTurnsRefresh();
         }
       },
-      { types: ["message:new", "ai:processing", "ai:done"], waId: phone },
+      { types: ["message:new", "message:sent", "ai:processing", "ai:done"], waId: phone },
     );
-  }, [subscribeFiltered, phone]);
+  }, [subscribeFiltered, phone, scheduleTurnsRefresh]);
+
+  const handleTurnsScroll = async (event: UIEvent<HTMLDivElement>) => {
+    const target = event.currentTarget;
+    if (loading || loadingMore || !hasMoreTurns) return;
+    if (target.scrollTop > 24) return;
+
+    const nextLimit = turnsLimit + TURNS_PAGE_SIZE;
+    setLoadingMore(true);
+    setTurnsLimit(nextLimit);
+    try {
+      await loadTurns(nextLimit, { preserveOffset: true });
+    } finally {
+      setLoadingMore(false);
+    }
+  };
 
   const toggleBot = async () => {
     if (!token) return;
@@ -120,7 +191,7 @@ export default function ConversationDetail({
   };
 
   return (
-    <Card className="flex h-full flex-col lg:col-span-8">
+    <Card className="flex h-full min-h-0 flex-col overflow-hidden lg:col-span-8">
       <CardHeader className="pb-3">
         <div className="flex items-center justify-between gap-2">
           <div>
@@ -153,8 +224,14 @@ export default function ConversationDetail({
         </div>
       </CardHeader>
       <Separator />
-      <CardContent className="flex-1 p-0">
-        <ScrollArea className="h-[460px]">
+      <CardContent className="min-h-0 flex-1 p-0">
+        <div
+          ref={listRef}
+          className="h-full overflow-y-scroll pr-1"
+          onScroll={(event) => {
+            void handleTurnsScroll(event);
+          }}
+        >
           <div className="space-y-3 p-4">
             {loading ? (
               <LoadingScreen
@@ -164,6 +241,12 @@ export default function ConversationDetail({
                 description="Buscando mensagens desta conversa."
               />
             ) : null}
+            {!loading && loadingMore && (
+              <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                Carregando mensagens antigas...
+              </div>
+            )}
             {!loading && !turns.length && (
               <p className="text-sm text-muted-foreground">
                 Sem mensagens para este contato.
@@ -200,7 +283,7 @@ export default function ConversationDetail({
             )}
             <div ref={scrollRef} />
           </div>
-        </ScrollArea>
+        </div>
       </CardContent>
 
       {/* Human chat input — always visible but indicates when bot is enabled */}

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type UIEvent } from "react";
 import { createPortal } from "react-dom";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
@@ -17,6 +17,7 @@ import {
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/contexts/AuthContext";
 import { useToast } from "@/contexts/ToastContext";
+import { useWebSocket } from "@/contexts/WebSocketContext";
 import { useRetry } from "@/hooks/useRetry";
 import { useSavedFilters } from "@/hooks/useSavedFilters";
 import { api, type PipelineContact } from "@/lib/api";
@@ -102,13 +103,18 @@ const buildDetailsForm = (contact: PipelineContact): DetailsFormState => ({
   botEnabled: contact.botEnabled,
 });
 
+const CONTACTS_PAGE_SIZE = 120;
+
 export default function ContactsPage() {
   const navigate = useNavigate();
   const { token, logout, user } = useAuth();
+  const { subscribeFiltered } = useWebSocket();
   const { toast } = useToast();
   const { run: retryRun } = useRetry();
   const [contacts, setContacts] = useState<PipelineContact[]>([]);
   const [loading, setLoading] = useState(false);
+  const [loadingMoreContacts, setLoadingMoreContacts] = useState(false);
+  const [visibleContactsCount, setVisibleContactsCount] = useState(CONTACTS_PAGE_SIZE);
   const [deletingWaId, setDeletingWaId] = useState<string | null>(null);
 
   const contactFilterDefaults = {
@@ -131,6 +137,7 @@ export default function ContactsPage() {
   const [auditLoading, setAuditLoading] = useState(false);
   const canManageLeads = user?.role === "ADMIN";
   const contactsListRef = useRef<HTMLDivElement | null>(null);
+  const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const load = useCallback(async () => {
     if (!token) return;
@@ -149,6 +156,7 @@ export default function ContactsPage() {
         return bTime - aTime;
       });
       setContacts(allContacts);
+      setVisibleContactsCount(CONTACTS_PAGE_SIZE);
       setTagsCatalog(tagData.items);
     } catch (err: unknown) {
       if (
@@ -173,6 +181,36 @@ export default function ContactsPage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    return subscribeFiltered(
+      () => {
+        if (refreshTimerRef.current) {
+          clearTimeout(refreshTimerRef.current);
+        }
+        refreshTimerRef.current = setTimeout(() => {
+          void load();
+        }, 180);
+      },
+      {
+        types: [
+          "message:new",
+          "contact:updated",
+          "contact:deleted",
+          "pipeline:updated",
+          "contacts:batch",
+        ],
+      },
+    );
+  }, [subscribeFiltered, load]);
+
+  useEffect(() => {
+    return () => {
+      if (refreshTimerRef.current) {
+        clearTimeout(refreshTimerRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (!detailsContact) {
@@ -226,12 +264,34 @@ export default function ContactsPage() {
     });
   }, [contacts, search, statusFilter, botFilter, handoffFilter]);
 
+  useEffect(() => {
+    setVisibleContactsCount(CONTACTS_PAGE_SIZE);
+  }, [search, statusFilter, botFilter, handoffFilter]);
+
+  const displayedContacts = useMemo(
+    () => filteredContacts.slice(0, visibleContactsCount),
+    [filteredContacts, visibleContactsCount],
+  );
+
   const contactsVirtualizer = useVirtualizer({
-    count: filteredContacts.length,
+    count: displayedContacts.length,
     getScrollElement: () => contactsListRef.current,
     estimateSize: () => 176,
     overscan: 6,
   });
+
+  const handleContactsScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
+    const target = event.currentTarget;
+    if (loading || loadingMoreContacts) return;
+    if (visibleContactsCount >= filteredContacts.length) return;
+
+    const distanceToBottom = target.scrollHeight - target.scrollTop - target.clientHeight;
+    if (distanceToBottom > 160) return;
+
+    setLoadingMoreContacts(true);
+    setVisibleContactsCount((prev) => Math.min(prev + CONTACTS_PAGE_SIZE, filteredContacts.length));
+    setTimeout(() => setLoadingMoreContacts(false), 120);
+  }, [loading, loadingMoreContacts, visibleContactsCount, filteredContacts.length]);
 
   const availableTagsForDetails = useMemo(() => {
     if (!detailsContact) return [];
@@ -572,10 +632,14 @@ export default function ContactsPage() {
         )}
 
         {filteredContacts.length > 0 && (
-          <div ref={contactsListRef} className="max-h-[68vh] overflow-y-auto pr-1">
+          <div
+            ref={contactsListRef}
+            className="max-h-[68vh] overflow-y-auto pr-1"
+            onScroll={handleContactsScroll}
+          >
             <div className="relative" style={{ height: `${contactsVirtualizer.getTotalSize()}px` }}>
               {contactsVirtualizer.getVirtualItems().map((virtualRow) => {
-                const contact = filteredContacts[virtualRow.index];
+                const contact = displayedContacts[virtualRow.index];
                 if (!contact) return null;
                 const status = normalizeLeadStatus(contact.leadStatus);
                 const isDeleting = deletingWaId === contact.waId;
@@ -672,13 +736,18 @@ export default function ContactsPage() {
                 );
               })}
             </div>
+            {loadingMoreContacts && (
+              <div className="py-2 text-center text-xs text-muted-foreground">
+                Carregando mais contatos...
+              </div>
+            )}
           </div>
         )}
 
         {!loading && filteredContacts.length > 0 && (
           <Card className="border-border/70">
             <CardContent className="flex items-center justify-between gap-2 p-3 text-sm">
-              <span className="text-muted-foreground">{filteredContacts.length} contato(s)</span>
+              <span className="text-muted-foreground">{displayedContacts.length} de {filteredContacts.length} contato(s)</span>
               <span className="text-xs text-muted-foreground">Rolagem otimizada ativa</span>
             </CardContent>
           </Card>

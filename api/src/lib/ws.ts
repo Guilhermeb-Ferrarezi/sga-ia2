@@ -46,14 +46,19 @@ const buildMessage = (type: string, payload: Record<string, unknown>): string =>
 /** Broadcast an event to every connected client. */
 export const broadcast = (type: string, payload: Record<string, unknown>): void => {
   const message = buildMessage(type, payload);
+  let sent = 0;
   for (const set of connections.values()) {
     for (const ws of set) {
       try {
         ws.send(message);
+        sent++;
       } catch {
         /* socket may have closed between iteration and send */
       }
     }
+  }
+  if (type !== "bot:heartbeat") {
+    console.log(`[ws] broadcast ${type} to ${sent} client(s)`);
   }
 };
 

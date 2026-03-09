@@ -434,10 +434,14 @@ const persistTurn = async (
       },
     });
 
-    if (contactName && (!contact.name || !contact.name.trim())) {
+    if (
+      contactName &&
+      contactName.trim() &&
+      (contact.name ?? "").trim().toLowerCase() !== contactName.trim().toLowerCase()
+    ) {
       await prisma.contact.update({
         where: { id: contact.id },
-        data: { name: contactName },
+        data: { name: contactName.trim() },
       });
     }
 
@@ -755,13 +759,19 @@ const webhookEvent = async (req: Request): Promise<Response> => {
     return json({ error: "Invalid JSON payload" }, 400);
   }
 
+  console.log("[webhook] received event payload entries:", payload.entry?.length ?? 0);
+
   const inbound = extractInboundMessages(payload);
+  console.log("[webhook] extracted inbound messages:", inbound.length);
 
   void (async () => {
     for (const message of inbound) {
       if (!shouldProcessMessage(message.messageId)) {
+        console.log(`[webhook] skipping duplicate message ${message.messageId}`);
         continue;
       }
+      console.log(`[webhook] processing message from ${message.from} (${message.type})`);
+
 
       try {
         try {
@@ -793,7 +803,11 @@ const webhookEvent = async (req: Request): Promise<Response> => {
         // Emit WS events: new user message + AI processing
         broadcast("message:new", { phone: message.from, role: "user", content: userText });
         broadcast("ai:processing", { phone: message.from });
-        broadcast("notification", { phone: message.from, preview: userText.slice(0, 120) });
+        broadcast("notification", {
+          phone: message.from,
+          name: message.contactName ?? null,
+          preview: userText.slice(0, 120),
+        });
 
         const prisma = await getPrismaClient();
         let aiReply: string;

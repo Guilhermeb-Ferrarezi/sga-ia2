@@ -27,7 +27,21 @@ const playSound = () => {
     audio.volume = 0.3;
     void audio.play();
   } catch {
-    /* ignore autoplay restrictions */
+    try {
+      // Fallback beep when media playback is blocked by browser policy.
+      const audioContext = new AudioContext();
+      const oscillator = audioContext.createOscillator();
+      const gain = audioContext.createGain();
+      oscillator.type = "sine";
+      oscillator.frequency.value = 880;
+      gain.gain.value = 0.03;
+      oscillator.connect(gain);
+      gain.connect(audioContext.destination);
+      oscillator.start();
+      oscillator.stop(audioContext.currentTime + 0.12);
+    } catch {
+      /* ignore autoplay restrictions */
+    }
   }
 };
 
@@ -39,6 +53,7 @@ export function useNotifications() {
   const { subscribe } = useWebSocket();
   const { toast } = useToast();
   const initialized = useRef(false);
+  const lastNotificationRef = useRef<{ key: string; at: number } | null>(null);
 
   useEffect(() => {
     if (!initialized.current) {
@@ -47,18 +62,37 @@ export function useNotifications() {
     }
 
     return subscribe((event: WsEventPayload) => {
-      if (event.type !== "notification") return;
+      const isNotification = event.type === "notification";
+      const isInboundMessageEvent =
+        event.type === "message:new" && (event.payload.role as string) === "user";
+      if (!isNotification && !isInboundMessageEvent) return;
 
       const phone = (event.payload.phone as string) ?? "Contato";
-      const preview = (event.payload.preview as string) ?? "";
+      const name = (event.payload.name as string | undefined)?.trim();
+      const preview =
+        isNotification
+          ? ((event.payload.preview as string) ?? "")
+          : ((event.payload.content as string) ?? "");
+      const displayName = name || phone;
+
+      const key = `${displayName}:${preview}`;
+      const now = Date.now();
+      if (
+        lastNotificationRef.current &&
+        lastNotificationRef.current.key === key &&
+        now - lastNotificationRef.current.at < 1200
+      ) {
+        return;
+      }
+      lastNotificationRef.current = { key, at: now };
 
       playSound();
       toast({
-        title: `Nova mensagem de ${phone}`,
+        title: `Nova mensagem de ${displayName}`,
         description: preview || "Mensagem recebida agora.",
       });
       showBrowserNotification(
-        `Nova mensagem de ${phone}`,
+        `Nova mensagem de ${displayName}`,
         preview,
       );
     });

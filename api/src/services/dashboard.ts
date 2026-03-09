@@ -117,9 +117,9 @@ export class DashboardService {
     });
     if (!contact) return [];
 
-    const turns = await prisma.message.findMany({
+    const latestTurns = await prisma.message.findMany({
       where: { contactId: contact.id },
-      orderBy: { createdAt: "asc" },
+      orderBy: { createdAt: "desc" },
       take: limit,
       select: {
         id: true,
@@ -128,6 +128,8 @@ export class DashboardService {
         createdAt: true,
       },
     });
+
+    const turns = [...latestTurns].reverse();
 
     return turns.map((turn) => ({
       id: String(turn.id),
