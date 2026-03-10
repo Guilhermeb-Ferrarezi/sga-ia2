@@ -424,6 +424,144 @@ const saveFaqFeedbackCache = async (
   await cacheSetJson(`${FAQ_FEEDBACK_CACHE_PREFIX}${key}`, aiReply, FAQ_FEEDBACK_TTL_SECONDS);
 };
 
+// ── Auto Tasks: detect task/reminder intent in user messages ──
+const tryAutoTask = async (
+  prisma: PrismaClient,
+  contactId: number,
+  userMessage: string,
+): Promise<void> => {
+  try {
+    const taskIntent = await openAI.detectTaskIntent(userMessage);
+    if (!taskIntent) return;
+
+    await prisma.task.create({
+      data: {
+        contactId,
+        title: taskIntent.title,
+        dueAt: new Date(taskIntent.dueAt),
+        status: "open",
+        priority: "medium",
+      },
+    });
+
+    console.log(`[auto-task] created "${taskIntent.title}" for contact ${contactId}`);
+    broadcast("task:created", {
+      contactId,
+      title: taskIntent.title,
+      dueAt: taskIntent.dueAt,
+      source: "auto",
+    });
+    void invalidateDashboardCaches();
+  } catch (error) {
+    console.error("[auto-task] failed for contact", contactId, error);
+  }
+};
+
+// ── Auto-summary on stage change ──
+const tryAutoSummaryOnStageChange = async (
+  prisma: PrismaClient,
+  contactId: number,
+  phone: string,
+  previousStageId: number | null,
+  newStageId: number | null,
+): Promise<void> => {
+  if (previousStageId === newStageId) return;
+  if (newStageId === null) return;
+
+  try {
+    const stage = await prisma.pipelineStage.findUnique({
+      where: { id: newStageId },
+      select: { name: true },
+    });
+
+    const messages = await prisma.message.findMany({
+      where: { contactId },
+      orderBy: { createdAt: "asc" },
+      take: 60,
+      select: { direction: true, body: true },
+    });
+
+    const transcript = messages
+      .map((m) => `${m.direction === "in" ? "Usuario" : "Assistente"}: ${m.body}`)
+      .join("\n");
+
+    const response = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${config.openaiApiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: config.openaiModel,
+        input: [
+          {
+            role: "system",
+            content: [
+              {
+                type: "input_text",
+                text: `O contato acabou de ser movido para o estagio "${stage?.name ?? "desconhecido"}" no pipeline. Resuma a conversa em no maximo 150 palavras, focando nos pontos relevantes para este novo estagio. Responda apenas com o resumo.`,
+              },
+            ],
+          },
+          {
+            role: "user",
+            content: [{ type: "input_text", text: transcript }],
+          },
+        ],
+        max_output_tokens: 250,
+      }),
+    });
+
+    if (!response.ok) return;
+
+    const payload = (await response.json()) as { output_text?: string };
+    const summary = payload.output_text?.trim();
+    if (!summary) return;
+
+    await prisma.contact.update({
+      where: { id: contactId },
+      data: { aiSummary: summary },
+    });
+
+    console.log(`[auto-summary-stage] updated for contact ${phone} -> ${stage?.name}`);
+  } catch (error) {
+    console.error(`[auto-summary-stage] failed for contact ${phone}`, error);
+  }
+};
+
+// ── Semantic reply cache: reuse similar answers ──
+const SEMANTIC_REPLY_CACHE_PREFIX = "esports:semantic-reply:";
+const SEMANTIC_REPLY_TTL_SECONDS = 12 * 60 * 60; // 12h
+
+const buildSemanticKey = (text: string): string => {
+  const words = text
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9\s]/g, "")
+    .split(/\s+/)
+    .filter((w) => w.length >= 4 && !AUTO_FAQ_STOP_WORDS.has(w))
+    .sort();
+  return words.slice(0, 5).join("_");
+};
+
+const trySemanticReplyCache = async (
+  userMessage: string,
+): Promise<string | null> => {
+  const key = buildSemanticKey(userMessage);
+  if (!key) return null;
+  return cacheGetJson<string>(`${SEMANTIC_REPLY_CACHE_PREFIX}${key}`);
+};
+
+const saveSemanticReplyCache = async (
+  userMessage: string,
+  aiReply: string,
+): Promise<void> => {
+  const key = buildSemanticKey(userMessage);
+  if (!key) return;
+  await cacheSetJson(`${SEMANTIC_REPLY_CACHE_PREFIX}${key}`, aiReply, SEMANTIC_REPLY_TTL_SECONDS);
+};
+
 // ── Handoff Escalation: auto-check stale handoffs and send WhatsApp follow-up ──
 const HANDOFF_ESCALATION_INTERVAL_MS = 60_000; // check every 60s
 const HANDOFF_ESCALATION_WARN_MINUTES = 15;
@@ -1176,20 +1314,26 @@ const webhookEvent = async (req: Request): Promise<Response> => {
         const prisma = await getPrismaClient();
         let aiReply: string;
 
-        // FAQ Feedback Loop: check cache for repeated question
-        const cachedReply = await tryFaqFeedbackCache(userText);
+        // Send typing indicator immediately so user sees activity
+        void whatsapp.sendTypingIndicator(message.from);
+
+        // FAQ Feedback Loop + Semantic Reply Cache: check for repeated/similar question
+        const cachedReply =
+          (await tryFaqFeedbackCache(userText)) ??
+          (await trySemanticReplyCache(userText));
         if (cachedReply && prisma) {
           const latestContact = await prisma.contact.findUnique({
             where: { waId: message.from },
             select: { botEnabled: true },
           });
           if (latestContact && latestContact.botEnabled) {
-            await sleep(computeReplyDelayMs(userText));
+            const typingDelay = Math.min(2000, Math.max(500, cachedReply.length * 15));
+            await sleep(typingDelay);
             await whatsapp.sendTextMessage(message.from, cachedReply);
             await persistTurn(message.from, "assistant", cachedReply);
             broadcast("message:new", { phone: message.from, role: "assistant", content: cachedReply });
             broadcast("ai:done", { phone: message.from });
-            console.log(`[faq-feedback] served cached reply to ${message.from}`);
+            console.log(`[cache-reply] served cached reply to ${message.from}`);
             continue;
           }
         }
@@ -1287,11 +1431,20 @@ const webhookEvent = async (req: Request): Promise<Response> => {
           aiReply = await openAI.generateReply(userText, prisma, message.from, {
             triageMissing: missingFields,
           });
+
+          // Auto-detect task/reminder intent (fire-and-forget)
+          if (contact) {
+            void tryAutoTask(prisma, contact.id, userText);
+          }
         } else {
           aiReply = await openAI.generateReply(userText);
         }
 
-        await sleep(computeReplyDelayMs(userText));
+        // Typing delay: short, based on AI reply length, minus time already spent on OpenAI
+        const typingDelay = Math.min(3000, Math.max(400, aiReply.length * 12));
+        if (typingDelay > 0) {
+          await sleep(typingDelay);
+        }
 
         if (prisma) {
           const latestContact = await prisma.contact.findUnique({
@@ -1316,8 +1469,9 @@ const webhookEvent = async (req: Request): Promise<Response> => {
           broadcast("overview:updated", overview as unknown as Record<string, unknown>);
           // Fire-and-forget: auto-add FAQ if this question was asked by multiple contacts
           void tryAutoFaq(prisma, message.from, userText, aiReply);
-          // Cache the reply for the FAQ feedback loop (24h)
+          // Cache the reply for the FAQ feedback loop (24h) + semantic cache (12h)
           void saveFaqFeedbackCache(userText, aiReply);
+          void saveSemanticReplyCache(userText, aiReply);
         }
       } catch (error) {
         console.error(
@@ -2132,6 +2286,18 @@ const handleContactUpdate = async (
   });
   void invalidateDashboardCaches();
   void emitAlertsSummary(current.prisma);
+
+  // Auto-summary when stage changes
+  if (hasOwn(input, "stageId") && existing.stageId !== (data.stageId ?? null)) {
+    void tryAutoSummaryOnStageChange(
+      current.prisma,
+      existing.id,
+      waId,
+      existing.stageId,
+      (data.stageId ?? null) as number | null,
+    );
+  }
+
   return json(contact, 200, req);
 };
 

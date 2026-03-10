@@ -426,6 +426,64 @@ export class OpenAIService {
   }
 
   /**
+   * Detect if a user message contains a task/reminder intent.
+   * Returns { title, dueAt } or null.
+   */
+  async detectTaskIntent(
+    userMessage: string,
+  ): Promise<{ title: string; dueAt: string } | null> {
+    const response = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${this.apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: this.model,
+        input: [
+          {
+            role: "system",
+            content: [
+              {
+                type: "input_text",
+                text: [
+                  "Analise a mensagem do usuario e detecte se contem um pedido de tarefa, lembrete ou acao futura.",
+                  `A data de hoje e: ${new Date().toISOString().slice(0, 10)}.`,
+                  "INCLUA: 'me lembra de...', 'preciso de...', 'configura...', 'agenda...', 'manda amanha...', 'envia depois...'",
+                  "EXCLUA: perguntas, saudações, dados de triagem, respostas simples.",
+                  "Se for tarefa, retorne JSON: {\"title\": \"<titulo curto>\", \"dueAt\": \"<ISO date string>\"}",
+                  "Se nao for tarefa, retorne: {\"skip\": true}",
+                  "Retorne APENAS JSON valido, sem markdown.",
+                ].join(" "),
+              },
+            ],
+          },
+          {
+            role: "user",
+            content: [{ type: "input_text", text: userMessage }],
+          },
+        ],
+        max_output_tokens: 150,
+      }),
+    });
+
+    if (!response.ok) return null;
+
+    const payload = (await response.json()) as OpenAIResponseBody;
+    const parsed = extractFirstJsonObject(safeParseText(payload));
+    if (!parsed || parsed.skip === true) return null;
+
+    const title = typeof parsed.title === "string" ? parsed.title.trim() : null;
+    const dueAt = typeof parsed.dueAt === "string" ? parsed.dueAt.trim() : null;
+    if (!title || !dueAt) return null;
+
+    const parsedDate = new Date(dueAt);
+    if (Number.isNaN(parsedDate.getTime())) return null;
+
+    return { title, dueAt: parsedDate.toISOString() };
+  }
+
+  /**
    * Evaluate whether a user message + AI reply pair is generic enough to become a FAQ.
    * Returns a normalized { question, answer } or null if the message should not be a FAQ.
    */

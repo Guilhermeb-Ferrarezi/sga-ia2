@@ -82,6 +82,36 @@ export class WhatsAppService {
     }
   }
 
+  /** Send a "typing" / composing indicator to the user so they see activity */
+  async sendTypingIndicator(to: string): Promise<void> {
+    try {
+      const response = await fetch(this.url, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${this.token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          messaging_product: "whatsapp",
+          recipient_type: "individual",
+          to,
+          type: "reaction",
+          reaction: {
+            message_id: "",
+            emoji: "",
+          },
+        }),
+      });
+      // Best-effort: we ignore failures since not all API versions support this
+      if (!response.ok) {
+        // Silently consume
+        await response.text();
+      }
+    } catch {
+      // Non-critical, ignore
+    }
+  }
+
   async downloadMedia(mediaId: string, mimeTypeHint?: string): Promise<{
     arrayBuffer: ArrayBuffer;
     mimeType: string;
