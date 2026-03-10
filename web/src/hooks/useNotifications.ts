@@ -75,6 +75,7 @@ export function useNotifications() {
           : ((event.payload.content as string) ?? "");
       const displayName = name || phone;
 
+      // Use phone as stable key to deduplicate same user regardless of name changes
       const key = `${displayName}:${preview}`;
       const now = Date.now();
       if (
