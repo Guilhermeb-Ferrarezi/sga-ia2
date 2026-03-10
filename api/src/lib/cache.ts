@@ -2,6 +2,8 @@ import Redis from "ioredis";
 import { config } from "../config";
 
 let client: Redis | null = null;
+let runtimeDisabled = false;
+let disabledReason: string | null = null;
 
 type CacheMetrics = {
   enabled: boolean;
@@ -15,6 +17,7 @@ type CacheMetrics = {
   invalidationErrors: number;
   keysDeleted: number;
   lastInvalidatedAt: string | null;
+  disabledReason: string | null;
 };
 
 const metrics: CacheMetrics = {
@@ -29,10 +32,52 @@ const metrics: CacheMetrics = {
   invalidationErrors: 0,
   keysDeleted: 0,
   lastInvalidatedAt: null,
+  disabledReason: null,
+};
+
+const getErrorCode = (error: unknown): string | undefined => {
+  if (!error || typeof error !== "object") return undefined;
+  const code = Reflect.get(error, "code");
+  return typeof code === "string" ? code : undefined;
+};
+
+const getErrorMessage = (error: unknown): string | undefined => {
+  if (!error || typeof error !== "object") return undefined;
+  const message = Reflect.get(error, "message");
+  return typeof message === "string" ? message : undefined;
+};
+
+const disableRuntimeCache = (reason: string): void => {
+  if (runtimeDisabled) return;
+
+  runtimeDisabled = true;
+  disabledReason = reason;
+  metrics.connected = false;
+  metrics.disabledReason = reason;
+
+  if (client) {
+    client.removeAllListeners();
+    client.disconnect();
+    client = null;
+  }
+
+  console.warn(`[redis] cache disabled: ${reason}`);
+};
+
+const handleRedisFailure = (error: unknown): void => {
+  const code = getErrorCode(error);
+  const message = getErrorMessage(error) ?? "Unknown Redis error";
+
+  if (code === "ENOTFOUND" || code === "EAI_AGAIN" || code === "ECONNREFUSED") {
+    disableRuntimeCache(`${code}: ${message}`);
+    return;
+  }
+
+  console.warn("[redis] error", error);
 };
 
 const getClient = (): Redis | null => {
-  if (!config.redisUrl) return null;
+  if (!config.redisUrl || runtimeDisabled) return null;
   if (client) return client;
 
   client = new Redis(config.redisUrl, {
@@ -43,7 +88,7 @@ const getClient = (): Redis | null => {
 
   client.on("error", (error: unknown) => {
     metrics.connected = false;
-    console.warn("[redis] error", error);
+    handleRedisFailure(error);
   });
 
   client.on("connect", () => {
@@ -65,8 +110,9 @@ const ensureConnected = async (redis: Redis): Promise<boolean> => {
     const connected = redis.status === "ready" || redis.status === "connect";
     metrics.connected = connected;
     return connected;
-  } catch {
+  } catch (error) {
     metrics.connected = false;
+    handleRedisFailure(error);
     return false;
   }
 };
@@ -155,5 +201,6 @@ export const cacheDeleteByPrefix = async (prefix: string): Promise<void> => {
 
 export const getCacheMetrics = (): CacheMetrics => ({
   ...metrics,
-  enabled: Boolean(config.redisUrl),
+  enabled: Boolean(config.redisUrl) && !runtimeDisabled,
+  disabledReason,
 });
