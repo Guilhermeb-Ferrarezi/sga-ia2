@@ -46,6 +46,26 @@ const auth = new AuthService({
   adminPassword: config.adminPassword,
 });
 const dashboard = new DashboardService();
+let contactAuditLogAvailable = true;
+
+const isPrismaMissingTableError = (error: unknown, tableName: string): boolean => {
+  if (!error || typeof error !== "object") return false;
+
+  const code = Reflect.get(error, "code");
+  if (code !== "P2021") return false;
+
+  const meta = Reflect.get(error, "meta");
+  if (!meta || typeof meta !== "object") return false;
+
+  const table = Reflect.get(meta, "table");
+  return table === tableName;
+};
+
+const disableContactAuditLog = (reason: string): void => {
+  if (!contactAuditLogAvailable) return;
+  contactAuditLogAvailable = false;
+  console.warn(`[contact-audit] disabled: ${reason}`);
+};
 
 const whatsapp = new WhatsAppService(
   config.whatsappToken,
@@ -1483,7 +1503,17 @@ const logContactChanges = async (
   }
 
   if (entries.length > 0) {
-    await (prisma as any).contactAuditLog.createMany({ data: entries });
+    if (!contactAuditLogAvailable) return;
+
+    try {
+      await (prisma as any).contactAuditLog.createMany({ data: entries });
+    } catch (error) {
+      if (isPrismaMissingTableError(error, "public.ContactAuditLog")) {
+        disableContactAuditLog("missing table public.ContactAuditLog");
+        return;
+      }
+      throw error;
+    }
   }
 };
 
@@ -2219,14 +2249,26 @@ const handleContactAuditLog = async (
   });
   if (!contact) return json({ error: "Contact not found" }, 404, req);
 
-  const logs = await (current.prisma as any).contactAuditLog.findMany({
-    where: { contactId: contact.id },
-    orderBy: { createdAt: "desc" },
-    take: 100,
-    include: { user: { select: { name: true, email: true } } },
-  });
+  if (!contactAuditLogAvailable) {
+    return json([], 200, req);
+  }
 
-  return json(logs, 200, req);
+  try {
+    const logs = await (current.prisma as any).contactAuditLog.findMany({
+      where: { contactId: contact.id },
+      orderBy: { createdAt: "desc" },
+      take: 100,
+      include: { user: { select: { name: true, email: true } } },
+    });
+
+    return json(logs, 200, req);
+  } catch (error) {
+    if (isPrismaMissingTableError(error, "public.ContactAuditLog")) {
+      disableContactAuditLog("missing table public.ContactAuditLog");
+      return json([], 200, req);
+    }
+    throw error;
+  }
 };
 
 const handleContactTagAdd = async (
