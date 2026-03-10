@@ -22,8 +22,11 @@ const getClient = (): S3Client => {
     throw new Error("Cloudflare R2 credentials not configured");
   }
   client = new S3Client({
-    region: "auto",
-    endpoint: `https://${config.cloudflareAccountId}.r2.cloudflarestorage.com`,
+    region: config.cloudflareR2Region ?? "auto",
+    endpoint:
+      config.cloudflareR2Endpoint ??
+      `https://${config.cloudflareAccountId}.r2.cloudflarestorage.com`,
+    forcePathStyle: true,
     credentials: {
       accessKeyId: config.cloudflareAccessKeyId,
       secretAccessKey: config.cloudflareSecretAccessKey,
@@ -41,14 +44,25 @@ export async function uploadToR2(
   if (!bucket) throw new Error("CLOUDFLARE_BUCKET_NAME not configured");
   const normalizedKey = normalizeAudioKey(key);
 
-  await getClient().send(
-    new PutObjectCommand({
-      Bucket: bucket,
-      Key: normalizedKey,
-      Body: body,
-      ContentType: contentType,
-    }),
-  );
+  try {
+    await getClient().send(
+      new PutObjectCommand({
+        Bucket: bucket,
+        Key: normalizedKey,
+        Body: body,
+        ContentType: contentType,
+      }),
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const lowered = message.toLowerCase();
+    if (lowered.includes("access denied") || lowered.includes("accessdenied")) {
+      throw new Error(
+        "Access Denied no R2: valide CLOUDFLARE_ACCESS_KEY_ID/CLOUDFLARE_SECRET_ACCESS_KEY, permissao Object Write no bucket e CLOUDFLARE_BUCKET_NAME.",
+      );
+    }
+    throw error;
+  }
 
   const publicUrl = config.cloudflarePublicUrl;
   if (publicUrl) {

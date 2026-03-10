@@ -68,5 +68,7 @@ export const config = {
   cloudflareAccessKeyId: optional(Bun.env.CLOUDFLARE_ACCESS_KEY_ID),
   cloudflareSecretAccessKey: optional(Bun.env.CLOUDFLARE_SECRET_ACCESS_KEY),
   cloudflareBucketName: optional(Bun.env.CLOUDFLARE_BUCKET_NAME),
+  cloudflareR2Endpoint: optional(Bun.env.CLOUDFLARE_R2_ENDPOINT),
+  cloudflareR2Region: optional(Bun.env.CLOUDFLARE_R2_REGION),
   cloudflarePublicUrl: optional(Bun.env.CLOUDFLARE_PUBLIC_URL),
 } as const;
