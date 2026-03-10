@@ -320,7 +320,7 @@ export class OpenAIService {
           .slice(0, -1) // drop the latest (current user message already persisted)
           .map((m) => ({
             role: (m.direction === "in" ? "user" : "assistant") as "user" | "assistant",
-            content: [{ type: "text", text: m.body }],
+            content: [{ type: "input_text", text: m.body }],
           }));
 
         // Trigger periodic summary generation
@@ -336,12 +336,12 @@ export class OpenAIService {
     const input: ChatMessage[] = [
       {
         role: "system",
-        content: [{ type: "text", text: this.buildSystemPrompt(extras) }],
+        content: [{ type: "input_text", text: this.buildSystemPrompt(extras) }],
       },
       ...historyMessages,
       {
         role: "user",
-        content: [{ type: "text", text: userMessage }],
+        content: [{ type: "input_text", text: userMessage }],
       },
     ];
 
@@ -388,7 +388,7 @@ export class OpenAIService {
             role: "system",
             content: [
               {
-                type: "text",
+                type: "input_text",
                 text: [
                   "Extraia dados estruturados de lead para atendimento de campeonato de esports.",
                   "Retorne APENAS JSON valido (sem markdown, sem texto extra).",
@@ -402,7 +402,7 @@ export class OpenAIService {
           },
           {
             role: "user",
-            content: [{ type: "text", text: userMessage }],
+            content: [{ type: "input_text", text: userMessage }],
           },
         ],
         max_output_tokens: 220,
@@ -454,14 +454,14 @@ export class OpenAIService {
               role: "system",
               content: [
                 {
-                  type: "text",
+                  type: "input_text",
                   text: "Resuma a conversa abaixo em no maximo 200 palavras, destacando: assuntos discutidos, preferencias do usuario, e proximos passos combinados. Responda apenas com o resumo.",
                 },
               ],
             },
             {
               role: "user",
-              content: [{ type: "text", text: transcript }],
+              content: [{ type: "input_text", text: transcript }],
             },
           ],
           max_output_tokens: 300,
