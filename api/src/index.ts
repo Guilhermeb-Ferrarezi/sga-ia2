@@ -276,6 +276,248 @@ const computeMissingLeadFields = (contact: ContactTriageSnapshot): string[] => {
   return missing;
 };
 
+/** Auto-move contact to next pipeline stage when triage is complete and stageId is null */
+const tryAutoQualify = async (
+  prisma: PrismaClient,
+  contactId: number,
+  triageCompleted: boolean,
+  currentStageId: number | null,
+): Promise<void> => {
+  try {
+    // Only auto-qualify if triage is complete and contact has no stage yet
+    if (!triageCompleted || currentStageId !== null) return;
+
+    // Get the first (earliest) pipeline stage
+    const firstStage = await prisma.pipelineStage.findFirst({
+      where: { isActive: true },
+      orderBy: { position: "asc" },
+      select: { id: true, name: true },
+    });
+
+    if (!firstStage) return;
+
+    // Move contact to first stage
+    const updated = await prisma.contact.update({
+      where: { id: contactId },
+      data: { stageId: firstStage.id },
+    });
+
+    console.log(
+      `[auto-qualify] moved contact ${contactId} to stage "${firstStage.name}"`,
+    );
+
+    broadcast("contact:qualified", {
+      contactId,
+      stagedId: firstStage.id,
+      stageName: firstStage.name,
+    });
+
+    void invalidateDashboardCaches();
+  } catch (error) {
+    console.error("[auto-qualify] failed for contact", contactId, error);
+  }
+};
+
+// ── Auto-tags: apply tags based on extracted lead data ────────────────────────
+const AUTO_TAG_RULES: Array<{
+  name: string;
+  color: string;
+  match: (c: ContactTriageSnapshot & { age?: string | null; level?: string | null }) => boolean;
+}> = [
+  {
+    name: "Urgente",
+    color: "#ef4444",
+    match: (c) => {
+      if (!c.eventDate) return false;
+      const eventDate = new Date(c.eventDate);
+      if (Number.isNaN(eventDate.getTime())) return false;
+      const daysUntil = (eventDate.getTime() - Date.now()) / (1000 * 60 * 60 * 24);
+      return daysUntil >= 0 && daysUntil <= 7;
+    },
+  },
+  {
+    name: "Time Pequeno",
+    color: "#f59e0b",
+    match: (c) =>
+      typeof c.playersCount === "number" && c.playersCount > 0 && c.playersCount < 5,
+  },
+  {
+    name: "Time Grande",
+    color: "#10b981",
+    match: (c) => typeof c.playersCount === "number" && c.playersCount >= 10,
+  },
+  {
+    name: "Iniciante",
+    color: "#8b5cf6",
+    match: (c) => {
+      const lvl = c.level?.toLowerCase().trim() ?? "";
+      return /^(iniciante|beginner|noob|novato|comecando)$/.test(lvl);
+    },
+  },
+];
+
+const tryAutoTag = async (
+  prisma: PrismaClient,
+  contactId: number,
+  snapshot: ContactTriageSnapshot & { age?: string | null; level?: string | null },
+): Promise<void> => {
+  try {
+    const matchedRules = AUTO_TAG_RULES.filter((rule) => rule.match(snapshot));
+    if (matchedRules.length === 0) return;
+
+    for (const rule of matchedRules) {
+      // Upsert tag
+      const tag = await prisma.tag.upsert({
+        where: { name: rule.name },
+        update: {},
+        create: { name: rule.name, color: rule.color },
+      });
+
+      // Link to contact if not already linked
+      const existing = await prisma.contactTag.findUnique({
+        where: { contactId_tagId: { contactId, tagId: tag.id } },
+        select: { id: true },
+      });
+
+      if (!existing) {
+        await prisma.contactTag.create({
+          data: { contactId, tagId: tag.id },
+        });
+        console.log(`[auto-tag] added "${rule.name}" to contact ${contactId}`);
+        broadcast("contact:tagged", { contactId, tagName: rule.name, tagId: tag.id });
+      }
+    }
+  } catch (error) {
+    console.error("[auto-tag] failed for contact", contactId, error);
+  }
+};
+
+// ── FAQ Feedback Loop: cache recent Q&A and serve cached answer for repeated questions ──
+const FAQ_FEEDBACK_CACHE_PREFIX = "esports:faq-feedback:";
+const FAQ_FEEDBACK_TTL_SECONDS = 24 * 60 * 60; // 24h
+
+const normalizeFaqKey = (text: string): string =>
+  text
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9\s]/g, "")
+    .split(/\s+/)
+    .filter((w) => w.length >= 3 && !AUTO_FAQ_STOP_WORDS.has(w))
+    .sort()
+    .join("_");
+
+const tryFaqFeedbackCache = async (
+  userMessage: string,
+): Promise<string | null> => {
+  const key = normalizeFaqKey(userMessage);
+  if (!key) return null;
+  return cacheGetJson<string>(`${FAQ_FEEDBACK_CACHE_PREFIX}${key}`);
+};
+
+const saveFaqFeedbackCache = async (
+  userMessage: string,
+  aiReply: string,
+): Promise<void> => {
+  const key = normalizeFaqKey(userMessage);
+  if (!key) return;
+  await cacheSetJson(`${FAQ_FEEDBACK_CACHE_PREFIX}${key}`, aiReply, FAQ_FEEDBACK_TTL_SECONDS);
+};
+
+// ── Handoff Escalation: auto-check stale handoffs and send WhatsApp follow-up ──
+const HANDOFF_ESCALATION_INTERVAL_MS = 60_000; // check every 60s
+const HANDOFF_ESCALATION_WARN_MINUTES = 15;
+let handoffEscalationInterval: ReturnType<typeof setInterval> | null = null;
+
+const runHandoffEscalation = async (): Promise<void> => {
+  const prisma = await getPrismaClient();
+  if (!prisma) return;
+
+  try {
+    const warnThreshold = new Date(
+      Date.now() - HANDOFF_ESCALATION_WARN_MINUTES * 60_000,
+    );
+
+    // Find contacts waiting for handoff > 15 min that still have no human response
+    const staleHandoffs = await prisma.contact.findMany({
+      where: {
+        handoffRequested: true,
+        botEnabled: false,
+        handoffAt: {
+          not: null,
+          lte: warnThreshold,
+        },
+      },
+      select: {
+        id: true,
+        waId: true,
+        name: true,
+        handoffAt: true,
+        messages: {
+          where: { direction: "out" },
+          orderBy: { createdAt: "desc" },
+          take: 1,
+          select: { createdAt: true, body: true },
+        },
+      },
+    });
+
+    for (const contact of staleHandoffs) {
+      const lastOut = contact.messages[0];
+      // Only escalate if the last outbound message was BEFORE handleoff (= no human replied)
+      const lastOutTime = lastOut?.createdAt?.getTime() ?? 0;
+      const handoffTime = contact.handoffAt?.getTime() ?? 0;
+
+      // Skip if a human already replied after handoff
+      if (lastOutTime > handoffTime) continue;
+
+      // Skip if we already sent an escalation follow-up (check body pattern)
+      if (lastOut?.body?.includes("ainda estamos buscando")) continue;
+
+      const waitMin = Math.floor((Date.now() - handoffTime) / 60_000);
+      const followUp = `Oi${contact.name ? ` ${contact.name}` : ""}, ainda estamos buscando um atendente para voce. Tempo de espera: ${waitMin} min. Obrigado pela paciencia!`;
+
+      try {
+        await whatsapp.sendTextMessage(contact.waId, followUp);
+        await persistTurn(contact.waId, "assistant", followUp);
+        broadcast("message:new", {
+          phone: contact.waId,
+          role: "assistant",
+          content: followUp,
+        });
+        broadcast("handoff:escalation", {
+          contactId: contact.id,
+          waId: contact.waId,
+          waitMinutes: waitMin,
+        });
+        console.log(
+          `[handoff-escalation] sent follow-up to ${contact.waId} (${waitMin}min wait)`,
+        );
+      } catch (err) {
+        console.error(
+          `[handoff-escalation] failed to send to ${contact.waId}`,
+          err,
+        );
+      }
+    }
+  } catch (error) {
+    console.error("[handoff-escalation] check failed", error);
+  }
+};
+
+const startHandoffEscalation = (): void => {
+  if (handoffEscalationInterval) return;
+  handoffEscalationInterval = setInterval(() => {
+    void runHandoffEscalation();
+  }, HANDOFF_ESCALATION_INTERVAL_MS);
+};
+
+const stopHandoffEscalation = (): void => {
+  if (!handoffEscalationInterval) return;
+  clearInterval(handoffEscalationInterval);
+  handoffEscalationInterval = null;
+};
+
 const VALID_LEAD_STATUS = new Set(["open", "won", "lost"]);
 const VALID_TASK_STATUS = new Set(["open", "in_progress", "done", "cancelled"]);
 const VALID_TASK_PRIORITY = new Set(["low", "medium", "high", "urgent"]);
@@ -933,6 +1175,25 @@ const webhookEvent = async (req: Request): Promise<Response> => {
 
         const prisma = await getPrismaClient();
         let aiReply: string;
+
+        // FAQ Feedback Loop: check cache for repeated question
+        const cachedReply = await tryFaqFeedbackCache(userText);
+        if (cachedReply && prisma) {
+          const latestContact = await prisma.contact.findUnique({
+            where: { waId: message.from },
+            select: { botEnabled: true },
+          });
+          if (latestContact && latestContact.botEnabled) {
+            await sleep(computeReplyDelayMs(userText));
+            await whatsapp.sendTextMessage(message.from, cachedReply);
+            await persistTurn(message.from, "assistant", cachedReply);
+            broadcast("message:new", { phone: message.from, role: "assistant", content: cachedReply });
+            broadcast("ai:done", { phone: message.from });
+            console.log(`[faq-feedback] served cached reply to ${message.from}`);
+            continue;
+          }
+        }
+
         if (prisma) {
           let contact = await prisma.contact.findUnique({ where: { waId: message.from } });
           if (contact && !contact.botEnabled) {
@@ -989,6 +1250,23 @@ const webhookEvent = async (req: Request): Promise<Response> => {
               contact: contact as unknown as Record<string, unknown>,
             });
             void emitAlertsSummary(prisma);
+
+            // Auto-qualify if triage just completed
+            if (updateData.triageCompleted === true && !wantsHuman) {
+              void tryAutoQualify(
+                prisma,
+                contact.id,
+                contact.triageCompleted,
+                contact.stageId,
+              );
+            }
+
+            // Auto-tag based on extracted data
+            void tryAutoTag(prisma, contact.id, {
+              ...mergedSnapshot,
+              age: contact.age,
+              level: contact.level,
+            });
           }
 
           if (wantsHuman) {
@@ -1038,6 +1316,8 @@ const webhookEvent = async (req: Request): Promise<Response> => {
           broadcast("overview:updated", overview as unknown as Record<string, unknown>);
           // Fire-and-forget: auto-add FAQ if this question was asked by multiple contacts
           void tryAutoFaq(prisma, message.from, userText, aiReply);
+          // Cache the reply for the FAQ feedback loop (24h)
+          void saveFaqFeedbackCache(userText, aiReply);
         }
       } catch (error) {
         console.error(
@@ -3133,12 +3413,14 @@ const server = Bun.serve<WsUserData>({
 startHeartbeat(30_000);
 if (config.enableDb) {
   startAlertsBroadcast();
+  startHandoffEscalation();
 }
 
 const shutdown = (signal: string) => {
   console.log(`Received ${signal}, shutting down`);
   stopHeartbeat();
   stopAlertsBroadcast();
+  stopHandoffEscalation();
   server.stop(true);
   process.exit(0);
 };
