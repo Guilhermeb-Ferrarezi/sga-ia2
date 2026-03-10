@@ -1276,7 +1276,39 @@ const webhookEvent = async (req: Request): Promise<Response> => {
 
       try {
         try {
-          await whatsapp.markAsRead(message.messageId);
+          // Only mark as read if bot is still active for this contact
+          const prismaForRead = await getPrismaClient();
+          let skipProcessing = false;
+          if (prismaForRead) {
+            const contactForRead = await prismaForRead.contact.findUnique({
+              where: { waId: message.from },
+              select: { botEnabled: true, handoffRequested: true },
+            });
+            if (contactForRead && !contactForRead.botEnabled) {
+              // Don't mark as read — handoff is active, let the human agent handle it
+              skipProcessing = true;
+            } else {
+              await whatsapp.markAsRead(message.messageId);
+            }
+          } else {
+            await whatsapp.markAsRead(message.messageId);
+          }
+          if (skipProcessing) {
+            // Still persist the message for history
+            await persistTurn(
+              message.from,
+              "user",
+              (await resolveInboundText(message)).trim() || "[mensagem nao processada]",
+              message.messageId,
+              message.contactName,
+            );
+            broadcast("message:new", {
+              phone: message.from,
+              role: "user",
+              content: (await resolveInboundText(message)).trim() || "[mensagem nao processada]",
+            });
+            continue;
+          }
         } catch (error) {
           console.warn(
             `[message:${message.messageId}] could not mark as read`,
@@ -1313,9 +1345,6 @@ const webhookEvent = async (req: Request): Promise<Response> => {
 
         const prisma = await getPrismaClient();
         let aiReply: string;
-
-        // Send typing indicator immediately so user sees activity
-        void whatsapp.sendTypingIndicator(message.from);
 
         // FAQ Feedback Loop + Semantic Reply Cache: check for repeated/similar question
         const cachedReply =
@@ -1440,8 +1469,8 @@ const webhookEvent = async (req: Request): Promise<Response> => {
           aiReply = await openAI.generateReply(userText);
         }
 
-        // Typing delay: short, based on AI reply length, minus time already spent on OpenAI
-        const typingDelay = Math.min(3000, Math.max(400, aiReply.length * 12));
+        // Short natural delay based on AI reply length (simulates reading + typing)
+        const typingDelay = Math.min(1500, Math.max(300, aiReply.length * 8));
         if (typingDelay > 0) {
           await sleep(typingDelay);
         }
@@ -1655,14 +1684,26 @@ const handlePipelineStagesReorder = async (req: Request): Promise<Response> => {
     return json({ error: "stageIds has invalid values" }, 400, req);
   }
 
-  await current.prisma.$transaction(
-    uniqueStageIds.map((id, index) =>
-      current.prisma.pipelineStage.update({
-        where: { id },
-        data: { position: index + 1 },
-      }),
-    ),
-  );
+  await current.prisma.$transaction(async (tx) => {
+    // First set all positions to negative offsets to avoid unique constraint collisions
+    await Promise.all(
+      uniqueStageIds.map((id, index) =>
+        tx.pipelineStage.update({
+          where: { id },
+          data: { position: -(index + 1) },
+        }),
+      ),
+    );
+    // Then set final positions
+    await Promise.all(
+      uniqueStageIds.map((id, index) =>
+        tx.pipelineStage.update({
+          where: { id },
+          data: { position: index + 1 },
+        }),
+      ),
+    );
+  });
 
   broadcast("pipeline:updated", { action: "stage:reordered" });
   void invalidateDashboardCaches();
