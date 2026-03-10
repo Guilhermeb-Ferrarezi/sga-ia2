@@ -111,6 +111,19 @@ export interface MessageTemplate {
   updatedAt: string;
 }
 
+export interface Audio {
+  id: number;
+  title: string;
+  filename: string;
+  r2Key: string;
+  url: string;
+  mimeType: string;
+  sizeBytes: number;
+  category: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface PaginatedResult<T> {
   items: T[];
   total: number;
@@ -611,7 +624,68 @@ export const api = {
   async deleteTemplate(token: string, id: number): Promise<void> {
     await request(`/templates/${id}`, { method: "DELETE" }, token);
   },
+  // ── Audios ──────────────────────────────────────────────
 
+  async audios(
+    token: string,
+    filters?: { limit?: number; offset?: number; search?: string; category?: string },
+  ): Promise<PaginatedResult<Audio>> {
+    const params = new URLSearchParams();
+    if (typeof filters?.limit === "number") params.set("limit", String(filters.limit));
+    if (typeof filters?.offset === "number") params.set("offset", String(filters.offset));
+    if (filters?.search) params.set("search", filters.search);
+    if (filters?.category) params.set("category", filters.category);
+    const suffix = params.toString() ? `?${params.toString()}` : "";
+    return request<PaginatedResult<Audio>>(`/audios${suffix}`, { method: "GET" }, token);
+  },
+
+  async uploadAudio(
+    token: string,
+    file: File,
+    meta?: { title?: string; category?: string },
+  ): Promise<Audio> {
+    const formData = new FormData();
+    formData.append("file", file);
+    if (meta?.title) formData.append("title", meta.title);
+    if (meta?.category) formData.append("category", meta.category);
+
+    const response = await fetch(`${API_BASE}/audios`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+      body: formData,
+    });
+
+    const raw = await response.text();
+    let payload: unknown = null;
+    if (raw) {
+      try { payload = JSON.parse(raw); } catch { payload = null; }
+    }
+    if (!response.ok) {
+      const message =
+        typeof payload === "object" && payload !== null && "error" in payload &&
+        typeof (payload as { error?: unknown }).error === "string"
+          ? (payload as { error: string }).error
+          : "Erro ao enviar audio";
+      throw new ApiError(message, response.status);
+    }
+    return payload as Audio;
+  },
+
+  async updateAudio(
+    token: string,
+    id: number,
+    data: Partial<{ title: string; category: string }>,
+  ): Promise<Audio> {
+    return request<Audio>(
+      `/audios/${id}`,
+      { method: "PUT", body: JSON.stringify(data) },
+      token,
+    );
+  },
+
+  async deleteAudio(token: string, id: number): Promise<void> {
+    await request(`/audios/${id}`, { method: "DELETE" }, token);
+  },
   // ── Tags ───────────────────────────────────────────────────
 
   async tags(

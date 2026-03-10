@@ -159,3 +159,18 @@ model ContactAuditLog {
 
   @@index([contactId, createdAt])
 }
+
+model Audio {
+  id        Int      @id @default(autoincrement())
+  title     String
+  filename  String
+  r2Key     String   @unique
+  url       String
+  mimeType  String   @default("audio/mpeg")
+  sizeBytes Int      @default(0)
+  category  String   @default("geral")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([category])
+}

@@ -64,4 +64,9 @@ export const config = {
   replyDelayMinMs: parseNumber(Bun.env.REPLY_DELAY_MIN_MS, 700),
   replyDelayMaxMs: parseNumber(Bun.env.REPLY_DELAY_MAX_MS, 7000),
   enableDb: Bun.env.ENABLE_DB === "true",
+  cloudflareAccountId: optional(Bun.env.CLOUDFLARE_ACCOUNT_ID),
+  cloudflareAccessKeyId: optional(Bun.env.CLOUDFLARE_ACCESS_KEY_ID),
+  cloudflareSecretAccessKey: optional(Bun.env.CLOUDFLARE_SECRET_ACCESS_KEY),
+  cloudflareBucketName: optional(Bun.env.CLOUDFLARE_BUCKET_NAME),
+  cloudflarePublicUrl: optional(Bun.env.CLOUDFLARE_PUBLIC_URL),
 } as const;

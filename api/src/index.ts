@@ -18,6 +18,7 @@ import {
   classifyHandoffSla,
   computeHandoffWaitMinutes,
 } from "./lib/operationalAlerts";
+import { uploadToR2, deleteFromR2 } from "./services/r2";
 import {
   broadcast,
   registerConnection,
@@ -228,6 +229,14 @@ const handoffQueuePaths = new Set<string>([
 const handoffQueuePrefix = [
   `${config.apiBasePath}/handoff/queue/`,
   "/handoff/queue/",
+];
+const audioPaths = new Set<string>([
+  `${config.apiBasePath}/audios`,
+  "/audios",
+]);
+const audioPrefix = [
+  `${config.apiBasePath}/audios/`,
+  "/audios/",
 ];
 const wsUpgradePaths = new Set<string>([
   `${config.apiBasePath}/ws`,
@@ -3367,6 +3376,170 @@ const handleTaskDelete = async (req: Request, id: number): Promise<Response> => 
   return json({ ok: true }, 200, req);
 };
 
+// ── Audio endpoints ─────────────────────────────────────────────────
+
+const ALLOWED_AUDIO_TYPES = new Set([
+  "audio/mpeg",
+  "audio/mp3",
+  "audio/mp4",
+  "audio/ogg",
+  "audio/wav",
+  "audio/webm",
+  "audio/aac",
+  "audio/x-m4a",
+  "audio/m4a",
+]);
+
+const MAX_AUDIO_SIZE = 25 * 1024 * 1024; // 25 MB
+
+const handleAudioList = async (req: Request): Promise<Response> => {
+  try {
+    const current = await getAuthenticatedUser(req);
+    if (current instanceof Response) return current;
+
+    const url = new URL(req.url);
+    const limit = Math.min(100, Math.max(1, Number(url.searchParams.get("limit") ?? "50") || 50));
+    const offset = Math.max(0, Number(url.searchParams.get("offset") ?? "0") || 0);
+    const search = url.searchParams.get("search")?.trim();
+    const category = url.searchParams.get("category")?.trim();
+
+    const where: Prisma.AudioWhereInput = {};
+    if (search) {
+      where.OR = [
+        { title: { contains: search, mode: "insensitive" } },
+        { filename: { contains: search, mode: "insensitive" } },
+      ];
+    }
+    if (category) {
+      where.category = { equals: category, mode: "insensitive" };
+    }
+
+    const [items, total] = await Promise.all([
+      current.prisma.audio.findMany({ where, orderBy: { createdAt: "desc" }, skip: offset, take: limit }),
+      current.prisma.audio.count({ where }),
+    ]);
+
+    return json({ items, total, limit, offset }, 200, req);
+  } catch (error) {
+    console.error("handleAudioList error:", error);
+    return json({ error: "Erro ao listar audios" }, 500, req);
+  }
+};
+
+const handleAudioUpload = async (req: Request): Promise<Response> => {
+  try {
+    const current = await getAuthenticatedUser(req);
+    if (current instanceof Response) return current;
+
+    const contentType = req.headers.get("content-type") ?? "";
+    if (!contentType.includes("multipart/form-data")) {
+      return json({ error: "multipart/form-data required" }, 400, req);
+    }
+
+    let formData: FormData;
+    try {
+      formData = await req.formData();
+    } catch {
+      return json({ error: "Invalid form data" }, 400, req);
+    }
+
+    const file = formData.get("file");
+    if (!file || !(file instanceof File)) {
+      return json({ error: "file field is required" }, 400, req);
+    }
+
+    if (!ALLOWED_AUDIO_TYPES.has(file.type) && !file.type.startsWith("audio/")) {
+      return json({ error: "Only audio files are allowed" }, 400, req);
+    }
+
+    if (file.size > MAX_AUDIO_SIZE) {
+      return json({ error: "File too large (max 25 MB)" }, 400, req);
+    }
+
+    const title = (formData.get("title") as string | null)?.trim() || file.name.replace(/\.[^.]+$/, "");
+    const category = (formData.get("category") as string | null)?.trim() || "geral";
+
+    const ext = file.name.split(".").pop() ?? "mp3";
+    const safeFilename = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
+    const r2Key = `audios/${Date.now()}_${safeFilename}`;
+
+    const arrayBuffer = await file.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+
+    const url = await uploadToR2(r2Key, buffer, file.type);
+
+    const audio = await current.prisma.audio.create({
+      data: {
+        title,
+        filename: file.name,
+        r2Key,
+        url,
+        mimeType: file.type || "audio/mpeg",
+        sizeBytes: file.size,
+        category,
+      },
+    });
+
+    return json(audio, 201, req);
+  } catch (error) {
+    console.error("handleAudioUpload error:", error);
+    return json({ error: `Erro ao enviar audio: ${error instanceof Error ? error.message : "unknown"}` }, 500, req);
+  }
+};
+
+const handleAudioUpdate = async (req: Request, id: number): Promise<Response> => {
+  try {
+    const current = await getAuthenticatedUser(req);
+    if (current instanceof Response) return current;
+
+    let body: unknown;
+    try {
+      body = await req.json();
+    } catch {
+      return json({ error: "Invalid JSON" }, 400, req);
+    }
+
+    const input = body as Record<string, unknown>;
+    const data: Record<string, unknown> = {};
+    if (typeof input.title === "string") data.title = input.title.trim();
+    if (typeof input.category === "string") data.category = input.category.trim();
+
+    const audio = await current.prisma.audio.update({ where: { id }, data });
+    return json(audio, 200, req);
+  } catch (error) {
+    console.error("handleAudioUpdate error:", error);
+    return json({ error: error instanceof Error && error.message.includes("not found") ? "Audio nao encontrado" : "Erro ao atualizar audio" }, 500, req);
+  }
+};
+
+const handleAudioDelete = async (req: Request, id: number): Promise<Response> => {
+  try {
+    const current = await getAuthenticatedUser(req);
+    if (current instanceof Response) return current;
+
+    let audio: { r2Key: string };
+    try {
+      audio = await current.prisma.audio.delete({
+        where: { id },
+        select: { r2Key: true },
+      });
+    } catch {
+      return json({ error: "Audio nao encontrado" }, 404, req);
+    }
+
+    try {
+      await deleteFromR2(audio.r2Key);
+    } catch {
+      // File already removed or R2 unavailable — DB record is already gone
+    }
+
+    return json({ ok: true }, 200, req);
+  } catch (error) {
+    console.error("handleAudioDelete error:", error);
+    return json({ error: "Erro ao deletar audio" }, 500, req);
+  }
+};
+
 // ── Helper: parse suffix from a matching prefix list ───────────────
 
 const extractPathSuffix = (pathname: string, prefixes: string[]): string | null => {
@@ -3566,7 +3739,41 @@ const server = Bun.serve<WsUserData>({
       if (id && req.method === "DELETE") return handleTagDelete(req, id);
     }
 
-    // ── Webhook routes ───────────────────────────────────────
+    // ── Audio routes ─────────────────────────────────────────
+    if (audioPaths.has(url.pathname)) {
+      if (req.method === "OPTIONS") {
+        return new Response(null, {
+          status: 204,
+          headers: {
+            "Access-Control-Allow-Origin": config.webOrigin,
+            "Access-Control-Allow-Headers": "Authorization, Content-Type",
+            "Access-Control-Allow-Methods": CORS_METHODS,
+          },
+        });
+      }
+      if (req.method === "GET") return handleAudioList(req);
+      if (req.method === "POST") return handleAudioUpload(req);
+    }
+    const audioSuffix = extractPathSuffix(url.pathname, audioPrefix);
+    if (audioSuffix) {
+      const id = Number(audioSuffix);
+      if (id) {
+        if (req.method === "OPTIONS") {
+          return new Response(null, {
+            status: 204,
+            headers: {
+              "Access-Control-Allow-Origin": config.webOrigin,
+              "Access-Control-Allow-Headers": "Authorization, Content-Type",
+              "Access-Control-Allow-Methods": CORS_METHODS,
+            },
+          });
+        }
+        if (req.method === "PUT") return handleAudioUpdate(req, id);
+        if (req.method === "DELETE") return handleAudioDelete(req, id);
+      }
+    }
+
+    // ── Task routes ──────────────────────────────────────────
     if (taskPaths.has(url.pathname)) {
       if (req.method === "GET") return handleTaskList(req);
       if (req.method === "POST") return handleTaskCreate(req);

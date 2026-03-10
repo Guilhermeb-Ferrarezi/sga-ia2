@@ -9,6 +9,7 @@ import {
   Tags,
   ListTodo,
   Users,
+  Volume2,
   X,
 } from "lucide-react";
 import { useOperationalAlerts } from "@/contexts/OperationalAlertsContext";
@@ -26,6 +27,7 @@ const links = [
   { to: "/dashboard/faqs", label: "FAQs", icon: HelpCircle },
   { to: "/dashboard/templates", label: "Templates", icon: FileText },
   { to: "/dashboard/tags", label: "Tags", icon: Tags },
+  { to: "/dashboard/audios", label: "Audios", icon: Volume2 },
 ];
 
 interface SidebarProps {
