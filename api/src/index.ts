@@ -409,6 +409,107 @@ const computeReplyDelayMs = (text: string): number => {
   );
 };
 
+// ── Auto-FAQ: when 2+ contacts ask similar questions, suggest a FAQ entry ────
+const AUTO_FAQ_STOP_WORDS = new Set([
+  "para", "como", "qual", "quais", "que", "com", "por", "mas", "nao", "sim",
+  "esse", "essa", "isso", "este", "esta", "voce", "minha", "meu", "sua", "seu",
+  "uma", "uns", "das", "dos", "nas", "nos", "tem", "ter", "ser", "estar",
+  "pelo", "pela", "mais", "menos", "sobre", "depois", "antes", "tambem",
+]);
+
+const tryAutoFaq = async (
+  prisma: PrismaClient,
+  phone: string,
+  userMessage: string,
+  aiReply: string,
+): Promise<void> => {
+  try {
+    const words = userMessage
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-z\s]/g, " ")
+      .split(/\s+/)
+      .filter((w) => w.length >= 4 && !AUTO_FAQ_STOP_WORDS.has(w));
+
+    if (words.length < 1) return;
+
+    const currentContact = await prisma.contact.findUnique({
+      where: { waId: phone },
+      select: { id: true },
+    });
+    if (!currentContact) return;
+
+    // Find similar messages from OTHER contacts (all top words must appear)
+    const searchWords = words.slice(0, 2);
+    const similarMessages = await prisma.message.findMany({
+      where: {
+        direction: "in",
+        contactId: { not: currentContact.id },
+        AND: searchWords.map((word) => ({
+          body: { contains: word, mode: "insensitive" as const },
+        })),
+      },
+      select: { contactId: true },
+      take: 20,
+    });
+
+    const uniqueContacts = new Set(similarMessages.map((m) => m.contactId));
+    if (uniqueContacts.size < 1) return;
+
+    const suggestion = await openAI.suggestFaqEntry(userMessage, aiReply);
+    if (!suggestion) return;
+
+    // Check if a similar FAQ already exists before creating
+    const faqSearchWords = suggestion.question
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-z\s]/g, " ")
+      .split(/\s+/)
+      .filter((w) => w.length >= 4 && !AUTO_FAQ_STOP_WORDS.has(w))
+      .slice(0, 2);
+
+    if (faqSearchWords.length > 0) {
+      const existingFaq = await prisma.faq.findFirst({
+        where: {
+          AND: faqSearchWords.map((word) => ({
+            question: { contains: word, mode: "insensitive" as const },
+          })),
+        },
+        select: { id: true },
+      });
+      if (existingFaq) return;
+    }
+
+    try {
+      await prisma.faq.create({
+        data: {
+          question: suggestion.question,
+          answer: suggestion.answer,
+          isActive: true,
+        },
+      });
+      console.log(`[auto-faq] created: "${suggestion.question}"`);
+      void invalidateDashboardCaches();
+      broadcast("faq:created", { question: suggestion.question, answer: suggestion.answer, source: "auto" });
+    } catch (createError) {
+      // P2002 = unique constraint (FAQ already exists) — safe to ignore
+      const code =
+        createError && typeof createError === "object"
+          ? Reflect.get(createError as object, "code")
+          : null;
+      if (code !== "P2002") {
+        console.error("[auto-faq] failed to create FAQ", createError);
+      }
+    }
+  } catch (error) {
+    console.error("[auto-faq] failed", error);
+  }
+};
+
+
+
 const resolveInboundText = async (message: InboundMessage): Promise<string> => {
   if (message.type === "text") {
     return message.text;
@@ -935,6 +1036,8 @@ const webhookEvent = async (req: Request): Promise<Response> => {
         if (prisma) {
           const overview = await dashboard.getOverview(prisma);
           broadcast("overview:updated", overview as unknown as Record<string, unknown>);
+          // Fire-and-forget: auto-add FAQ if this question was asked by multiple contacts
+          void tryAutoFaq(prisma, message.from, userText, aiReply);
         }
       } catch (error) {
         console.error(

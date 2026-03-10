@@ -425,6 +425,69 @@ export class OpenAIService {
     return normalizeExtraction(parsed);
   }
 
+  /**
+   * Evaluate whether a user message + AI reply pair is generic enough to become a FAQ.
+   * Returns a normalized { question, answer } or null if the message should not be a FAQ.
+   */
+  async suggestFaqEntry(
+    userMessage: string,
+    assistantReply: string,
+  ): Promise<{ question: string; answer: string } | null> {
+    const response = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${this.apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: this.model,
+        input: [
+          {
+            role: "system",
+            content: [
+              {
+                type: "input_text",
+                text: [
+                  "Voce analisa conversas de atendimento via WhatsApp sobre campeonatos de esports.",
+                  "Seu objetivo: decidir se a pergunta do usuario e generica o suficiente para virar um FAQ reutilizavel.",
+                  "INCLUA como FAQ: perguntas sobre regras, inscricao geral, categorias, datas, taxas, formatos, requisitos.",
+                  "EXCLUA: dados pessoais (nome, email, telefone), saudacoes, pedidos de humano, dados especificos de triagem.",
+                  "Se adequado, retorne JSON: {\"question\": \"<pergunta clara e generalizada>\", \"answer\": \"<resposta clara e objetiva>\"}",
+                  "Se NAO adequado, retorne: {\"skip\": true}",
+                  "Retorne APENAS JSON valido, sem markdown.",
+                ].join(" "),
+              },
+            ],
+          },
+          {
+            role: "user",
+            content: [
+              {
+                type: "input_text",
+                text: `Pergunta do usuario: "${userMessage}"\nResposta do assistente: "${assistantReply}"`,
+              },
+            ],
+          },
+        ],
+        max_output_tokens: 200,
+      }),
+    });
+
+    if (!response.ok) return null;
+
+    const payload = (await response.json()) as OpenAIResponseBody;
+    const parsed = extractFirstJsonObject(safeParseText(payload));
+    if (!parsed) return null;
+
+    if (parsed.skip === true) return null;
+
+    const question = typeof parsed.question === "string" ? parsed.question.trim() : null;
+    const answer = typeof parsed.answer === "string" ? parsed.answer.trim() : null;
+
+    if (!question || !answer) return null;
+    return { question, answer };
+  }
+
   /** Generate a summary of the conversation and save to Contact.aiSummary */
   private async generateAndSaveSummary(
     prisma: import("@prisma/client").PrismaClient,
