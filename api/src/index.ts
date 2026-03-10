@@ -826,6 +826,7 @@ const webhookEvent = async (req: Request): Promise<Response> => {
         broadcast("notification", {
           phone: message.from,
           name: message.contactName ?? null,
+          messageId: message.messageId,
           preview: userText.slice(0, 120),
         });
 

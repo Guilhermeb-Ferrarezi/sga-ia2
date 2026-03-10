@@ -62,26 +62,20 @@ export function useNotifications() {
     }
 
     return subscribe((event: WsEventPayload) => {
-      const isNotification = event.type === "notification";
-      const isInboundMessageEvent =
-        event.type === "message:new" && (event.payload.role as string) === "user";
-      if (!isNotification && !isInboundMessageEvent) return;
+      if (event.type !== "notification") return;
 
       const phone = (event.payload.phone as string) ?? "Contato";
       const name = (event.payload.name as string | undefined)?.trim();
-      const preview =
-        isNotification
-          ? ((event.payload.preview as string) ?? "")
-          : ((event.payload.content as string) ?? "");
+      const messageId = (event.payload.messageId as string | undefined)?.trim();
+      const preview = (event.payload.preview as string) ?? "";
       const displayName = name || phone;
 
-      // Use phone as stable key to deduplicate same user regardless of name changes
-      const key = `${displayName}:${preview}`;
+      const key = messageId || `${phone}:${preview}`;
       const now = Date.now();
       if (
         lastNotificationRef.current &&
         lastNotificationRef.current.key === key &&
-        now - lastNotificationRef.current.at < 1200
+        now - lastNotificationRef.current.at < 5000
       ) {
         return;
       }

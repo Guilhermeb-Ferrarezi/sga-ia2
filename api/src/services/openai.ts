@@ -320,7 +320,9 @@ export class OpenAIService {
           .slice(0, -1) // drop the latest (current user message already persisted)
           .map((m) => ({
             role: (m.direction === "in" ? "user" : "assistant") as "user" | "assistant",
-            content: [{ type: "input_text", text: m.body }],
+            content: [
+              { type: m.direction === "in" ? "input_text" : "output_text", text: m.body },
+            ],
           }));
 
         // Trigger periodic summary generation
