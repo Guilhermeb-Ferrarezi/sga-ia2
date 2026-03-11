@@ -18,7 +18,7 @@ import {
   classifyHandoffSla,
   computeHandoffWaitMinutes,
 } from "./lib/operationalAlerts";
-import { uploadToR2, deleteFromR2 } from "./services/r2";
+import { uploadToR2, deleteFromR2, getStreamFromR2 } from "./services/r2";
 import {
   broadcast,
   registerConnection,
@@ -3578,34 +3578,26 @@ const handleAudioStream = async (req: Request, id: number): Promise<Response> =>
 
     const audio = await current.prisma.audio.findUnique({
       where: { id },
-      select: { url: true, mimeType: true },
+      select: { r2Key: true, mimeType: true },
     });
 
-    if (!audio?.url) {
+    if (!audio?.r2Key) {
       return json({ error: "Audio nao encontrado" }, 404, req);
     }
 
-    // Stream audio directly from R2/CDN — no buffering
-    const upstream = await fetch(audio.url);
-    if (!upstream.ok) {
-      console.error(`[audio-stream] upstream ${upstream.status} for id=${id}`);
-      return json({ error: "Erro ao acessar o arquivo" }, 502, req);
-    }
-
+    // Fetch directly from R2 using SDK (avoids CDN 403)
+    const r2 = await getStreamFromR2(audio.r2Key);
     const headers = new Headers({
-      "Content-Type": upstream.headers.get("Content-Type") ?? audio.mimeType ?? "audio/mpeg",
+      "Content-Type": r2.contentType !== "application/octet-stream" ? r2.contentType : (audio.mimeType ?? "audio/ogg"),
       "Access-Control-Allow-Origin": config.webOrigin,
       "Access-Control-Allow-Methods": "GET, OPTIONS",
       "Cache-Control": "public, max-age=3600",
     });
-    if (upstream.headers.has("Content-Length")) {
-      headers.set("Content-Length", upstream.headers.get("Content-Length")!);
-    }
-    if (upstream.headers.has("Accept-Ranges")) {
-      headers.set("Accept-Ranges", upstream.headers.get("Accept-Ranges")!);
+    if (r2.contentLength != null) {
+      headers.set("Content-Length", String(r2.contentLength));
     }
 
-    return new Response(upstream.body, { status: 200, headers });
+    return new Response(r2.body, { status: 200, headers });
   } catch (error) {
     console.error("[audio-stream] error:", error);
     return json({ error: "Erro ao acessar o arquivo" }, 500, req);
@@ -3623,33 +3615,26 @@ const handleAudioStreamByUrl = async (req: Request): Promise<Response> => {
     // Only proxy URLs that exist as audio records in our DB (prevents SSRF)
     const audio = await current.prisma.audio.findFirst({
       where: { url: rawUrl },
-      select: { url: true, mimeType: true },
+      select: { r2Key: true, mimeType: true },
     });
 
-    if (!audio?.url) {
+    if (!audio?.r2Key) {
       return json({ error: "Audio nao encontrado" }, 404, req);
     }
 
-    const upstream = await fetch(audio.url);
-    if (!upstream.ok) {
-      console.error(`[audio-stream-url] upstream ${upstream.status} for url=${rawUrl}`);
-      return json({ error: "Erro ao acessar o arquivo" }, 502, req);
-    }
-
+    // Fetch directly from R2 using SDK (avoids CDN 403)
+    const r2 = await getStreamFromR2(audio.r2Key);
     const headers = new Headers({
-      "Content-Type": upstream.headers.get("Content-Type") ?? audio.mimeType ?? "audio/mpeg",
+      "Content-Type": r2.contentType !== "application/octet-stream" ? r2.contentType : (audio.mimeType ?? "audio/ogg"),
       "Access-Control-Allow-Origin": config.webOrigin,
       "Access-Control-Allow-Methods": "GET, OPTIONS",
       "Cache-Control": "public, max-age=3600",
     });
-    if (upstream.headers.has("Content-Length")) {
-      headers.set("Content-Length", upstream.headers.get("Content-Length")!);
-    }
-    if (upstream.headers.has("Accept-Ranges")) {
-      headers.set("Accept-Ranges", upstream.headers.get("Accept-Ranges")!);
+    if (r2.contentLength != null) {
+      headers.set("Content-Length", String(r2.contentLength));
     }
 
-    return new Response(upstream.body, { status: 200, headers });
+    return new Response(r2.body, { status: 200, headers });
   } catch (error) {
     console.error("[audio-stream-url] error:", error);
     return json({ error: "Erro ao acessar o arquivo" }, 500, req);

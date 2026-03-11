@@ -2,6 +2,7 @@ import {
   S3Client,
   PutObjectCommand,
   DeleteObjectCommand,
+  GetObjectCommand,
 } from "@aws-sdk/client-s3";
 import { config } from "../config";
 
@@ -69,6 +70,30 @@ export async function uploadToR2(
     return `${publicUrl.replace(/\/+$/, "")}/${normalizedKey}`;
   }
   return `https://${config.cloudflareAccountId}.r2.cloudflarestorage.com/${bucket}/${normalizedKey}`;
+}
+
+export interface R2StreamResult {
+  body: ReadableStream;
+  contentType: string;
+  contentLength?: number;
+}
+
+export async function getStreamFromR2(key: string): Promise<R2StreamResult> {
+  const bucket = config.cloudflareBucketName;
+  if (!bucket) throw new Error("CLOUDFLARE_BUCKET_NAME not configured");
+
+  const result = await getClient().send(
+    new GetObjectCommand({ Bucket: bucket, Key: key }),
+  );
+
+  if (!result.Body) throw new Error("R2 returned empty body");
+
+  const webStream = result.Body.transformToWebStream();
+  return {
+    body: webStream,
+    contentType: result.ContentType ?? "application/octet-stream",
+    contentLength: result.ContentLength,
+  };
 }
 
 export async function deleteFromR2(key: string): Promise<void> {
