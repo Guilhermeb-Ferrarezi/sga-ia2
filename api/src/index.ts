@@ -899,6 +899,19 @@ const tryAutoFaq = async (
 
 
 
+const AUDIO_TAG_REGEX = /^\[AUDIO:(\d+)]\s*/;
+
+const parseAudioTag = (
+  text: string,
+): { audioId: number; textAfterTag: string } | null => {
+  const match = AUDIO_TAG_REGEX.exec(text);
+  if (!match) return null;
+  return {
+    audioId: Number(match[1]),
+    textAfterTag: text.slice(match[0].length).trim(),
+  };
+};
+
 const resolveInboundText = async (message: InboundMessage): Promise<string> => {
   if (message.type === "text") {
     return message.text;
@@ -1495,11 +1508,57 @@ const webhookEvent = async (req: Request): Promise<Response> => {
           }
         }
 
-        await whatsapp.sendTextMessage(message.from, aiReply);
-        await persistTurn(message.from, "assistant", aiReply);
+        // Check if AI wants to send an audio file
+        const audioTag = parseAudioTag(aiReply);
+        if (audioTag && prisma) {
+          const audioRecord = await prisma.audio.findUnique({
+            where: { id: audioTag.audioId },
+          });
+          if (audioRecord) {
+            try {
+              await whatsapp.sendAudioMessage(message.from, audioRecord.url);
+              const persistBody = `[AUDIO:${audioRecord.url}|${audioRecord.title}]`;
+              await persistTurn(message.from, "assistant", persistBody);
+              broadcast("message:new", {
+                phone: message.from,
+                role: "assistant",
+                content: persistBody,
+              });
+              console.log(
+                `[audio-reply] sent audio "${audioRecord.title}" to ${message.from}`,
+              );
+            } catch (audioError) {
+              console.error(`[audio-reply] failed to send audio`, audioError);
+            }
 
-        // Emit WS events: AI reply + done + updated overview
-        broadcast("message:new", { phone: message.from, role: "assistant", content: aiReply });
+            // Also send the text part if present
+            if (audioTag.textAfterTag) {
+              await whatsapp.sendTextMessage(message.from, audioTag.textAfterTag);
+              await persistTurn(message.from, "assistant", audioTag.textAfterTag);
+              broadcast("message:new", {
+                phone: message.from,
+                role: "assistant",
+                content: audioTag.textAfterTag,
+              });
+            }
+          } else {
+            // Audio not found, send the full text reply without the tag
+            const fallbackText = audioTag.textAfterTag || aiReply;
+            await whatsapp.sendTextMessage(message.from, fallbackText);
+            await persistTurn(message.from, "assistant", fallbackText);
+            broadcast("message:new", {
+              phone: message.from,
+              role: "assistant",
+              content: fallbackText,
+            });
+          }
+        } else {
+          await whatsapp.sendTextMessage(message.from, aiReply);
+          await persistTurn(message.from, "assistant", aiReply);
+          broadcast("message:new", { phone: message.from, role: "assistant", content: aiReply });
+        }
+
+        // Emit WS events: AI done + updated overview
         broadcast("ai:done", { phone: message.from });
 
         if (prisma) {

@@ -156,6 +156,7 @@ export class OpenAIService {
     contactInfo?: string;
     aiSummary?: string;
     triageMissing?: string[];
+    audioList?: string;
   }): string {
     const sections: string[] = [];
 
@@ -200,6 +201,21 @@ export class OpenAIService {
           "\n--- Campos de triagem ainda faltando ---",
           extras.triageMissing.map((item) => `- ${item}`).join("\n"),
           "Pergunte apenas o necessario para fechar os campos faltantes, sem repetir o que ja foi informado.",
+        ].join("\n"),
+      );
+    }
+
+    if (extras?.audioList) {
+      sections.push(
+        [
+          "\n--- Audios disponiveis ---",
+          "Voce tem acesso a audios pre-gravados que podem ser enviados ao usuario.",
+          "PREFIRA enviar um audio quando a pergunta do usuario for diretamente respondida por um audio disponivel.",
+          "Para enviar um audio, inclua EXATAMENTE a marcacao [AUDIO:ID] no INICIO da sua resposta, onde ID e o numero do audio.",
+          "Voce pode adicionar uma mensagem curta de texto DEPOIS da marcacao, por exemplo: [AUDIO:3] Segue o audio sobre inscricoes!",
+          "Se nenhum audio se encaixar, responda normalmente so com texto.",
+          "Audios disponiveis:",
+          extras.audioList,
         ].join("\n"),
       );
     }
@@ -256,6 +272,7 @@ export class OpenAIService {
       contactInfo?: string;
       aiSummary?: string;
       triageMissing?: string[];
+      audioList?: string;
     } = {};
     if (options?.triageMissing?.length) {
       extras = { ...extras, triageMissing: options.triageMissing };
@@ -303,6 +320,17 @@ export class OpenAIService {
         extras.faqs = faqs
           .map((f) => `P: ${f.question}\nR: ${f.answer}`)
           .join("\n\n");
+      }
+
+      // Load available audios for the AI to choose from
+      const audios = await prisma.audio.findMany({
+        select: { id: true, title: true, category: true },
+        orderBy: { title: "asc" },
+      });
+      if (audios.length) {
+        extras.audioList = audios
+          .map((a) => `- ID ${a.id}: "${a.title}" (categoria: ${a.category})`)
+          .join("\n");
       }
 
       // Load recent conversation history

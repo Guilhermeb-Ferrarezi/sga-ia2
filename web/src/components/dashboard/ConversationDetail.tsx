@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type UIEvent } from "react";
-import { Bot, BotOff, Loader2, Send } from "lucide-react";
+import { Bot, BotOff, Loader2, Pause, Play, Send } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { useWebSocket, type WsEventPayload } from "@/contexts/WebSocketContext";
 import { api, type DashboardTurn } from "@/lib/api";
@@ -17,6 +17,16 @@ import { Separator } from "@/components/ui/separator";
 import LoadingScreen from "@/components/ui/loading-screen";
 
 const TURNS_PAGE_SIZE = 120;
+
+const AUDIO_TAG_RE = /^\[AUDIO:(.+?)\|(.+?)]$/;
+
+const parseAudioContent = (
+  content: string,
+): { url: string; title: string } | null => {
+  const match = AUDIO_TAG_RE.exec(content.trim());
+  if (!match) return null;
+  return { url: match[1], title: match[2] };
+};
 
 const formatDateTime = (value: string): string =>
   new Intl.DateTimeFormat("pt-BR", {
@@ -49,6 +59,33 @@ export default function ConversationDetail({
   const listRef = useRef<HTMLDivElement | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [playingTurnId, setPlayingTurnId] = useState<string | null>(null);
+
+  const stopAudio = useCallback(() => {
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.currentTime = 0;
+      audioRef.current = null;
+    }
+    setPlayingTurnId(null);
+  }, []);
+
+  const togglePlayTurn = useCallback(
+    (turnId: string, audioUrl: string) => {
+      if (playingTurnId === turnId) {
+        stopAudio();
+        return;
+      }
+      stopAudio();
+      const el = new Audio(audioUrl);
+      el.addEventListener("ended", () => setPlayingTurnId(null));
+      audioRef.current = el;
+      void el.play();
+      setPlayingTurnId(turnId);
+    },
+    [playingTurnId, stopAudio],
+  );
 
   const scrollToBottom = () => {
     setTimeout(() => {
@@ -115,8 +152,9 @@ export default function ConversationDetail({
       if (refreshTimerRef.current) {
         clearTimeout(refreshTimerRef.current);
       }
+      stopAudio();
     };
-  }, []);
+  }, [stopAudio]);
 
   // Real-time message updates
   useEffect(() => {
@@ -252,29 +290,57 @@ export default function ConversationDetail({
                 Sem mensagens para este contato.
               </p>
             )}
-            {!loading && turns.map((turn) => (
-              <div
-                key={turn.id}
-                className={cn(
-                  "max-w-[85%] rounded-xl px-4 py-3 shadow",
-                  turn.role === "assistant"
-                    ? "ml-auto bg-primary text-primary-foreground"
-                    : "bg-secondary text-secondary-foreground",
-                )}
-              >
-                <p className="whitespace-pre-wrap text-sm">{turn.content}</p>
-                <p
+            {!loading && turns.map((turn) => {
+              const audio = parseAudioContent(turn.content);
+              return (
+                <div
+                  key={turn.id}
                   className={cn(
-                    "mt-2 text-[11px]",
+                    "max-w-[85%] rounded-xl px-4 py-3 shadow",
                     turn.role === "assistant"
-                      ? "text-primary-foreground/80"
-                      : "text-secondary-foreground/70",
+                      ? "ml-auto bg-primary text-primary-foreground"
+                      : "bg-secondary text-secondary-foreground",
                   )}
                 >
-                  {turn.role} • {formatDateTime(turn.createdAt)}
-                </p>
-              </div>
-            ))}
+                  {audio ? (
+                    <div className="flex items-center gap-3">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className={cn(
+                          "h-9 w-9 shrink-0 rounded-full p-0",
+                          turn.role === "assistant"
+                            ? "hover:bg-primary-foreground/20 text-primary-foreground"
+                            : "hover:bg-secondary-foreground/20 text-secondary-foreground",
+                        )}
+                        onClick={() => togglePlayTurn(turn.id, audio.url)}
+                      >
+                        {playingTurnId === turn.id ? (
+                          <Pause className="h-4 w-4" />
+                        ) : (
+                          <Play className="h-4 w-4" />
+                        )}
+                      </Button>
+                      <span className="text-sm font-medium truncate">
+                        {audio.title}
+                      </span>
+                    </div>
+                  ) : (
+                    <p className="whitespace-pre-wrap text-sm">{turn.content}</p>
+                  )}
+                  <p
+                    className={cn(
+                      "mt-2 text-[11px]",
+                      turn.role === "assistant"
+                        ? "text-primary-foreground/80"
+                        : "text-secondary-foreground/70",
+                    )}
+                  >
+                    {turn.role} • {formatDateTime(turn.createdAt)}
+                  </p>
+                </div>
+              );
+            })}
             {aiProcessing && (
               <div className="flex items-center gap-2 text-sm text-muted-foreground">
                 <Loader2 className="h-4 w-4 animate-spin" />

@@ -60,6 +60,32 @@ export class WhatsAppService {
     }
   }
 
+  async sendAudioMessage(to: string, audioUrl: string): Promise<void> {
+    const response = await fetch(this.url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${this.token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
+        to,
+        type: "audio",
+        audio: {
+          link: audioUrl,
+        },
+      }),
+    });
+
+    if (!response.ok) {
+      const details = await response.text();
+      throw new Error(
+        `WhatsApp send audio failed (${response.status}): ${details || "no details"}`,
+      );
+    }
+  }
+
   async markAsRead(messageId: string): Promise<void> {
     const response = await fetch(this.url, {
       method: "POST",
