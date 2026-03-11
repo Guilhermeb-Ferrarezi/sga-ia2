@@ -4,6 +4,18 @@ import type {
   WhatsAppWebhookPayload,
 } from "../types/whatsapp";
 
+type WhatsAppGraphErrorPayload = {
+  error?: {
+    message?: string;
+    type?: string;
+    code?: number;
+    error_data?: {
+      messaging_product?: string;
+      details?: string;
+    };
+  };
+};
+
 const extensionByMimeType: Record<string, string> = {
   "audio/aac": "aac",
   "audio/amr": "amr",
@@ -19,6 +31,44 @@ const extensionByMimeType: Record<string, string> = {
 
 const extensionForMimeType = (mimeType: string): string =>
   extensionByMimeType[mimeType.toLowerCase()] ?? "ogg";
+
+export class WhatsAppApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code?: number,
+    readonly details?: string,
+  ) {
+    super(message);
+    this.name = "WhatsAppApiError";
+  }
+}
+
+const buildWhatsAppApiError = async (
+  action: string,
+  response: Response,
+): Promise<WhatsAppApiError> => {
+  const raw = await response.text();
+  let parsed: WhatsAppGraphErrorPayload | null = null;
+
+  try {
+    parsed = raw ? (JSON.parse(raw) as WhatsAppGraphErrorPayload) : null;
+  } catch {
+    parsed = null;
+  }
+
+  const graphError = parsed?.error;
+  const details = graphError?.error_data?.details ?? graphError?.message ?? raw;
+  return new WhatsAppApiError(
+    `WhatsApp ${action} failed (${response.status}): ${details || "no details"}`,
+    response.status,
+    graphError?.code,
+    details,
+  );
+};
+
+export const isWhatsAppPermissionError = (error: unknown): boolean =>
+  error instanceof WhatsAppApiError && error.code === 10;
 
 export class WhatsAppService {
   private readonly url: string;
@@ -53,10 +103,7 @@ export class WhatsAppService {
     });
 
     if (!response.ok) {
-      const details = await response.text();
-      throw new Error(
-        `WhatsApp send failed (${response.status}): ${details || "no details"}`,
-      );
+      throw await buildWhatsAppApiError("send", response);
     }
   }
 
@@ -79,10 +126,7 @@ export class WhatsAppService {
     });
 
     if (!response.ok) {
-      const details = await response.text();
-      throw new Error(
-        `WhatsApp send audio failed (${response.status}): ${details || "no details"}`,
-      );
+      throw await buildWhatsAppApiError("send audio", response);
     }
   }
 
@@ -101,10 +145,7 @@ export class WhatsAppService {
     });
 
     if (!response.ok) {
-      const details = await response.text();
-      throw new Error(
-        `WhatsApp mark as read failed (${response.status}): ${details || "no details"}`,
-      );
+      throw await buildWhatsAppApiError("mark as read", response);
     }
   }
 

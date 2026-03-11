@@ -11,7 +11,11 @@ import { AuthService } from "./services/auth";
 import type { PublicUser } from "./services/auth";
 import { DashboardService } from "./services/dashboard";
 import { OpenAIService } from "./services/openai";
-import { extractInboundMessages, WhatsAppService } from "./services/whatsapp";
+import {
+  extractInboundMessages,
+  isWhatsAppPermissionError,
+  WhatsAppService,
+} from "./services/whatsapp";
 import type { InboundMessage, WhatsAppWebhookPayload } from "./types/whatsapp";
 import {
   HANDOFF_CRITICAL_MINUTES,
@@ -73,6 +77,13 @@ const whatsapp = new WhatsAppService(
   config.whatsappPhoneNumberId,
   config.whatsappGraphVersion,
 );
+
+const logWhatsAppPermissionHint = (error: unknown): void => {
+  if (!isWhatsAppPermissionError(error)) return;
+  console.error(
+    "[whatsapp-auth] Meta rejected the token/permissions. Check WHATSAPP_TOKEN, ensure it is a permanent System User token with whatsapp_business_messaging permission, confirm the app is attached to the correct WhatsApp Business Account, and verify WHATSAPP_PHONE_NUMBER_ID.",
+  );
+};
 
 const CORS_METHODS = "GET,POST,PUT,DELETE,OPTIONS";
 
@@ -1529,6 +1540,10 @@ const webhookEvent = async (req: Request): Promise<Response> => {
               );
             } catch (audioError) {
               console.error(`[audio-reply] failed to send audio`, audioError);
+              logWhatsAppPermissionHint(audioError);
+              if (isWhatsAppPermissionError(audioError)) {
+                throw audioError;
+              }
             }
 
             // Also send the text part if present
@@ -1571,6 +1586,7 @@ const webhookEvent = async (req: Request): Promise<Response> => {
           void saveSemanticReplyCache(userText, aiReply);
         }
       } catch (error) {
+        logWhatsAppPermissionHint(error);
         console.error(
           `[message:${message.messageId}] failed processing from ${message.from}`,
           error,
@@ -3695,6 +3711,7 @@ if (config.enableDb) {
 
 const server = Bun.serve<WsUserData>({
   port: config.apiPort,
+  idleTimeout: 30,
   async fetch(req, server) {
     const url = new URL(req.url);
 
