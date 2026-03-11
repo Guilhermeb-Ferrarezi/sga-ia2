@@ -1541,6 +1541,7 @@ const webhookEvent = async (req: Request): Promise<Response> => {
               r2Key: true,
               mimeType: true,
               filename: true,
+              sizeBytes: true,
             },
           });
           if (audioRecord) {
@@ -1559,8 +1560,13 @@ const webhookEvent = async (req: Request): Promise<Response> => {
             }
 
             // Now show "Gravando..." and hold it for a realistic delay before sending audio
+            // Estimate audio duration from file size (~16kbps for WhatsApp ogg voice)
+            const estimatedDurationSec = audioRecord.sizeBytes > 0
+              ? audioRecord.sizeBytes / 2000
+              : 5;
+            const recordingDelay = Math.min(20000, Math.max(3000, estimatedDurationSec * 1000));
             await whatsapp.sendTypingIndicator(message.messageId, "audio");
-            await sleep(4000); // simulate recording
+            await sleep(recordingDelay);
 
             try {
               const audioFile = await getObjectFromR2(audioRecord.r2Key);
