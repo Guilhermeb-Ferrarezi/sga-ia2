@@ -3571,6 +3571,91 @@ const handleAudioUpdate = async (req: Request, id: number): Promise<Response> =>
   }
 };
 
+const handleAudioStream = async (req: Request, id: number): Promise<Response> => {
+  try {
+    const current = await getAuthenticatedUser(req);
+    if (current instanceof Response) return current;
+
+    const audio = await current.prisma.audio.findUnique({
+      where: { id },
+      select: { url: true, mimeType: true },
+    });
+
+    if (!audio?.url) {
+      return json({ error: "Audio nao encontrado" }, 404, req);
+    }
+
+    // Stream audio directly from R2/CDN — no buffering
+    const upstream = await fetch(audio.url);
+    if (!upstream.ok) {
+      console.error(`[audio-stream] upstream ${upstream.status} for id=${id}`);
+      return json({ error: "Erro ao acessar o arquivo" }, 502, req);
+    }
+
+    const headers = new Headers({
+      "Content-Type": upstream.headers.get("Content-Type") ?? audio.mimeType ?? "audio/mpeg",
+      "Access-Control-Allow-Origin": config.webOrigin,
+      "Access-Control-Allow-Methods": "GET, OPTIONS",
+      "Cache-Control": "public, max-age=3600",
+    });
+    if (upstream.headers.has("Content-Length")) {
+      headers.set("Content-Length", upstream.headers.get("Content-Length")!);
+    }
+    if (upstream.headers.has("Accept-Ranges")) {
+      headers.set("Accept-Ranges", upstream.headers.get("Accept-Ranges")!);
+    }
+
+    return new Response(upstream.body, { status: 200, headers });
+  } catch (error) {
+    console.error("[audio-stream] error:", error);
+    return json({ error: "Erro ao acessar o arquivo" }, 500, req);
+  }
+};
+
+const handleAudioStreamByUrl = async (req: Request): Promise<Response> => {
+  try {
+    const current = await getAuthenticatedUser(req);
+    if (current instanceof Response) return current;
+
+    const rawUrl = new URL(req.url).searchParams.get("url");
+    if (!rawUrl) return json({ error: "Parametro url obrigatorio" }, 400, req);
+
+    // Only proxy URLs that exist as audio records in our DB (prevents SSRF)
+    const audio = await current.prisma.audio.findFirst({
+      where: { url: rawUrl },
+      select: { url: true, mimeType: true },
+    });
+
+    if (!audio?.url) {
+      return json({ error: "Audio nao encontrado" }, 404, req);
+    }
+
+    const upstream = await fetch(audio.url);
+    if (!upstream.ok) {
+      console.error(`[audio-stream-url] upstream ${upstream.status} for url=${rawUrl}`);
+      return json({ error: "Erro ao acessar o arquivo" }, 502, req);
+    }
+
+    const headers = new Headers({
+      "Content-Type": upstream.headers.get("Content-Type") ?? audio.mimeType ?? "audio/mpeg",
+      "Access-Control-Allow-Origin": config.webOrigin,
+      "Access-Control-Allow-Methods": "GET, OPTIONS",
+      "Cache-Control": "public, max-age=3600",
+    });
+    if (upstream.headers.has("Content-Length")) {
+      headers.set("Content-Length", upstream.headers.get("Content-Length")!);
+    }
+    if (upstream.headers.has("Accept-Ranges")) {
+      headers.set("Accept-Ranges", upstream.headers.get("Accept-Ranges")!);
+    }
+
+    return new Response(upstream.body, { status: 200, headers });
+  } catch (error) {
+    console.error("[audio-stream-url] error:", error);
+    return json({ error: "Erro ao acessar o arquivo" }, 500, req);
+  }
+};
+
 const handleAudioDelete = async (req: Request, id: number): Promise<Response> => {
   try {
     const current = await getAuthenticatedUser(req);
@@ -3815,20 +3900,52 @@ const server = Bun.serve<WsUserData>({
     }
     const audioSuffix = extractPathSuffix(url.pathname, audioPrefix);
     if (audioSuffix) {
-      const id = Number(audioSuffix);
-      if (id) {
+      // /audios/stream-url?url=<encoded> — look up audio by CDN URL
+      if (audioSuffix === "stream-url") {
         if (req.method === "OPTIONS") {
           return new Response(null, {
             status: 204,
             headers: {
               "Access-Control-Allow-Origin": config.webOrigin,
               "Access-Control-Allow-Headers": "Authorization, Content-Type",
-              "Access-Control-Allow-Methods": CORS_METHODS,
+              "Access-Control-Allow-Methods": "GET, OPTIONS",
             },
           });
         }
-        if (req.method === "PUT") return handleAudioUpdate(req, id);
-        if (req.method === "DELETE") return handleAudioDelete(req, id);
+        if (req.method === "GET") return handleAudioStreamByUrl(req);
+      }
+      // /audios/:id/stream
+      if (audioSuffix.endsWith("/stream")) {
+        const id = Number(audioSuffix.replace("/stream", ""));
+        if (id) {
+          if (req.method === "OPTIONS") {
+            return new Response(null, {
+              status: 204,
+              headers: {
+                "Access-Control-Allow-Origin": config.webOrigin,
+                "Access-Control-Allow-Headers": "Authorization, Content-Type",
+                "Access-Control-Allow-Methods": "GET, OPTIONS",
+              },
+            });
+          }
+          if (req.method === "GET") return handleAudioStream(req, id);
+        }
+      } else {
+        const id = Number(audioSuffix);
+        if (id) {
+          if (req.method === "OPTIONS") {
+            return new Response(null, {
+              status: 204,
+              headers: {
+                "Access-Control-Allow-Origin": config.webOrigin,
+                "Access-Control-Allow-Headers": "Authorization, Content-Type",
+                "Access-Control-Allow-Methods": CORS_METHODS,
+              },
+            });
+          }
+          if (req.method === "PUT") return handleAudioUpdate(req, id);
+          if (req.method === "DELETE") return handleAudioDelete(req, id);
+        }
       }
     }
 

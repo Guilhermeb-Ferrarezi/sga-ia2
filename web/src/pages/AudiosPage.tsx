@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Edit2, Play, Pause, Plus, Save, Trash2, Upload, X } from "lucide-react";
+import { Edit2, Plus, Save, Trash2, Upload, X } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { api, type Audio } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
@@ -12,6 +12,8 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { AudioPlayer } from "@/components/ui/audio-player";
+import { useAudioPlayer } from "@/hooks/useAudioPlayer";
 
 const formatBytes = (bytes: number): string => {
   if (bytes < 1024) return `${bytes} B`;
@@ -33,10 +35,10 @@ export default function AudiosPage() {
   const [search, setSearch] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("");
   const [page, setPage] = useState(1);
-  const [playingId, setPlayingId] = useState<number | null>(null);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const limit = 10;
+
+  const { playingId, duration, currentTime, isPlaying, togglePlay, stopAudio, seek } = useAudioPlayer({ token });
 
   const load = useCallback(async () => {
     if (!token) return;
@@ -112,31 +114,9 @@ export default function AudiosPage() {
     }
   };
 
-  const togglePlay = (a: Audio) => {
-    if (playingId === a.id) {
-      stopAudio();
-      return;
-    }
-    stopAudio();
-    const audio = new Audio(a.url);
-    audio.addEventListener("ended", () => setPlayingId(null));
-    audioRef.current = audio;
-    void audio.play();
-    setPlayingId(a.id);
-  };
-
-  const stopAudio = () => {
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current.currentTime = 0;
-      audioRef.current = null;
-    }
-    setPlayingId(null);
-  };
-
   useEffect(() => {
     return () => stopAudio();
-  }, []);
+  }, [stopAudio]);
 
   return (
     <div className="stagger space-y-5">
@@ -242,48 +222,46 @@ export default function AudiosPage() {
         )}
         {audios.map((a) => (
           <Card key={a.id}>
-            <CardContent className="flex items-center gap-3 p-4">
-              <Button
-                variant="ghost"
-                size="sm"
-                className="h-9 w-9 p-0 shrink-0"
-                onClick={() => togglePlay(a)}
-              >
-                {playingId === a.id ? (
-                  <Pause className="h-4 w-4" />
-                ) : (
-                  <Play className="h-4 w-4" />
-                )}
-              </Button>
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2">
-                  <p className="font-medium text-base truncate">{a.title}</p>
-                  <Badge variant="secondary" className="text-[10px]">
-                    {a.category}
-                  </Badge>
+            <CardContent className="space-y-3 p-4">
+              <div className="flex items-start gap-3 justify-between">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <p className="font-medium text-base truncate">{a.title}</p>
+                    <Badge variant="secondary" className="text-[10px]">
+                      {a.category}
+                    </Badge>
+                  </div>
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    {a.filename} — {formatBytes(a.sizeBytes)}
+                  </p>
                 </div>
-                <p className="text-xs text-muted-foreground mt-0.5">
-                  {a.filename} — {formatBytes(a.sizeBytes)}
-                </p>
+                <div className="flex items-center gap-1 shrink-0">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-8 w-8 p-0"
+                    onClick={() => startEdit(a)}
+                  >
+                    <Edit2 className="h-4 w-4" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-8 w-8 p-0"
+                    onClick={() => void remove(a.id)}
+                  >
+                    <Trash2 className="h-4 w-4 text-destructive" />
+                  </Button>
+                </div>
               </div>
-              <div className="flex items-center gap-1 shrink-0">
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-8 w-8 p-0"
-                  onClick={() => startEdit(a)}
-                >
-                  <Edit2 className="h-4 w-4" />
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-8 w-8 p-0"
-                  onClick={() => void remove(a.id)}
-                >
-                  <Trash2 className="h-4 w-4 text-destructive" />
-                </Button>
-              </div>
+              <AudioPlayer
+                isPlaying={playingId === a.id && isPlaying}
+                currentTime={playingId === a.id ? currentTime : 0}
+                duration={playingId === a.id ? duration : 0}
+                onPlayPause={() => togglePlay(a.id, a.url)}
+                onSeek={(time) => seek(time)}
+                variant="compact"
+              />
             </CardContent>
           </Card>
         ))}

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type UIEvent } from "react";
-import { Bot, BotOff, Loader2, Pause, Play, Send } from "lucide-react";
+import { Bot, BotOff, Loader2, Send } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { useWebSocket, type WsEventPayload } from "@/contexts/WebSocketContext";
 import { api, type DashboardTurn } from "@/lib/api";
@@ -15,10 +15,12 @@ import {
 import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
 import LoadingScreen from "@/components/ui/loading-screen";
+import { AudioPlayer } from "@/components/ui/audio-player";
+import { useAudioPlayer } from "@/hooks/useAudioPlayer";
 
 const TURNS_PAGE_SIZE = 120;
 
-const AUDIO_TAG_RE = /^\[AUDIO:(.+?)\|(.+?)]$/;
+const AUDIO_TAG_RE = /\[AUDIO:(.+?)\|(.+?)\]/;
 
 const parseAudioContent = (
   content: string,
@@ -59,33 +61,8 @@ export default function ConversationDetail({
   const listRef = useRef<HTMLDivElement | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const [playingTurnId, setPlayingTurnId] = useState<string | null>(null);
-
-  const stopAudio = useCallback(() => {
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current.currentTime = 0;
-      audioRef.current = null;
-    }
-    setPlayingTurnId(null);
-  }, []);
-
-  const togglePlayTurn = useCallback(
-    (turnId: string, audioUrl: string) => {
-      if (playingTurnId === turnId) {
-        stopAudio();
-        return;
-      }
-      stopAudio();
-      const el = new Audio(audioUrl);
-      el.addEventListener("ended", () => setPlayingTurnId(null));
-      audioRef.current = el;
-      void el.play();
-      setPlayingTurnId(turnId);
-    },
-    [playingTurnId, stopAudio],
-  );
+  
+  const { playingId: playingTurnId, duration, currentTime, isPlaying, togglePlay, stopAudio, seek } = useAudioPlayer({ token });
 
   const scrollToBottom = () => {
     setTimeout(() => {
@@ -303,27 +280,21 @@ export default function ConversationDetail({
                   )}
                 >
                   {audio ? (
-                    <div className="flex items-center gap-3">
-                      <Button
-                        variant="ghost"
-                        size="sm"
+                    <div className="space-y-2 w-full">
+                      <AudioPlayer
+                        isPlaying={playingTurnId === turn.id && isPlaying}
+                        currentTime={playingTurnId === turn.id ? currentTime : 0}
+                        duration={playingTurnId === turn.id ? duration : 0}
+                        onPlayPause={() => togglePlay(turn.id, audio.url)}
+                        onSeek={(time) => seek(time)}
+                        variant="compact"
                         className={cn(
-                          "h-9 w-9 shrink-0 rounded-full p-0",
                           turn.role === "assistant"
-                            ? "hover:bg-primary-foreground/20 text-primary-foreground"
-                            : "hover:bg-secondary-foreground/20 text-secondary-foreground",
+                            ? "[&_button]:text-primary-foreground [&_span]:text-primary-foreground/70 [&_div]:bg-primary-foreground/20"
+                            : "[&_button]:text-secondary-foreground [&_span]:text-secondary-foreground/70 [&_div]:bg-secondary-foreground/20"
                         )}
-                        onClick={() => togglePlayTurn(turn.id, audio.url)}
-                      >
-                        {playingTurnId === turn.id ? (
-                          <Pause className="h-4 w-4" />
-                        ) : (
-                          <Play className="h-4 w-4" />
-                        )}
-                      </Button>
-                      <span className="text-sm font-medium truncate">
-                        {audio.title}
-                      </span>
+                      />
+                      <p className="text-xs font-medium truncate">{audio.title}</p>
                     </div>
                   ) : (
                     <p className="whitespace-pre-wrap text-sm">{turn.content}</p>
