@@ -1514,11 +1514,9 @@ const webhookEvent = async (req: Request): Promise<Response> => {
           aiReply = await openAI.generateReply(userText);
         }
 
-        // Short natural delay based on AI reply length (simulates reading + typing)
-        const typingDelay = Math.min(1500, Math.max(300, aiReply.length * 8));
-        if (typingDelay > 0) {
-          await sleep(typingDelay);
-        }
+        // Natural delay that simulates reading + typing (typing indicator already active)
+        const typingDelay = Math.min(3000, Math.max(800, aiReply.length * 12));
+        await sleep(typingDelay);
 
         if (prisma) {
           const latestContact = await prisma.contact.findUnique({
@@ -1534,8 +1532,6 @@ const webhookEvent = async (req: Request): Promise<Response> => {
         // Check if AI wants to send an audio file
         const audioTag = parseAudioTag(aiReply);
         if (audioTag && prisma) {
-          // Show "Gravando..." indicator before sending audio
-          await whatsapp.sendTypingIndicator(message.messageId, "audio");
           const audioRecord = await prisma.audio.findUnique({
             where: { id: audioTag.audioId },
             select: {
@@ -1548,6 +1544,24 @@ const webhookEvent = async (req: Request): Promise<Response> => {
             },
           });
           if (audioRecord) {
+            // Send the text part first (with "Digitando..." indicator)
+            if (audioTag.textWithoutTag) {
+              await whatsapp.sendTypingIndicator(message.messageId, "text");
+              const textDelay = Math.min(3000, Math.max(800, audioTag.textWithoutTag.length * 15));
+              await sleep(textDelay);
+              await whatsapp.sendTextMessage(message.from, audioTag.textWithoutTag);
+              await persistTurn(message.from, "assistant", audioTag.textWithoutTag);
+              broadcast("message:new", {
+                phone: message.from,
+                role: "assistant",
+                content: audioTag.textWithoutTag,
+              });
+            }
+
+            // Now show "Gravando..." and hold it for a realistic delay before sending audio
+            await whatsapp.sendTypingIndicator(message.messageId, "audio");
+            await sleep(4000); // simulate recording
+
             try {
               const audioFile = await getObjectFromR2(audioRecord.r2Key);
               const mediaId = await whatsapp.uploadAudioMedia(
@@ -1574,17 +1588,6 @@ const webhookEvent = async (req: Request): Promise<Response> => {
               if (isWhatsAppPermissionError(audioError)) {
                 throw audioError;
               }
-            }
-
-            // Also send the text part if present
-            if (audioTag.textWithoutTag) {
-              await whatsapp.sendTextMessage(message.from, audioTag.textWithoutTag);
-              await persistTurn(message.from, "assistant", audioTag.textWithoutTag);
-              broadcast("message:new", {
-                phone: message.from,
-                role: "assistant",
-                content: audioTag.textWithoutTag,
-              });
             }
           } else {
             // Audio not found, send the full text reply without the tag
