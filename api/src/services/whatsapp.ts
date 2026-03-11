@@ -215,6 +215,38 @@ export class WhatsAppService {
     }
   }
 
+  /**
+   * Show a typing or recording indicator to the user.
+   * The indicator auto-dismisses after 25 seconds or when a message is sent.
+   * @param type "text" shows "Digitando...", "audio" shows "Gravando áudio..."
+   */
+  async sendTypingIndicator(
+    messageId: string,
+    type: "text" | "audio" = "text",
+  ): Promise<void> {
+    const response = await fetch(this.url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${this.token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        status: "read",
+        message_id: messageId,
+        typing_indicator: { type },
+      }),
+    });
+
+    if (!response.ok) {
+      // Non-critical — log but don't throw
+      const details = await response.text().catch(() => "");
+      console.warn(
+        `[typing-indicator] failed (${response.status}): ${details}`,
+      );
+    }
+  }
+
   async downloadMedia(mediaId: string, mimeTypeHint?: string): Promise<{
     arrayBuffer: ArrayBuffer;
     mimeType: string;

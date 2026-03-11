@@ -1332,9 +1332,11 @@ const webhookEvent = async (req: Request): Promise<Response> => {
               skipProcessing = true;
             } else {
               await whatsapp.markAsRead(message.messageId);
+              await whatsapp.sendTypingIndicator(message.messageId, "text");
             }
           } else {
             await whatsapp.markAsRead(message.messageId);
+            await whatsapp.sendTypingIndicator(message.messageId, "text");
           }
           if (skipProcessing) {
             // Still persist the message for history
@@ -1532,6 +1534,8 @@ const webhookEvent = async (req: Request): Promise<Response> => {
         // Check if AI wants to send an audio file
         const audioTag = parseAudioTag(aiReply);
         if (audioTag && prisma) {
+          // Show "Gravando..." indicator before sending audio
+          await whatsapp.sendTypingIndicator(message.messageId, "audio");
           const audioRecord = await prisma.audio.findUnique({
             where: { id: audioTag.audioId },
             select: {
