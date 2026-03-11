@@ -22,7 +22,12 @@ import {
   classifyHandoffSla,
   computeHandoffWaitMinutes,
 } from "./lib/operationalAlerts";
-import { uploadToR2, deleteFromR2, getStreamFromR2 } from "./services/r2";
+import {
+  uploadToR2,
+  deleteFromR2,
+  getObjectFromR2,
+  getStreamFromR2,
+} from "./services/r2";
 import {
   broadcast,
   registerConnection,
@@ -1524,10 +1529,26 @@ const webhookEvent = async (req: Request): Promise<Response> => {
         if (audioTag && prisma) {
           const audioRecord = await prisma.audio.findUnique({
             where: { id: audioTag.audioId },
+            select: {
+              id: true,
+              url: true,
+              title: true,
+              r2Key: true,
+              mimeType: true,
+              filename: true,
+            },
           });
           if (audioRecord) {
             try {
-              await whatsapp.sendAudioMessage(message.from, audioRecord.url);
+              const audioFile = await getObjectFromR2(audioRecord.r2Key);
+              const mediaId = await whatsapp.uploadAudioMedia(
+                audioFile.body,
+                audioRecord.filename,
+                audioFile.contentType !== "application/octet-stream"
+                  ? audioFile.contentType
+                  : (audioRecord.mimeType ?? "audio/ogg"),
+              );
+              await whatsapp.sendAudioMessageById(message.from, mediaId);
               const persistBody = `[AUDIO:${audioRecord.url}|${audioRecord.title}]`;
               await persistTurn(message.from, "assistant", persistBody);
               broadcast("message:new", {

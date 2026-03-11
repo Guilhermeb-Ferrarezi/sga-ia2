@@ -78,6 +78,12 @@ export interface R2StreamResult {
   contentLength?: number;
 }
 
+export interface R2ObjectResult {
+  body: Uint8Array;
+  contentType: string;
+  contentLength?: number;
+}
+
 export async function getStreamFromR2(key: string): Promise<R2StreamResult> {
   const bucket = config.cloudflareBucketName;
   if (!bucket) throw new Error("CLOUDFLARE_BUCKET_NAME not configured");
@@ -91,6 +97,23 @@ export async function getStreamFromR2(key: string): Promise<R2StreamResult> {
   const webStream = result.Body.transformToWebStream();
   return {
     body: webStream,
+    contentType: result.ContentType ?? "application/octet-stream",
+    contentLength: result.ContentLength,
+  };
+}
+
+export async function getObjectFromR2(key: string): Promise<R2ObjectResult> {
+  const bucket = config.cloudflareBucketName;
+  if (!bucket) throw new Error("CLOUDFLARE_BUCKET_NAME not configured");
+
+  const result = await getClient().send(
+    new GetObjectCommand({ Bucket: bucket, Key: key }),
+  );
+
+  if (!result.Body) throw new Error("R2 returned empty body");
+
+  return {
+    body: await result.Body.transformToByteArray(),
     contentType: result.ContentType ?? "application/octet-stream",
     contentLength: result.ContentLength,
   };

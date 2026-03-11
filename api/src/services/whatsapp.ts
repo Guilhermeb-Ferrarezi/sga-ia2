@@ -73,14 +73,57 @@ export const isWhatsAppPermissionError = (error: unknown): boolean =>
 export class WhatsAppService {
   private readonly url: string;
   private readonly graphBaseUrl: string;
+  private readonly phoneNumberId: string;
 
   constructor(
     private readonly token: string,
     phoneNumberId: string,
     graphVersion: string,
   ) {
+    this.phoneNumberId = phoneNumberId;
     this.graphBaseUrl = `https://graph.facebook.com/${graphVersion}`;
     this.url = `https://graph.facebook.com/${graphVersion}/${phoneNumberId}/messages`;
+  }
+
+  async uploadAudioMedia(
+    fileBytes: Uint8Array,
+    fileName: string,
+    mimeType: string,
+  ): Promise<string> {
+    const fileBuffer = fileBytes.buffer.slice(
+      fileBytes.byteOffset,
+      fileBytes.byteOffset + fileBytes.byteLength,
+    ) as ArrayBuffer;
+    const form = new FormData();
+    form.set("messaging_product", "whatsapp");
+    form.set(
+      "file",
+      new File([fileBuffer], fileName, { type: mimeType }),
+      fileName,
+    );
+
+    const response = await fetch(
+      `${this.graphBaseUrl}/${this.phoneNumberId}/media`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${this.token}`,
+        },
+        body: form,
+      },
+    );
+
+    if (!response.ok) {
+      throw await buildWhatsAppApiError("upload media", response);
+    }
+
+    const payload = (await response.json()) as { id?: string };
+    const mediaId = payload.id?.trim();
+    if (!mediaId) {
+      throw new Error("WhatsApp media upload succeeded without returning media id");
+    }
+
+    return mediaId;
   }
 
   async sendTextMessage(to: string, body: string): Promise<void> {
@@ -121,6 +164,29 @@ export class WhatsAppService {
         type: "audio",
         audio: {
           link: audioUrl,
+        },
+      }),
+    });
+
+    if (!response.ok) {
+      throw await buildWhatsAppApiError("send audio", response);
+    }
+  }
+
+  async sendAudioMessageById(to: string, mediaId: string): Promise<void> {
+    const response = await fetch(this.url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${this.token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
+        to,
+        type: "audio",
+        audio: {
+          id: mediaId,
         },
       }),
     });
