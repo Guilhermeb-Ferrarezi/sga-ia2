@@ -915,16 +915,21 @@ const tryAutoFaq = async (
 
 
 
-const AUDIO_TAG_REGEX = /^\[AUDIO:(\d+)]\s*/;
+const AUDIO_TAG_REGEX = /\[AUDIO:(\d+)]/;
 
 const parseAudioTag = (
   text: string,
-): { audioId: number; textAfterTag: string } | null => {
+): { audioId: number; textWithoutTag: string } | null => {
   const match = AUDIO_TAG_REGEX.exec(text);
   if (!match) return null;
+
+  const textWithoutTag = `${text.slice(0, match.index)} ${text.slice(match.index + match[0].length)}`
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
   return {
     audioId: Number(match[1]),
-    textAfterTag: text.slice(match[0].length).trim(),
+    textWithoutTag,
   };
 };
 
@@ -1568,18 +1573,18 @@ const webhookEvent = async (req: Request): Promise<Response> => {
             }
 
             // Also send the text part if present
-            if (audioTag.textAfterTag) {
-              await whatsapp.sendTextMessage(message.from, audioTag.textAfterTag);
-              await persistTurn(message.from, "assistant", audioTag.textAfterTag);
+            if (audioTag.textWithoutTag) {
+              await whatsapp.sendTextMessage(message.from, audioTag.textWithoutTag);
+              await persistTurn(message.from, "assistant", audioTag.textWithoutTag);
               broadcast("message:new", {
                 phone: message.from,
                 role: "assistant",
-                content: audioTag.textAfterTag,
+                content: audioTag.textWithoutTag,
               });
             }
           } else {
             // Audio not found, send the full text reply without the tag
-            const fallbackText = audioTag.textAfterTag || aiReply;
+            const fallbackText = audioTag.textWithoutTag || aiReply.replace(AUDIO_TAG_REGEX, "").trim();
             await whatsapp.sendTextMessage(message.from, fallbackText);
             await persistTurn(message.from, "assistant", fallbackText);
             broadcast("message:new", {
