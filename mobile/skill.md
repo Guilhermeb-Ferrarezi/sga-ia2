@@ -1,0 +1,1 @@
+teste o npm expo start para validar o projeto

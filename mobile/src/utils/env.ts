@@ -2,7 +2,13 @@ import Constants from "expo-constants";
 
 const extra = Constants.expoConfig?.extra ?? {};
 
+const apiBase =
+  (extra.API_BASE as string) || "https://zap.santos-games.com/api";
+const derivedWsBase = apiBase
+  .replace(/^https:/, "wss:")
+  .replace(/^http:/, "ws:");
+
 export const ENV = {
-  API_BASE: (extra.API_BASE as string) || "http://zap.santos-games.com/api",
-  WS_BASE: (extra.WS_BASE as string) || "ws://192.168.1.100:3001/api",
+  API_BASE: apiBase,
+  WS_BASE: (extra.WS_BASE as string) || derivedWsBase,
 } as const;
