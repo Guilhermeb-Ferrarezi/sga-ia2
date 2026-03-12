@@ -37,7 +37,12 @@ const normalizeBasePath = (value: string | undefined): string => {
 export const config = {
   apiPort: parsePort(Bun.env.PORT ?? Bun.env.API_PORT, 5000),
   apiBasePath: normalizeBasePath(Bun.env.API_BASE_PATH),
-  webOrigin: Bun.env.WEB_ORIGIN ?? "http://localhost:5173",
+  // Comma-separated list of allowed CORS origins, e.g.:
+  // http://localhost:5173,http://localhost:8081
+  allowedOrigins: (Bun.env.WEB_ORIGIN ?? "http://localhost:5173")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean),
   appName: Bun.env.APP_NAME ?? "WhatsApp AI Bot",
   webhookVerifyToken: required("WEBHOOK_VERIFY_TOKEN"),
   whatsappToken: required("WHATSAPP_TOKEN"),

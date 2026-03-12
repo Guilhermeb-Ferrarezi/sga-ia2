@@ -4,7 +4,7 @@ Here's the content of /memories/session/mobile_frontend_inventory.md with line n
      3	**Project**: SG Esports IA - Mobile Implementation  
      4	**Backend**: Bun.js TypeScript API  
      5	**Frontend Source**: React 18 + TypeScript (web/src)  
-     6	**Mobile Target**: React Native  
+     6	**Mobile Target**: React Native + Expo 
      7	
      8	---
      9	

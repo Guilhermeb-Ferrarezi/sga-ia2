@@ -92,12 +92,19 @@ const logWhatsAppPermissionHint = (error: unknown): void => {
 
 const CORS_METHODS = "GET,POST,PUT,DELETE,OPTIONS";
 
-const json = (body: unknown, status = 200, req?: Request): Response => {
+// Returns the echoed request origin when it is in the allow-list,
+// or the first configured origin as a safe fallback.
+const resolveAllowOrigin = (req?: Request): string => {
   const origin = req?.headers.get("origin");
-  const allowOrigin =
-    origin && (config.webOrigin === "*" || origin === config.webOrigin)
-      ? origin
-      : config.webOrigin;
+  if (!origin) return config.allowedOrigins[0] ?? "*";
+  const wildcardAllowed = config.allowedOrigins.includes("*");
+  return wildcardAllowed || config.allowedOrigins.includes(origin)
+    ? origin
+    : (config.allowedOrigins[0] ?? origin);
+};
+
+const json = (body: unknown, status = 200, req?: Request): Response => {
+  const allowOrigin = resolveAllowOrigin(req);
 
   return new Response(JSON.stringify(body), {
     status,
@@ -117,11 +124,7 @@ const textResponse = (
   req?: Request,
   contentType = "text/plain",
 ): Response => {
-  const origin = req?.headers.get("origin");
-  const allowOrigin =
-    origin && (config.webOrigin === "*" || origin === config.webOrigin)
-      ? origin
-      : config.webOrigin;
+  const allowOrigin = resolveAllowOrigin(req);
 
   return new Response(body, {
     status,
@@ -3703,7 +3706,7 @@ const handleAudioStream = async (req: Request, id: number): Promise<Response> =>
     const r2 = await getStreamFromR2(audio.r2Key);
     const headers = new Headers({
       "Content-Type": r2.contentType !== "application/octet-stream" ? r2.contentType : (audio.mimeType ?? "audio/ogg"),
-      "Access-Control-Allow-Origin": config.webOrigin,
+      "Access-Control-Allow-Origin": resolveAllowOrigin(req),
       "Access-Control-Allow-Methods": "GET, OPTIONS",
       "Cache-Control": "public, max-age=3600",
     });
@@ -3740,7 +3743,7 @@ const handleAudioStreamByUrl = async (req: Request): Promise<Response> => {
     const r2 = await getStreamFromR2(audio.r2Key);
     const headers = new Headers({
       "Content-Type": r2.contentType !== "application/octet-stream" ? r2.contentType : (audio.mimeType ?? "audio/ogg"),
-      "Access-Control-Allow-Origin": config.webOrigin,
+      "Access-Control-Allow-Origin": resolveAllowOrigin(req),
       "Access-Control-Allow-Methods": "GET, OPTIONS",
       "Cache-Control": "public, max-age=3600",
     });
@@ -3834,7 +3837,7 @@ const server = Bun.serve<WsUserData>({
       return new Response(null, {
         status: 204,
         headers: {
-          "Access-Control-Allow-Origin": config.webOrigin,
+          "Access-Control-Allow-Origin": resolveAllowOrigin(req),
           "Access-Control-Allow-Headers": "Authorization, Content-Type",
           "Access-Control-Allow-Methods": CORS_METHODS,
           Vary: "Origin",
@@ -3989,7 +3992,7 @@ const server = Bun.serve<WsUserData>({
         return new Response(null, {
           status: 204,
           headers: {
-            "Access-Control-Allow-Origin": config.webOrigin,
+            "Access-Control-Allow-Origin": resolveAllowOrigin(req),
             "Access-Control-Allow-Headers": "Authorization, Content-Type",
             "Access-Control-Allow-Methods": CORS_METHODS,
           },
@@ -4006,7 +4009,7 @@ const server = Bun.serve<WsUserData>({
           return new Response(null, {
             status: 204,
             headers: {
-              "Access-Control-Allow-Origin": config.webOrigin,
+              "Access-Control-Allow-Origin": resolveAllowOrigin(req),
               "Access-Control-Allow-Headers": "Authorization, Content-Type",
               "Access-Control-Allow-Methods": "GET, OPTIONS",
             },
@@ -4022,7 +4025,7 @@ const server = Bun.serve<WsUserData>({
             return new Response(null, {
               status: 204,
               headers: {
-                "Access-Control-Allow-Origin": config.webOrigin,
+                "Access-Control-Allow-Origin": resolveAllowOrigin(req),
                 "Access-Control-Allow-Headers": "Authorization, Content-Type",
                 "Access-Control-Allow-Methods": "GET, OPTIONS",
               },
@@ -4037,7 +4040,7 @@ const server = Bun.serve<WsUserData>({
             return new Response(null, {
               status: 204,
               headers: {
-                "Access-Control-Allow-Origin": config.webOrigin,
+                "Access-Control-Allow-Origin": resolveAllowOrigin(req),
                 "Access-Control-Allow-Headers": "Authorization, Content-Type",
                 "Access-Control-Allow-Methods": CORS_METHODS,
               },
