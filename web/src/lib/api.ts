@@ -1,4 +1,4 @@
-const API_BASE = import.meta.env.VITE_API_BASE ?? "/api";
+const API_BASE = import.meta.env.VITE_API_BASE;
 const SESSION_TOKEN_KEY = "esports_ia_session_token";
 
 export interface AuthUser {
@@ -12,6 +12,13 @@ export interface AuthUser {
 export interface LoginResponse {
   token: string;
   user: AuthUser;
+}
+
+export interface CreateUserInput {
+  email: string;
+  password: string;
+  name?: string;
+  role?: "ADMIN" | "AGENT";
 }
 
 export interface DashboardOverview {
@@ -350,6 +357,17 @@ export const api = {
 
   async me(token: string): Promise<{ user: AuthUser }> {
     return request<{ user: AuthUser }>("/auth/me", { method: "GET" }, token);
+  },
+
+  async createUser(token: string, input: CreateUserInput): Promise<AuthUser> {
+    return request<AuthUser>(
+      "/users",
+      {
+        method: "POST",
+        body: JSON.stringify(input),
+      },
+      token,
+    );
   },
 
   async overview(token: string): Promise<DashboardOverview> {

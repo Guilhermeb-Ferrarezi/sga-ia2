@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useToast } from "@/contexts/ToastContext";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "/api";
 
@@ -18,6 +19,7 @@ interface UseAudioPlayerReturn {
 }
 
 export function useAudioPlayer({ token }: UseAudioPlayerProps = {}): UseAudioPlayerReturn {
+  const { toast } = useToast();
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const blobUrlRef = useRef<string | null>(null);
   const [playingId, setPlayingId] = useState<string | number | null>(null);
@@ -112,15 +114,25 @@ export function useAudioPlayer({ token }: UseAudioPlayerProps = {}): UseAudioPla
             })
             .catch((err) => {
               console.error("Failed to play audio:", err);
+              toast({
+                title: "Falha ao reproduzir",
+                description: "Nao foi possivel carregar o audio no dispositivo.",
+                variant: "error"
+              });
               stopAudio();
             });
         })
         .catch((err) => {
           console.error("Failed to fetch audio for playback:", err);
+          toast({
+            title: "Erro no audio",
+            description: "Conteudo indisponivel ou formato não suportado.",
+            variant: "error"
+          });
           stopAudio();
         });
     },
-    [playingId, isPlaying, stopAudio, token]
+    [playingId, isPlaying, stopAudio, token, toast]
   );
 
   useEffect(() => {

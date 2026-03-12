@@ -53,7 +53,7 @@ export default function Header({
               <Menu className="h-4 w-4" />
             )}
           </Button>
-          <div className="min-w-0 space-y-0.5">
+          <div className="min-w-0 space-y-0.5 lg:hidden">
             <p className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
               SGA
             </p>
@@ -104,11 +104,7 @@ export default function Header({
           <div className="hidden text-right lg:block">
             <p className="text-sm font-medium">{user.email}</p>
             <p className="text-xs text-muted-foreground">{user.role}</p>
-          </div>
-          <Button variant="outline" size="sm" className="ml-1" onClick={logout}>
-            <LogOut className="h-4 w-4" />
-            <span className="ml-1 hidden md:inline">Sair</span>
-          </Button>
+          </div>  
         </div>
       </div>
     </header>

@@ -17,18 +17,18 @@ export default function DashboardPage() {
   }, [pathname]);
 
   return (
-    <div className="flex min-h-screen flex-col">
+    <div className="flex h-screen overflow-hidden w-full bg-background">
       <OperationalAlertsProvider>
-        <Header
-          mobileMenuOpen={mobileMenuOpen}
-          onToggleMobileMenu={() => setMobileMenuOpen((prev) => !prev)}
+        <Sidebar
+          mobileOpen={mobileMenuOpen}
+          onCloseMobile={() => setMobileMenuOpen(false)}
         />
-        <div className="flex flex-1">
-          <Sidebar
-            mobileOpen={mobileMenuOpen}
-            onCloseMobile={() => setMobileMenuOpen(false)}
+        <div className="flex flex-1 flex-col min-w-0 overflow-hidden">
+          <Header
+            mobileMenuOpen={mobileMenuOpen}
+            onToggleMobileMenu={() => setMobileMenuOpen((prev) => !prev)}
           />
-          <main className="flex-1 overflow-auto p-4 sm:p-6 lg:p-7">
+          <main className="flex-1 overflow-y-auto p-4 sm:p-6 lg:p-7">
             <Suspense
               fallback={
                 <LoadingScreen

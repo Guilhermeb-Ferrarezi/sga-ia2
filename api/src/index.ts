@@ -6,7 +6,7 @@ import {
   getCacheMetrics,
 } from "./lib/cache";
 import { getPrismaClient } from "./lib/prisma";
-import type { Prisma, PrismaClient } from "@prisma/client";
+import type { Prisma, PrismaClient, UserRole } from "@prisma/client";
 import { AuthService } from "./services/auth";
 import type { PublicUser } from "./services/auth";
 import { DashboardService } from "./services/dashboard";
@@ -238,6 +238,10 @@ const taskPrefix = [
   `${config.apiBasePath}/tasks/`,
   "/tasks/",
 ];
+const usersPaths = new Set<string>([
+  `${config.apiBasePath}/users`,
+  "/users",
+]);
 const handoffQueuePaths = new Set<string>([
   `${config.apiBasePath}/handoff/queue`,
   "/handoff/queue",
@@ -2523,6 +2527,61 @@ const handleContactDelete = async (
   return json({ ok: true }, 200, req);
 };
 
+const handleUserCreate = async (req: Request): Promise<Response> => {
+  const current = await getAuthenticatedUser(req);
+  if (current instanceof Response) return current;
+  const denied = requireAdmin(current, req);
+  if (denied) return denied;
+
+  let body: unknown;
+  try {
+    body = await req.json();
+  } catch {
+    return json({ error: "Invalid JSON" }, 400, req);
+  }
+
+  const input = body as Record<string, unknown>;
+  const email = typeof input.email === "string" ? input.email.trim().toLowerCase() : "";
+  const password = typeof input.password === "string" ? input.password : "";
+  const name = typeof input.name === "string" ? input.name.trim() : "";
+  const rawRole = typeof input.role === "string" ? input.role.trim().toUpperCase() : "AGENT";
+  const role: UserRole = rawRole === "ADMIN" ? "ADMIN" : "AGENT";
+
+  if (!email || !email.includes("@")) {
+    return json({ error: "email valido e obrigatorio" }, 400, req);
+  }
+  if (password.length < 6) {
+    return json({ error: "password deve ter ao menos 6 caracteres" }, 400, req);
+  }
+
+  const existing = await current.prisma.user.findUnique({ where: { email } });
+  if (existing) {
+    return json({ error: "Usuario ja existe" }, 409, req);
+  }
+
+  const passwordHash = await Bun.password.hash(password);
+  const user = await current.prisma.user.create({
+    data: {
+      email,
+      passwordHash,
+      name: name || null,
+      role,
+    },
+  });
+
+  return json(
+    {
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      role: user.role,
+      createdAt: user.createdAt.toISOString(),
+    },
+    201,
+    req,
+  );
+};
+
 // ── Batch actions on contacts ────────────────────────────────
 const handleContactsBatch = async (req: Request): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
@@ -3994,6 +4053,9 @@ const server = Bun.serve<WsUserData>({
     if (taskPaths.has(url.pathname)) {
       if (req.method === "GET") return handleTaskList(req);
       if (req.method === "POST") return handleTaskCreate(req);
+    }
+    if (usersPaths.has(url.pathname) && req.method === "POST") {
+      return handleUserCreate(req);
     }
     const taskSuffix = extractPathSuffix(url.pathname, taskPrefix);
     if (taskSuffix) {

@@ -9,9 +9,12 @@ import {
   Tags,
   ListTodo,
   Users,
+  UserPlus,
   Volume2,
+  LogOut,
   X,
 } from "lucide-react";
+import { useAuth } from "@/contexts/AuthContext";
 import { useOperationalAlerts } from "@/contexts/OperationalAlertsContext";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -21,6 +24,7 @@ const links = [
   { to: "/dashboard", label: "Visao Geral", icon: BarChart3, end: true },
   { to: "/dashboard/conversations", label: "Conversas", icon: MessageSquareText },
   { to: "/dashboard/contacts", label: "Contatos", icon: Users },
+  { to: "/dashboard/users/new", label: "Criar usuario", icon: UserPlus },
   { to: "/dashboard/pipeline", label: "Pipeline", icon: Columns3 },
   { to: "/dashboard/handoffs", label: "Handoff", icon: Users },
   { to: "/dashboard/tasks", label: "Tarefas", icon: ListTodo },
@@ -36,6 +40,7 @@ interface SidebarProps {
 }
 
 export default function Sidebar({ mobileOpen, onCloseMobile }: SidebarProps) {
+  const { logout } = useAuth();
   const { summary } = useOperationalAlerts();
 
   useEffect(() => {
@@ -98,8 +103,31 @@ export default function Sidebar({ mobileOpen, onCloseMobile }: SidebarProps) {
 
   return (
     <>
-      <aside className="hidden w-56 shrink-0 border-r border-border/40 lg:block animate-fade-up">
-        <nav className="flex flex-col gap-1 p-3">{renderLinks()}</nav>
+      <aside className="hidden w-56 shrink-0 flex-col border-r border-border/40 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 lg:flex animate-fade-up z-30">
+        <div className="flex h-16 shrink-0 items-center px-5 border-b border-border/40">
+          <div className="min-w-0 space-y-0.5">
+            <p className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
+              SGA
+            </p>
+            <h1 className="truncate text-base font-bold leading-tight">
+              Painel
+            </h1>
+          </div>
+        </div>
+        <nav className="flex flex-1 flex-col gap-1 overflow-y-auto p-3">
+          {renderLinks()}
+        </nav>
+        <div className="border-t border-border/40 p-3">
+          <Button
+            type="button"
+            variant="outline"
+            className="w-full justify-start"
+            onClick={logout}
+          >
+            <LogOut className="h-4 w-4" />
+            <span className="ml-2">Sair</span>
+          </Button>
+        </div>
       </aside>
 
       <div
@@ -136,9 +164,25 @@ export default function Sidebar({ mobileOpen, onCloseMobile }: SidebarProps) {
             <X className="h-4 w-4" />
           </Button>
         </div>
-        <nav className="flex h-[calc(100dvh-3.5rem)] flex-col gap-1 overflow-y-auto p-3">
-          {renderLinks(onCloseMobile)}
-        </nav>
+        <div className="flex h-[calc(100dvh-3.5rem)] flex-col">
+          <nav className="flex flex-1 flex-col gap-1 overflow-y-auto p-3">
+            {renderLinks(onCloseMobile)}
+          </nav>
+          <div className="border-t border-border/40 p-3">
+            <Button
+              type="button"
+              variant="outline"
+              className="w-full justify-start"
+              onClick={() => {
+                onCloseMobile();
+                logout();
+              }}
+            >
+              <LogOut className="h-4 w-4" />
+              <span className="ml-2">Sair</span>
+            </Button>
+          </div>
+        </div>
       </aside>
     </>
   );
