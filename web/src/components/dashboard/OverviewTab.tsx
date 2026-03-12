@@ -399,21 +399,6 @@ export default function OverviewTab() {
           ))}
         </CardContent>
       </Card>
-
-      <Card className="animate-fade-up" style={{ animationDelay: "220ms" }}>
-        <CardHeader>
-          <CardTitle>Operacao</CardTitle>
-          <CardDescription>
-            O painel usa autenticacao JWT, WebSocket para real-time e dados persistidos no PostgreSQL.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <p className="text-sm text-muted-foreground">
-            Backend ativo em API_BASE_PATH={import.meta.env.VITE_API_BASE ?? "/api"}.
-            Se nao aparecer conversa, valide ENABLE_DB=true e rode as migracoes.
-          </p>
-        </CardContent>
-      </Card>
     </div>
   );
 }
