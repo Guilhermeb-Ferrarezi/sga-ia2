@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useToast } from "@/contexts/ToastContext";
-
-const API_BASE = import.meta.env.VITE_API_BASE ?? "/api";
+import { API_BASE } from "@/lib/api";
 
 interface UseAudioPlayerProps {
   token?: string | null;

@@ -1,9 +1,16 @@
 import { lazy, Suspense } from "react";
-import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
+import { BrowserRouter, HashRouter, Navigate, Route, Routes } from "react-router-dom";
 import { AuthProvider, useAuth } from "@/contexts/AuthContext";
 import { WebSocketProvider } from "@/contexts/WebSocketContext";
 import { ToastProvider } from "@/contexts/ToastContext";
 import LoadingScreen from "@/components/ui/loading-screen";
+
+const isElectronDesktop = (): boolean => {
+  if (typeof navigator === "undefined") return false;
+  return /electron/i.test(navigator.userAgent);
+};
+
+const Router = isElectronDesktop() ? HashRouter : BrowserRouter;
 
 const LoginPage = lazy(() => import("@/pages/LoginPage"));
 const DashboardPage = lazy(() => import("@/pages/DashboardPage"));
@@ -82,12 +89,12 @@ function AuthGate() {
 
 export default function App(): JSX.Element {
   return (
-    <BrowserRouter>
+    <Router>
       <ToastProvider>
         <AuthProvider>
           <AuthGate />
         </AuthProvider>
       </ToastProvider>
-    </BrowserRouter>
+    </Router>
   );
 }
