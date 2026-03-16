@@ -26,6 +26,49 @@ export interface LoginResponse {
   user: AuthUser;
 }
 
+export interface WhatsAppPhoneNumberProfile {
+  id: string;
+  displayPhoneNumber: string | null;
+  verifiedName: string | null;
+  qualityRating: string | null;
+  nameStatus: string | null;
+  codeVerificationStatus: string | null;
+}
+
+export interface WhatsAppBusinessProfile {
+  about: string | null;
+  address: string | null;
+  description: string | null;
+  email: string | null;
+  profilePictureUrl: string | null;
+  websites: string[];
+  vertical: string | null;
+}
+
+export interface WhatsAppProfileSummary {
+  phoneNumber: WhatsAppPhoneNumberProfile;
+  profile: WhatsAppBusinessProfile;
+  capabilities: {
+    canEditBusinessProfile: boolean;
+    canEditDisplayName: boolean;
+    canEditBanner: boolean;
+  };
+  limitations: {
+    displayName: string;
+    banner: string;
+  };
+}
+
+export interface UpdateWhatsAppProfileInput {
+  about: string;
+  address: string;
+  description: string;
+  email: string;
+  vertical: string;
+  websites: string[];
+  profilePhoto?: File | null;
+}
+
 export interface CreateUserInput {
   email: string;
   password: string;
@@ -290,6 +333,25 @@ const buildHeaders = (token?: string, hasBody = false): HeadersInit => {
   return headers;
 };
 
+const parseResponsePayload = async (response: Response): Promise<unknown> => {
+  const raw = await response.text();
+  if (!raw) return null;
+
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch {
+    return null;
+  }
+};
+
+const getApiErrorMessage = (payload: unknown, fallback: string): string =>
+  typeof payload === "object" &&
+  payload !== null &&
+  "error" in payload &&
+  typeof (payload as { error?: unknown }).error === "string"
+    ? (payload as { error: string }).error
+    : fallback;
+
 const request = async <T>(
   path: string,
   options: RequestInit = {},
@@ -304,24 +366,10 @@ const request = async <T>(
     },
   });
 
-  const raw = await response.text();
-  let payload: unknown = null;
-  if (raw) {
-    try {
-      payload = JSON.parse(raw) as unknown;
-    } catch {
-      payload = null;
-    }
-  }
+  const payload = await parseResponsePayload(response);
 
   if (!response.ok) {
-    const message =
-      typeof payload === "object" &&
-      payload !== null &&
-      "error" in payload &&
-      typeof (payload as { error?: unknown }).error === "string"
-        ? (payload as { error: string }).error
-        : "Erro inesperado na API";
+    const message = getApiErrorMessage(payload, "Erro inesperado na API");
     throw new ApiError(message, response.status);
   }
 
@@ -373,6 +421,46 @@ export const api = {
 
   async me(token: string): Promise<{ user: AuthUser }> {
     return request<{ user: AuthUser }>("/auth/me", { method: "GET" }, token);
+  },
+
+  async whatsappProfile(token: string): Promise<WhatsAppProfileSummary> {
+    return request<WhatsAppProfileSummary>(
+      "/whatsapp/profile",
+      { method: "GET" },
+      token,
+    );
+  },
+
+  async updateWhatsAppProfile(
+    token: string,
+    input: UpdateWhatsAppProfileInput,
+  ): Promise<WhatsAppProfileSummary> {
+    const formData = new FormData();
+    formData.set("about", input.about);
+    formData.set("address", input.address);
+    formData.set("description", input.description);
+    formData.set("email", input.email);
+    formData.set("vertical", input.vertical);
+    formData.set("websites", JSON.stringify(input.websites));
+    if (input.profilePhoto) {
+      formData.set("profilePhoto", input.profilePhoto);
+    }
+
+    const response = await fetch(`${API_BASE}/whatsapp/profile`, {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${token}` },
+      body: formData,
+    });
+
+    const payload = await parseResponsePayload(response);
+    if (!response.ok) {
+      throw new ApiError(
+        getApiErrorMessage(payload, "Erro ao atualizar perfil do WhatsApp"),
+        response.status,
+      );
+    }
+
+    return payload as WhatsAppProfileSummary;
   },
 
   async createUser(token: string, input: CreateUserInput): Promise<AuthUser> {
@@ -689,17 +777,9 @@ export const api = {
       body: formData,
     });
 
-    const raw = await response.text();
-    let payload: unknown = null;
-    if (raw) {
-      try { payload = JSON.parse(raw); } catch { payload = null; }
-    }
+    const payload = await parseResponsePayload(response);
     if (!response.ok) {
-      const message =
-        typeof payload === "object" && payload !== null && "error" in payload &&
-        typeof (payload as { error?: unknown }).error === "string"
-          ? (payload as { error: string }).error
-          : "Erro ao enviar audio";
+      const message = getApiErrorMessage(payload, "Erro ao enviar audio");
       throw new ApiError(message, response.status);
     }
     return payload as Audio;

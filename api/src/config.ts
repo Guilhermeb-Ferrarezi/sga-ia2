@@ -48,6 +48,7 @@ export const config = {
   whatsappToken: required("WHATSAPP_TOKEN"),
   whatsappPhoneNumberId: required("WHATSAPP_PHONE_NUMBER_ID"),
   whatsappGraphVersion: Bun.env.WHATSAPP_GRAPH_VERSION ?? "v21.0",
+  whatsappAppId: optional(Bun.env.WHATSAPP_APP_ID ?? Bun.env.META_APP_ID),
   openaiApiKey: required("OPENAI_API_KEY"),
   openaiModel: Bun.env.OPENAI_MODEL ?? "gpt-4o-mini",
   openaiTranscriptionModel:

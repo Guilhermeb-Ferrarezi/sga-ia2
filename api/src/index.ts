@@ -14,6 +14,7 @@ import { OpenAIService } from "./services/openai";
 import {
   extractInboundMessages,
   isWhatsAppPermissionError,
+  WhatsAppApiError,
   WhatsAppService,
 } from "./services/whatsapp";
 import type { InboundMessage, WhatsAppWebhookPayload } from "./types/whatsapp";
@@ -81,12 +82,13 @@ const whatsapp = new WhatsAppService(
   config.whatsappToken,
   config.whatsappPhoneNumberId,
   config.whatsappGraphVersion,
+  config.whatsappAppId,
 );
 
 const logWhatsAppPermissionHint = (error: unknown): void => {
   if (!isWhatsAppPermissionError(error)) return;
   console.error(
-    "[whatsapp-auth] Meta rejected the token/permissions. Check WHATSAPP_TOKEN, ensure it is a permanent System User token with whatsapp_business_messaging permission, confirm the app is attached to the correct WhatsApp Business Account, and verify WHATSAPP_PHONE_NUMBER_ID.",
+    "[whatsapp-auth] Meta rejected the token/permissions. Check WHATSAPP_TOKEN, ensure it is a permanent System User token with whatsapp_business_messaging and whatsapp_business_management permissions, confirm the app is attached to the correct WhatsApp Business Account, and verify WHATSAPP_PHONE_NUMBER_ID.",
   );
 };
 
@@ -261,6 +263,10 @@ const audioPrefix = [
   `${config.apiBasePath}/audios/`,
   "/audios/",
 ];
+const whatsappProfilePaths = new Set<string>([
+  `${config.apiBasePath}/whatsapp/profile`,
+  "/whatsapp/profile",
+]);
 const wsUpgradePaths = new Set<string>([
   `${config.apiBasePath}/ws`,
   "/ws",
@@ -1116,6 +1122,170 @@ const requireAdmin = (
     return json({ error: "Forbidden: admin only" }, 403, req);
   }
   return null;
+};
+
+const buildWhatsAppProfilePayload = async (canEditBusinessProfile: boolean) => {
+  const [profile, phoneNumber] = await Promise.all([
+    whatsapp.getBusinessProfile(),
+    whatsapp.getPhoneNumberProfile(),
+  ]);
+
+  return {
+    phoneNumber,
+    profile,
+    capabilities: {
+      canEditBusinessProfile,
+      canEditDisplayName: false,
+      canEditBanner: false,
+    },
+    limitations: {
+      displayName:
+        "O nome de exibicao precisa ser alterado no WhatsApp Manager e pode exigir aprovacao da Meta antes do registro do numero.",
+      banner:
+        "A WhatsApp Cloud API nao expoe banner/capa da conta conectada por endpoint de perfil.",
+    },
+  };
+};
+
+const parseWhatsAppProfileError = (
+  error: unknown,
+  fallback: string,
+): { status: number; message: string } => {
+  if (error instanceof WhatsAppApiError) {
+    return {
+      status: error.status,
+      message: error.details ?? error.message,
+    };
+  }
+
+  return {
+    status: 500,
+    message: error instanceof Error ? error.message : fallback,
+  };
+};
+
+const handleWhatsAppProfileGet = async (req: Request): Promise<Response> => {
+  const current = await getAuthenticatedUser(req);
+  if (current instanceof Response) return current;
+
+  try {
+    const payload = await buildWhatsAppProfilePayload(
+      current.user.role === "ADMIN",
+    );
+    return json(payload, 200, req);
+  } catch (error) {
+    logWhatsAppPermissionHint(error);
+    console.error("handleWhatsAppProfileGet error:", error);
+    const parsed = parseWhatsAppProfileError(
+      error,
+      "Erro ao carregar perfil do WhatsApp",
+    );
+    return json({ error: parsed.message }, parsed.status, req);
+  }
+};
+
+const handleWhatsAppProfileUpdate = async (req: Request): Promise<Response> => {
+  const current = await getAuthenticatedUser(req);
+  if (current instanceof Response) return current;
+  const denied = requireAdmin(current, req);
+  if (denied) return denied;
+
+  let formData: FormData;
+  try {
+    formData = await req.formData();
+  } catch {
+    return json({ error: "Invalid form data" }, 400, req);
+  }
+
+  const updateInput: {
+    about?: string;
+    address?: string;
+    description?: string;
+    email?: string;
+    websites?: string[];
+    vertical?: string;
+    profilePictureHandle?: string;
+  } = {};
+
+  for (const field of [
+    "about",
+    "address",
+    "description",
+    "email",
+    "vertical",
+  ] as const) {
+    if (!formData.has(field)) continue;
+    const rawValue = formData.get(field);
+    if (typeof rawValue !== "string") {
+      return json({ error: `${field} must be text` }, 400, req);
+    }
+    updateInput[field] = rawValue.trim();
+  }
+
+  if (formData.has("websites")) {
+    const rawValue = formData.get("websites");
+    if (typeof rawValue !== "string") {
+      return json({ error: "websites must be text" }, 400, req);
+    }
+
+    let websites: string[] = [];
+    const normalized = rawValue.trim();
+
+    if (normalized) {
+      try {
+        const parsed = JSON.parse(normalized) as unknown;
+        websites = Array.isArray(parsed)
+          ? parsed
+              .map((value) => (typeof value === "string" ? value.trim() : ""))
+              .filter(Boolean)
+          : [];
+      } catch {
+        websites = normalized
+          .split(/\r?\n|,/)
+          .map((value) => value.trim())
+          .filter(Boolean);
+      }
+    }
+
+    updateInput.websites = websites;
+  }
+
+  try {
+    const profilePhoto = formData.get("profilePhoto");
+    if (profilePhoto instanceof File && profilePhoto.size > 0) {
+      const mimeType = profilePhoto.type.trim() || "image/jpeg";
+      if (!mimeType.startsWith("image/")) {
+        return json({ error: "profilePhoto must be an image" }, 400, req);
+      }
+
+      const fileBytes = new Uint8Array(await profilePhoto.arrayBuffer());
+      const fileName =
+        profilePhoto.name?.trim() || `whatsapp-profile-${Date.now()}.jpg`;
+      updateInput.profilePictureHandle = await whatsapp.uploadProfilePicture(
+        fileBytes,
+        fileName,
+        mimeType,
+      );
+    } else if (profilePhoto !== null && !(profilePhoto instanceof File)) {
+      return json({ error: "profilePhoto must be a file" }, 400, req);
+    }
+
+    if (!Object.keys(updateInput).length) {
+      return json({ error: "Nenhum campo valido para atualizar" }, 400, req);
+    }
+
+    await whatsapp.updateBusinessProfile(updateInput);
+    const payload = await buildWhatsAppProfilePayload(true);
+    return json(payload, 200, req);
+  } catch (error) {
+    logWhatsAppPermissionHint(error);
+    console.error("handleWhatsAppProfileUpdate error:", error);
+    const parsed = parseWhatsAppProfileError(
+      error,
+      "Erro ao atualizar perfil do WhatsApp",
+    );
+    return json({ error: parsed.message }, parsed.status, req);
+  }
 };
 
 const authLogin = async (req: Request): Promise<Response> => {
@@ -3858,6 +4028,10 @@ const server = Bun.serve<WsUserData>({
     }
     if (authMePaths.has(url.pathname) && req.method === "GET") {
       return authMe(req);
+    }
+    if (whatsappProfilePaths.has(url.pathname)) {
+      if (req.method === "GET") return handleWhatsAppProfileGet(req);
+      if (req.method === "PUT") return handleWhatsAppProfileUpdate(req);
     }
     if (dashboardOverviewPaths.has(url.pathname) && req.method === "GET") {
       return dashboardOverview(req);
