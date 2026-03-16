@@ -12,6 +12,7 @@ export interface PublicUser {
   id: string;
   email: string;
   name: string | null;
+  avatarUrl: string | null;
   role: UserRole;
   createdAt: string;
 }
@@ -20,6 +21,7 @@ const toPublicUser = (user: User): PublicUser => ({
   id: user.id,
   email: user.email,
   name: user.name,
+  avatarUrl: user.avatarUrl,
   role: user.role,
   createdAt: user.createdAt.toISOString(),
 });

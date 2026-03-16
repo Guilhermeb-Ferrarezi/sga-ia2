@@ -24,6 +24,7 @@ import {
 } from "./lib/operationalAlerts";
 import {
   uploadToR2,
+  uploadFileToR2,
   deleteFromR2,
   getObjectFromR2,
   getStreamFromR2,
@@ -154,6 +155,10 @@ const authLoginPaths = new Set<string>([
 const authMePaths = new Set<string>([
   `${config.apiBasePath}/auth/me`,
   "/auth/me",
+]);
+const authProfilePaths = new Set<string>([
+  `${config.apiBasePath}/auth/profile`,
+  "/auth/profile",
 ]);
 const dashboardOverviewPaths = new Set<string>([
   `${config.apiBasePath}/dashboard/overview`,
@@ -1155,6 +1160,77 @@ const authMe = async (req: Request): Promise<Response> => {
   if (current instanceof Response) return current;
 
   return json({ user: current.user }, 200, req);
+};
+
+const handleProfileUpdate = async (req: Request): Promise<Response> => {
+  const current = await getAuthenticatedUser(req);
+  if (current instanceof Response) return current;
+
+  const contentType = req.headers.get("content-type") ?? "";
+
+  let name: string | undefined;
+  let avatarFile: File | null = null;
+
+  if (contentType.includes("multipart/form-data")) {
+    let formData: FormData;
+    try {
+      formData = await req.formData();
+    } catch {
+      return json({ error: "Invalid form data" }, 400, req);
+    }
+    const rawName = formData.get("name");
+    if (typeof rawName === "string") name = rawName.trim();
+    const file = formData.get("avatar");
+    if (file && file instanceof File && file.size > 0) avatarFile = file;
+  } else {
+    let body: unknown;
+    try {
+      body = await req.json();
+    } catch {
+      return json({ error: "Invalid JSON" }, 400, req);
+    }
+    const input = typeof body === "object" && body !== null ? (body as Record<string, unknown>) : {};
+    if (typeof input.name === "string") name = input.name.trim();
+  }
+
+  let avatarUrl: string | undefined;
+
+  if (avatarFile) {
+    if (!avatarFile.type.startsWith("image/")) {
+      return json({ error: "Avatar deve ser uma imagem" }, 400, req);
+    }
+    if (avatarFile.size > 2 * 1024 * 1024) {
+      return json({ error: "Avatar muito grande (max 2 MB)" }, 400, req);
+    }
+    const ext = avatarFile.name.split(".").pop() ?? "jpg";
+    const r2Key = `avatars/${current.user.id}.${ext}`;
+    const buffer = new Uint8Array(await avatarFile.arrayBuffer());
+    avatarUrl = await uploadFileToR2(r2Key, buffer, avatarFile.type);
+  }
+
+  const data: Record<string, unknown> = {};
+  if (name !== undefined) data.name = name || null;
+  if (avatarUrl !== undefined) data.avatarUrl = avatarUrl;
+
+  if (Object.keys(data).length === 0) {
+    return json({ error: "Nenhum campo para atualizar" }, 400, req);
+  }
+
+  const updated = await current.prisma.user.update({
+    where: { id: current.user.id },
+    data,
+  });
+
+  return json({
+    user: {
+      id: updated.id,
+      email: updated.email,
+      name: updated.name,
+      avatarUrl: updated.avatarUrl,
+      role: updated.role,
+      createdAt: updated.createdAt.toISOString(),
+    },
+  }, 200, req);
 };
 
 const dashboardOverview = async (req: Request): Promise<Response> => {
@@ -3858,6 +3934,9 @@ const server = Bun.serve<WsUserData>({
     }
     if (authMePaths.has(url.pathname) && req.method === "GET") {
       return authMe(req);
+    }
+    if (authProfilePaths.has(url.pathname) && req.method === "PUT") {
+      return handleProfileUpdate(req);
     }
     if (dashboardOverviewPaths.has(url.pathname) && req.method === "GET") {
       return dashboardOverview(req);

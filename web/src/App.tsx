@@ -18,6 +18,7 @@ const TemplatesPage = lazy(() => import("@/pages/TemplatesPage"));
 const TagsPage = lazy(() => import("@/pages/TagsPage"));
 const TasksPage = lazy(() => import("@/pages/TasksPage"));
 const AudiosPage = lazy(() => import("@/pages/AudiosPage"));
+const ProfilePage = lazy(() => import("@/pages/ProfilePage"));
 
 function AuthGate() {
   const { token, user, bootLoading } = useAuth();
@@ -72,6 +73,7 @@ function AuthGate() {
             <Route path="templates" element={<TemplatesPage />} />
             <Route path="tags" element={<TagsPage />} />
             <Route path="audios" element={<AudiosPage />} />
+            <Route path="profile" element={<ProfilePage />} />
           </Route>
           <Route path="*" element={<Navigate to="/dashboard" replace />} />
         </Routes>

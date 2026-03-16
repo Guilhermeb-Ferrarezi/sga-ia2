@@ -5,6 +5,7 @@ export interface AuthUser {
   id: string;
   email: string;
   name: string | null;
+  avatarUrl: string | null;
   role: "ADMIN" | "AGENT";
   createdAt: string;
 }
@@ -357,6 +358,29 @@ export const api = {
 
   async me(token: string): Promise<{ user: AuthUser }> {
     return request<{ user: AuthUser }>("/auth/me", { method: "GET" }, token);
+  },
+
+  async updateProfile(token: string, data: FormData): Promise<{ user: AuthUser }> {
+    const response = await fetch(`${API_BASE}/auth/profile`, {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${token}` },
+      body: data,
+    });
+
+    const raw = await response.text();
+    let payload: unknown = null;
+    if (raw) {
+      try { payload = JSON.parse(raw); } catch { payload = null; }
+    }
+    if (!response.ok) {
+      const message =
+        typeof payload === "object" && payload !== null && "error" in payload &&
+        typeof (payload as { error?: unknown }).error === "string"
+          ? (payload as { error: string }).error
+          : "Erro ao atualizar perfil";
+      throw new ApiError(message, response.status);
+    }
+    return payload as { user: AuthUser };
   },
 
   async createUser(token: string, input: CreateUserInput): Promise<AuthUser> {

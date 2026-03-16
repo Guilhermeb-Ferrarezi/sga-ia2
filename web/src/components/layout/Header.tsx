@@ -1,8 +1,9 @@
 import { AlertTriangle, Clock3, LogOut, Menu, X } from "lucide-react";
+import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/contexts/AuthContext";
 import { useOperationalAlerts } from "@/contexts/OperationalAlertsContext";
 import { useWebSocket, type WsConnectionStatus } from "@/contexts/WebSocketContext";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
@@ -30,6 +31,7 @@ export default function Header({
   const { user, logout } = useAuth();
   const { status } = useWebSocket();
   const { summary } = useOperationalAlerts();
+  const navigate = useNavigate();
 
   if (!user) return null;
 
@@ -96,15 +98,25 @@ export default function Header({
             </div>
           )}
 
-          <Avatar className="h-9 w-9 border border-border">
-            <AvatarFallback className="bg-primary text-primary-foreground text-xs">
-              {user.email.slice(0, 2).toUpperCase()}
-            </AvatarFallback>
-          </Avatar>
-          <div className="hidden text-right lg:block">
-            <p className="text-sm font-medium">{user.email}</p>
-            <p className="text-xs text-muted-foreground">{user.role}</p>
-          </div>  
+          <button
+            type="button"
+            className="flex shrink-0 items-center gap-2 cursor-pointer rounded-lg px-1 py-1 transition hover:bg-muted/60"
+            onClick={() => navigate("/dashboard/profile")}
+            title="Meu Perfil"
+          >
+            <Avatar className="h-9 w-9 border border-border">
+              {user.avatarUrl ? (
+                <AvatarImage src={user.avatarUrl} alt="Avatar" />
+              ) : null}
+              <AvatarFallback className="bg-primary text-primary-foreground text-xs">
+                {(user.name ?? user.email).slice(0, 2).toUpperCase()}
+              </AvatarFallback>
+            </Avatar>
+            <div className="hidden text-right lg:block">
+              <p className="text-sm font-medium">{user.name ?? user.email}</p>
+              <p className="text-xs text-muted-foreground">{user.role}</p>
+            </div>
+          </button>  
         </div>
       </div>
     </header>

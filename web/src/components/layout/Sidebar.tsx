@@ -10,6 +10,7 @@ import {
   ListTodo,
   Users,
   UserPlus,
+  UserCog,
   Volume2,
   LogOut,
   X,
@@ -32,6 +33,7 @@ const links = [
   { to: "/dashboard/templates", label: "Templates", icon: FileText },
   { to: "/dashboard/tags", label: "Tags", icon: Tags },
   { to: "/dashboard/audios", label: "Audios", icon: Volume2 },
+  { to: "/dashboard/profile", label: "Meu Perfil", icon: UserCog },
 ];
 
 interface SidebarProps {
