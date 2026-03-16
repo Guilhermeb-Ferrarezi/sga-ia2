@@ -1,0 +1,49 @@
+{
+  "name": "desktop-sga",
+  "productName": "desktop-sga",
+  "version": "1.0.0",
+  "description": "My Electron application description",
+  "main": ".vite/build/main.js",
+  "private": true,
+  "scripts": {
+    "start": "concurrently -k -s first \"npm run start:web\" \"wait-on tcp:5173 && npm run electron:start\"",
+    "start:web": "npm --prefix ../web run dev -- --port 5173 --strictPort",
+    "electron:start": "electron-forge start",
+    "start:desktop": "npm run start",
+    "web:build": "npm --prefix ../web run build",
+    "package": "npm run web:build && electron-forge package",
+    "make": "npm run web:build && electron-forge make",
+    "publish": "electron-forge publish",
+    "lint": "eslint --ext .ts,.tsx ."
+  },
+  "keywords": [],
+  "author": {
+    "name": "guilherme",
+    "email": "guibferrarezi@gmail.com"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@electron-forge/cli": "^7.11.1",
+    "@electron-forge/maker-deb": "^7.11.1",
+    "@electron-forge/maker-rpm": "^7.11.1",
+    "@electron-forge/maker-squirrel": "^7.11.1",
+    "@electron-forge/maker-zip": "^7.11.1",
+    "@electron-forge/plugin-auto-unpack-natives": "^7.11.1",
+    "@electron-forge/plugin-fuses": "^7.11.1",
+    "@electron-forge/plugin-vite": "^7.11.1",
+    "@electron/fuses": "^1.8.0",
+    "@types/electron-squirrel-startup": "^1.0.2",
+    "@typescript-eslint/eslint-plugin": "^5.62.0",
+    "@typescript-eslint/parser": "^5.62.0",
+    "concurrently": "^9.2.1",
+    "electron": "41.0.2",
+    "eslint": "^8.57.1",
+    "eslint-plugin-import": "^2.32.0",
+    "typescript": "~4.5.4",
+    "vite": "^5.4.21",
+    "wait-on": "^8.0.5"
+  },
+  "dependencies": {
+    "electron-squirrel-startup": "^1.0.1"
+  }
+}

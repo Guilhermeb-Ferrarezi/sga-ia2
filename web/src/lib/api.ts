@@ -1,4 +1,16 @@
-const API_BASE = import.meta.env.VITE_API_BASE;
+const ELECTRON_API_BASE = "https://zap.santos-games.com/api";
+const ELECTRON_WS_BASE = "wss://zap.santos-games.com/api";
+
+const isElectronDesktop = (): boolean => {
+  if (typeof navigator === "undefined") return false;
+  return /electron/i.test(navigator.userAgent);
+};
+
+const normalizeApiBase = (base: string): string => base.replace(/\/+$/, "");
+
+export const API_BASE = isElectronDesktop()
+  ? ELECTRON_API_BASE
+  : normalizeApiBase(import.meta.env.VITE_API_BASE ?? "/api");
 const SESSION_TOKEN_KEY = "esports_ia_session_token";
 
 export interface AuthUser {
@@ -330,6 +342,10 @@ export const sessionStore = {
 };
 
 export const getWsUrl = (token: string): string => {
+  if (isElectronDesktop()) {
+    return `${ELECTRON_WS_BASE}/ws?token=${encodeURIComponent(token)}`;
+  }
+
   // In dev, the vite proxy doesn't handle WS well so connect directly
   const wsBase = import.meta.env.DEV
     ? `ws://${window.location.hostname}:5000/api`
