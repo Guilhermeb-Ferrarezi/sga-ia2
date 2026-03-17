@@ -12,6 +12,7 @@ import {
   UserPlus,
   UserCog,
   Volume2,
+  Smartphone,
   LogOut,
   X,
 } from "lucide-react";
@@ -33,6 +34,7 @@ const links = [
   { to: "/dashboard/templates", label: "Templates", icon: FileText },
   { to: "/dashboard/tags", label: "Tags", icon: Tags },
   { to: "/dashboard/audios", label: "Audios", icon: Volume2 },
+  { to: "/dashboard/whatsapp-profile", label: "Perfil WhatsApp", icon: Smartphone },
   { to: "/dashboard/profile", label: "Meu Perfil", icon: UserCog },
 ];
 
