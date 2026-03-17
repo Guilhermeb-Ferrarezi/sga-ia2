@@ -120,7 +120,7 @@ export default function ProfilePage() {
         {/* Role (read-only) */}
         <div className="space-y-2">
           <Label>Funcao</Label>
-          <Input value={user.role} disabled />
+          <Input value={user.roleLabel} disabled />
         </div>
 
         <Button type="submit" disabled={saving} className="w-full">

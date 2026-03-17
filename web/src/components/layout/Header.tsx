@@ -1,5 +1,4 @@
 import { AlertTriangle, Clock3, LogOut, Menu, X } from "lucide-react";
-import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/contexts/AuthContext";
 import { useOperationalAlerts } from "@/contexts/OperationalAlertsContext";
 import { useWebSocket, type WsConnectionStatus } from "@/contexts/WebSocketContext";
@@ -31,7 +30,6 @@ export default function Header({
   const { user, logout } = useAuth();
   const { status } = useWebSocket();
   const { summary } = useOperationalAlerts();
-  const navigate = useNavigate();
 
   if (!user) return null;
 
@@ -98,12 +96,7 @@ export default function Header({
             </div>
           )}
 
-          <button
-            type="button"
-            className="flex shrink-0 items-center gap-2 cursor-pointer rounded-lg px-1 py-1 transition hover:bg-muted/60"
-            onClick={() => navigate("/dashboard/profile")}
-            title="Meu Perfil"
-          >
+          <div className="flex shrink-0 items-center gap-2 rounded-lg px-1 py-1">
             <Avatar className="h-9 w-9 border border-border">
               {user.avatarUrl ? (
                 <AvatarImage src={user.avatarUrl} alt="Avatar" />
@@ -114,9 +107,9 @@ export default function Header({
             </Avatar>
             <div className="hidden text-right lg:block">
               <p className="text-sm font-medium">{user.name ?? user.email}</p>
-              <p className="text-xs text-muted-foreground">{user.role}</p>
+              <p className="text-xs text-muted-foreground">{user.roleLabel}</p>
             </div>
-          </button>  
+          </div>
         </div>
       </div>
     </header>

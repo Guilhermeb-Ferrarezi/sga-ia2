@@ -16,4 +16,4 @@ RUN bun run build
 
 EXPOSE 5000
 
-CMD ["bun", "dist/index.js"]
+CMD ["sh", "-c", "bunx prisma migrate deploy && bun dist/index.js"]

@@ -6,9 +6,9 @@ import {
   getCacheMetrics,
 } from "./lib/cache";
 import { getPrismaClient } from "./lib/prisma";
-import type { Prisma, PrismaClient, UserRole } from "@prisma/client";
+import { Prisma, type PrismaClient, type UserRole } from "@prisma/client";
 import { AuthService } from "./services/auth";
-import type { PublicUser } from "./services/auth";
+import { toPublicUser, type PublicUser } from "./services/auth";
 import { DashboardService } from "./services/dashboard";
 import { OpenAIService } from "./services/openai";
 import {
@@ -40,6 +40,13 @@ import {
   verifyWsToken,
   type WsUserData,
 } from "./lib/ws";
+import {
+  ALL_PERMISSIONS,
+  PERMISSIONS,
+  hasPermission,
+  normalizePermissionList,
+  type Permission,
+} from "./services/rbac";
 
 const openAI = new OpenAIService(
   config.openaiApiKey,
@@ -94,6 +101,12 @@ const logWhatsAppPermissionHint = (error: unknown): void => {
 };
 
 const CORS_METHODS = "GET,POST,PUT,DELETE,OPTIONS";
+const VALID_PRESET_USER_ROLES = new Set<UserRole>([
+  "ADMIN",
+  "MANAGER",
+  "AGENT",
+  "VIEWER",
+]);
 
 // Returns the echoed request origin when it is in the allow-list,
 // or the first configured origin as a safe fallback.
@@ -252,6 +265,18 @@ const usersPaths = new Set<string>([
   `${config.apiBasePath}/users`,
   "/users",
 ]);
+const usersPrefix = [
+  `${config.apiBasePath}/users/`,
+  "/users/",
+];
+const rolesPaths = new Set<string>([
+  `${config.apiBasePath}/roles`,
+  "/roles",
+]);
+const rolesPrefix = [
+  `${config.apiBasePath}/roles/`,
+  "/roles/",
+];
 const handoffQueuePaths = new Set<string>([
   `${config.apiBasePath}/handoff/queue`,
   "/handoff/queue",
@@ -1119,15 +1144,37 @@ const getAuthenticatedUser = async (
   return { prisma: db.prisma, user };
 };
 
-const requireAdmin = (
+const requirePermission = (
   current: { user: PublicUser },
   req: Request,
+  permission: Permission,
+  message?: string,
 ): Response | null => {
-  if (current.user.role !== "ADMIN") {
-    return json({ error: "Forbidden: admin only" }, 403, req);
+  if (!hasPermission(current.user.permissions, permission)) {
+    return json({ error: message ?? `Forbidden: missing permission ${permission}` }, 403, req);
   }
   return null;
 };
+
+const serializeCustomRole = (
+  role: {
+    id: string;
+    name: string;
+    description: string | null;
+    permissions: Prisma.JsonValue;
+    createdAt: Date;
+    updatedAt: Date;
+    _count?: { users: number };
+  },
+) => ({
+  id: role.id,
+  name: role.name,
+  description: role.description,
+  permissions: normalizePermissionList(role.permissions),
+  usersCount: role._count?.users ?? 0,
+  createdAt: role.createdAt.toISOString(),
+  updatedAt: role.updatedAt.toISOString(),
+});
 
 const buildWhatsAppProfilePayload = async (canEditBusinessProfile: boolean) => {
   const [profile, phoneNumber] = await Promise.all([
@@ -1175,7 +1222,7 @@ const handleWhatsAppProfileGet = async (req: Request): Promise<Response> => {
 
   try {
     const payload = await buildWhatsAppProfilePayload(
-      current.user.role === "ADMIN",
+      hasPermission(current.user.permissions, PERMISSIONS.WHATSAPP_PROFILE_MANAGE),
     );
     return json(payload, 200, req);
   } catch (error) {
@@ -1192,7 +1239,7 @@ const handleWhatsAppProfileGet = async (req: Request): Promise<Response> => {
 const handleWhatsAppProfileUpdate = async (req: Request): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
-  const denied = requireAdmin(current, req);
+  const denied = requirePermission(current, req, PERMISSIONS.WHATSAPP_PROFILE_MANAGE);
   if (denied) return denied;
 
   let formData: FormData;
@@ -1339,6 +1386,9 @@ const handleProfileUpdate = async (req: Request): Promise<Response> => {
   const contentType = req.headers.get("content-type") ?? "";
 
   let name: string | undefined;
+  let email: string | undefined;
+  let currentPassword: string | undefined;
+  let newPassword: string | undefined;
   let avatarFile: File | null = null;
 
   if (contentType.includes("multipart/form-data")) {
@@ -1350,6 +1400,14 @@ const handleProfileUpdate = async (req: Request): Promise<Response> => {
     }
     const rawName = formData.get("name");
     if (typeof rawName === "string") name = rawName.trim();
+    const rawEmail = formData.get("email");
+    if (typeof rawEmail === "string") email = rawEmail.trim().toLowerCase();
+    const rawCurrentPassword = formData.get("currentPassword");
+    if (typeof rawCurrentPassword === "string") {
+      currentPassword = rawCurrentPassword;
+    }
+    const rawNewPassword = formData.get("newPassword");
+    if (typeof rawNewPassword === "string") newPassword = rawNewPassword;
     const file = formData.get("avatar");
     if (file && file instanceof File && file.size > 0) avatarFile = file;
   } else {
@@ -1361,6 +1419,49 @@ const handleProfileUpdate = async (req: Request): Promise<Response> => {
     }
     const input = typeof body === "object" && body !== null ? (body as Record<string, unknown>) : {};
     if (typeof input.name === "string") name = input.name.trim();
+    if (typeof input.email === "string") email = input.email.trim().toLowerCase();
+    if (typeof input.currentPassword === "string") {
+      currentPassword = input.currentPassword;
+    }
+    if (typeof input.newPassword === "string") newPassword = input.newPassword;
+  }
+
+  const normalizedCurrentPassword = currentPassword ?? "";
+  const normalizedNewPassword = newPassword ?? "";
+  const wantsEmailChange = email !== undefined && email !== current.user.email;
+  const wantsPasswordChange = normalizedNewPassword.length > 0;
+
+  if (wantsEmailChange && (!email || !email.includes("@"))) {
+    return json({ error: "Email invalido" }, 400, req);
+  }
+
+  if (wantsPasswordChange && normalizedNewPassword.length < 6) {
+    return json({ error: "Nova senha deve ter ao menos 6 caracteres" }, 400, req);
+  }
+
+  if (wantsEmailChange || wantsPasswordChange) {
+    if (!normalizedCurrentPassword) {
+      return json(
+        { error: "Informe sua senha atual para alterar email ou senha" },
+        400,
+        req,
+      );
+    }
+
+    const storedUser = await current.prisma.user.findUnique({
+      where: { id: current.user.id },
+    });
+    if (!storedUser) {
+      return json({ error: "Usuario nao encontrado" }, 404, req);
+    }
+
+    const isCurrentPasswordValid = await Bun.password.verify(
+      normalizedCurrentPassword,
+      storedUser.passwordHash,
+    );
+    if (!isCurrentPasswordValid) {
+      return json({ error: "Senha atual incorreta" }, 401, req);
+    }
   }
 
   let avatarUrl: string | undefined;
@@ -1380,32 +1481,37 @@ const handleProfileUpdate = async (req: Request): Promise<Response> => {
 
   const data: Record<string, unknown> = {};
   if (name !== undefined) data.name = name || null;
+  if (wantsEmailChange) data.email = email;
+  if (wantsPasswordChange) {
+    data.passwordHash = await Bun.password.hash(normalizedNewPassword);
+  }
   if (avatarUrl !== undefined) data.avatarUrl = avatarUrl;
 
   if (Object.keys(data).length === 0) {
     return json({ error: "Nenhum campo para atualizar" }, 400, req);
   }
 
-  const updated = await current.prisma.user.update({
-    where: { id: current.user.id },
-    data,
-  });
+  try {
+    const updated = await current.prisma.user.update({
+      where: { id: current.user.id },
+      data,
+      include: { customRole: true },
+    });
 
-  return json({
-    user: {
-      id: updated.id,
-      email: updated.email,
-      name: updated.name,
-      avatarUrl: updated.avatarUrl,
-      role: updated.role,
-      createdAt: updated.createdAt.toISOString(),
-    },
-  }, 200, req);
+    return json({ user: toPublicUser(updated) }, 200, req);
+  } catch (error) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+      return json({ error: "Este email ja esta em uso" }, 409, req);
+    }
+    throw error;
+  }
 };
 
 const dashboardOverview = async (req: Request): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.DASHBOARD_VIEW);
+  if (denied) return denied;
 
   const cacheKey = `${DASHBOARD_CACHE_PREFIX}overview`;
   const cached = await cacheGetJson<Awaited<ReturnType<DashboardService["getOverview"]>>>(
@@ -1423,6 +1529,8 @@ const dashboardOverview = async (req: Request): Promise<Response> => {
 const dashboardAlerts = async (req: Request): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.DASHBOARD_VIEW);
+  if (denied) return denied;
 
   const cacheKey = `${DASHBOARD_CACHE_PREFIX}alerts`;
   const cached = await cacheGetJson<OperationalAlertsSummary>(cacheKey);
@@ -1438,6 +1546,8 @@ const dashboardAlerts = async (req: Request): Promise<Response> => {
 const dashboardConversations = async (req: Request): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.CONVERSATIONS_VIEW);
+  if (denied) return denied;
 
   const url = new URL(req.url);
   const limitParam = url.searchParams.get("limit");
@@ -1462,6 +1572,8 @@ const dashboardConversations = async (req: Request): Promise<Response> => {
 const dashboardConversationTurns = async (req: Request): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.CONVERSATIONS_VIEW);
+  if (denied) return denied;
 
   const url = new URL(req.url);
   const prefix = `${config.apiBasePath}/dashboard/conversations/`;
@@ -1497,6 +1609,8 @@ const dashboardConversationTurns = async (req: Request): Promise<Response> => {
 const dashboardCacheMetrics = async (req: Request): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.DASHBOARD_VIEW);
+  if (denied) return denied;
 
   return json(
     {
@@ -1517,6 +1631,8 @@ const dashboardCacheMetrics = async (req: Request): Promise<Response> => {
 const handleFunnelMetrics = async (req: Request): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.PIPELINE_VIEW);
+  if (denied) return denied;
 
   const stages = await current.prisma.pipelineStage.findMany({
     orderBy: { position: "asc" },
@@ -1896,6 +2012,8 @@ const webhookEvent = async (req: Request): Promise<Response> => {
 const handlePipelineStages = async (req: Request): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.PIPELINE_VIEW);
+  if (denied) return denied;
 
   const url = new URL(req.url);
   const search = url.searchParams.get("search")?.trim();
@@ -1921,7 +2039,7 @@ const handlePipelineStages = async (req: Request): Promise<Response> => {
 const handlePipelineStageCreate = async (req: Request): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
-  const denied = requireAdmin(current, req);
+  const denied = requirePermission(current, req, PERMISSIONS.PIPELINE_MANAGE);
   if (denied) return denied;
 
   let body: unknown;
@@ -1963,7 +2081,7 @@ const handlePipelineStageUpdate = async (
 ): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
-  const denied = requireAdmin(current, req);
+  const denied = requirePermission(current, req, PERMISSIONS.PIPELINE_MANAGE);
   if (denied) return denied;
 
   let body: unknown;
@@ -2012,7 +2130,7 @@ const handlePipelineStageDelete = async (
 ): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
-  const denied = requireAdmin(current, req);
+  const denied = requirePermission(current, req, PERMISSIONS.PIPELINE_MANAGE);
   if (denied) return denied;
 
   try {
@@ -2028,7 +2146,7 @@ const handlePipelineStageDelete = async (
 const handlePipelineStagesReorder = async (req: Request): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
-  const denied = requireAdmin(current, req);
+  const denied = requirePermission(current, req, PERMISSIONS.PIPELINE_MANAGE);
   if (denied) return denied;
 
   let body: unknown;
@@ -2089,6 +2207,8 @@ const handlePipelineStagesReorder = async (req: Request): Promise<Response> => {
 const handlePipelineBoard = async (req: Request): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.PIPELINE_VIEW);
+  if (denied) return denied;
 
   const url = new URL(req.url);
   const contactLimitParam = Number(url.searchParams.get("contactLimit"));
@@ -2143,6 +2263,8 @@ const handlePipelineBoard = async (req: Request): Promise<Response> => {
 const handleContactCreate = async (req: Request): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.CONTACTS_CREATE);
+  if (denied) return denied;
 
   let body: unknown;
   try {
@@ -2382,7 +2504,7 @@ const handleContactStageUpdate = async (
 ): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
-  const denied = requireAdmin(current, req);
+  const denied = requirePermission(current, req, PERMISSIONS.LEADS_MANAGE_STAGE);
   if (denied) return denied;
 
   let body: unknown;
@@ -2490,10 +2612,35 @@ const handleContactUpdate = async (
     typeof body === "object" && body !== null
       ? (body as Record<string, unknown>)
       : {};
-  const isAdmin = current.user.role === "ADMIN";
-
-  if (!isAdmin && (hasOwn(input, "leadStatus") || hasOwn(input, "stageId"))) {
-    return json({ error: "Forbidden: admin only" }, 403, req);
+  const canEditContacts = hasPermission(current.user.permissions, PERMISSIONS.CONTACTS_EDIT);
+  if (!canEditContacts) {
+    return json({ error: "Forbidden: missing permission contacts.edit" }, 403, req);
+  }
+  if (
+    hasOwn(input, "leadStatus") &&
+    !hasPermission(current.user.permissions, PERMISSIONS.LEADS_MANAGE_STATUS)
+  ) {
+    return json({ error: "Forbidden: missing permission leads.manage_status" }, 403, req);
+  }
+  if (
+    hasOwn(input, "stageId") &&
+    !hasPermission(current.user.permissions, PERMISSIONS.LEADS_MANAGE_STAGE)
+  ) {
+    return json({ error: "Forbidden: missing permission leads.manage_stage" }, 403, req);
+  }
+  if (
+    hasOwn(input, "botEnabled") &&
+    !hasPermission(current.user.permissions, PERMISSIONS.CONTACTS_MANAGE_BOT)
+  ) {
+    return json({ error: "Forbidden: missing permission contacts.manage_bot" }, 403, req);
+  }
+  if (
+    (hasOwn(input, "handoffRequested") ||
+      hasOwn(input, "handoffReason") ||
+      hasOwn(input, "handoffAt")) &&
+    !hasPermission(current.user.permissions, PERMISSIONS.CONTACTS_MANAGE_HANDOFF)
+  ) {
+    return json({ error: "Forbidden: missing permission contacts.manage_handoff" }, 403, req);
   }
 
   const existing = await current.prisma.contact.findUnique({
@@ -2724,7 +2871,7 @@ const handleContactStatusUpdate = async (
 ): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
-  const denied = requireAdmin(current, req);
+  const denied = requirePermission(current, req, PERMISSIONS.LEADS_MANAGE_STATUS);
   if (denied) return denied;
 
   let body: unknown;
@@ -2761,7 +2908,7 @@ const handleContactDelete = async (
 ): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
-  const denied = requireAdmin(current, req);
+  const denied = requirePermission(current, req, PERMISSIONS.LEADS_DELETE);
   if (denied) return denied;
 
   try {
@@ -2776,10 +2923,154 @@ const handleContactDelete = async (
   return json({ ok: true }, 200, req);
 };
 
+const handleRoleList = async (req: Request): Promise<Response> => {
+  const current = await getAuthenticatedUser(req);
+  if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.USERS_MANAGE);
+  if (denied) return denied;
+
+  const roles = await current.prisma.customRole.findMany({
+    orderBy: { name: "asc" },
+    include: { _count: { select: { users: true } } },
+  });
+
+  return json({ items: roles.map(serializeCustomRole) }, 200, req);
+};
+
+const handleRoleCreate = async (req: Request): Promise<Response> => {
+  const current = await getAuthenticatedUser(req);
+  if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.USERS_MANAGE);
+  if (denied) return denied;
+
+  let body: unknown;
+  try {
+    body = await req.json();
+  } catch {
+    return json({ error: "Invalid JSON" }, 400, req);
+  }
+
+  const input = body as Record<string, unknown>;
+  const name = typeof input.name === "string" ? input.name.trim() : "";
+  const description = typeof input.description === "string" ? input.description.trim() : "";
+  const permissions = normalizePermissionList(input.permissions);
+
+  if (name.length < 2) {
+    return json({ error: "Nome do cargo deve ter ao menos 2 caracteres" }, 400, req);
+  }
+  if (!permissions.length) {
+    return json({ error: "Selecione ao menos uma permissao" }, 400, req);
+  }
+
+  try {
+    const role = await current.prisma.customRole.create({
+      data: {
+        name,
+        description: description || null,
+        permissions,
+      },
+      include: { _count: { select: { users: true } } },
+    });
+    return json(serializeCustomRole(role), 201, req);
+  } catch (error) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+      return json({ error: "Ja existe um cargo com esse nome" }, 409, req);
+    }
+    throw error;
+  }
+};
+
+const handleRoleUpdate = async (req: Request, roleId: string): Promise<Response> => {
+  const current = await getAuthenticatedUser(req);
+  if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.USERS_MANAGE);
+  if (denied) return denied;
+
+  let body: unknown;
+  try {
+    body = await req.json();
+  } catch {
+    return json({ error: "Invalid JSON" }, 400, req);
+  }
+
+  const input = body as Record<string, unknown>;
+  const name = typeof input.name === "string" ? input.name.trim() : "";
+  const description = typeof input.description === "string" ? input.description.trim() : "";
+  const permissions = normalizePermissionList(input.permissions);
+
+  if (name.length < 2) {
+    return json({ error: "Nome do cargo deve ter ao menos 2 caracteres" }, 400, req);
+  }
+  if (!permissions.length) {
+    return json({ error: "Selecione ao menos uma permissao" }, 400, req);
+  }
+
+  try {
+    const role = await current.prisma.customRole.update({
+      where: { id: roleId },
+      data: {
+        name,
+        description: description || null,
+        permissions,
+      },
+      include: { _count: { select: { users: true } } },
+    });
+    return json(serializeCustomRole(role), 200, req);
+  } catch (error) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2025") {
+      return json({ error: "Cargo nao encontrado" }, 404, req);
+    }
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+      return json({ error: "Ja existe um cargo com esse nome" }, 409, req);
+    }
+    throw error;
+  }
+};
+
+const handleRoleDelete = async (req: Request, roleId: string): Promise<Response> => {
+  const current = await getAuthenticatedUser(req);
+  if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.USERS_MANAGE);
+  if (denied) return denied;
+
+  const role = await current.prisma.customRole.findUnique({
+    where: { id: roleId },
+    include: { _count: { select: { users: true } } },
+  });
+
+  if (!role) {
+    return json({ error: "Cargo nao encontrado" }, 404, req);
+  }
+  if (role._count.users > 0) {
+    return json(
+      { error: "Esse cargo esta atribuido a usuarios e nao pode ser removido agora" },
+      409,
+      req,
+    );
+  }
+
+  await current.prisma.customRole.delete({ where: { id: roleId } });
+  return json({ ok: true }, 200, req);
+};
+
+const handleUserList = async (req: Request): Promise<Response> => {
+  const current = await getAuthenticatedUser(req);
+  if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.USERS_MANAGE);
+  if (denied) return denied;
+
+  const users = await current.prisma.user.findMany({
+    orderBy: [{ role: "asc" }, { createdAt: "desc" }],
+    include: { customRole: true },
+  });
+
+  return json({ items: users.map(toPublicUser) }, 200, req);
+};
+
 const handleUserCreate = async (req: Request): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
-  const denied = requireAdmin(current, req);
+  const denied = requirePermission(current, req, PERMISSIONS.USERS_MANAGE);
   if (denied) return denied;
 
   let body: unknown;
@@ -2794,13 +3085,31 @@ const handleUserCreate = async (req: Request): Promise<Response> => {
   const password = typeof input.password === "string" ? input.password : "";
   const name = typeof input.name === "string" ? input.name.trim() : "";
   const rawRole = typeof input.role === "string" ? input.role.trim().toUpperCase() : "AGENT";
-  const role: UserRole = rawRole === "ADMIN" ? "ADMIN" : "AGENT";
+  const customRoleId = typeof input.customRoleId === "string" ? input.customRoleId.trim() : "";
 
   if (!email || !email.includes("@")) {
     return json({ error: "email valido e obrigatorio" }, 400, req);
   }
   if (password.length < 6) {
     return json({ error: "password deve ter ao menos 6 caracteres" }, 400, req);
+  }
+
+  let role: UserRole = "AGENT";
+  let resolvedCustomRoleId: string | null = null;
+
+  if (customRoleId) {
+    const customRole = await current.prisma.customRole.findUnique({
+      where: { id: customRoleId },
+    });
+    if (!customRole) {
+      return json({ error: "Cargo personalizado nao encontrado" }, 400, req);
+    }
+    role = "CUSTOM";
+    resolvedCustomRoleId = customRole.id;
+  } else if (rawRole === "CUSTOM") {
+    return json({ error: "Selecione um cargo personalizado valido" }, 400, req);
+  } else if (VALID_PRESET_USER_ROLES.has(rawRole as UserRole)) {
+    role = rawRole as UserRole;
   }
 
   const existing = await current.prisma.user.findUnique({ where: { email } });
@@ -2815,23 +3124,48 @@ const handleUserCreate = async (req: Request): Promise<Response> => {
       passwordHash,
       name: name || null,
       role,
+      customRoleId: resolvedCustomRoleId,
     },
+    include: { customRole: true },
   });
 
   return json(
-    {
-      id: user.id,
-      email: user.email,
-      name: user.name,
-      role: user.role,
-      createdAt: user.createdAt.toISOString(),
-    },
+    toPublicUser(user),
     201,
     req,
   );
 };
 
 // ── Batch actions on contacts ────────────────────────────────
+const handleUserDelete = async (req: Request, userId: string): Promise<Response> => {
+  const current = await getAuthenticatedUser(req);
+  if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.USERS_MANAGE);
+  if (denied) return denied;
+
+  if (userId === current.user.id) {
+    return json({ error: "Nao e permitido excluir seu proprio usuario" }, 400, req);
+  }
+
+  const target = await current.prisma.user.findUnique({
+    where: { id: userId },
+    include: { customRole: true },
+  });
+  if (!target) {
+    return json({ error: "Usuario nao encontrado" }, 404, req);
+  }
+  if (target.role === "ADMIN") {
+    return json(
+      { error: "Nao e permitido excluir ou alterar informacoes de usuario admin" },
+      403,
+      req,
+    );
+  }
+
+  await current.prisma.user.delete({ where: { id: userId } });
+  return json({ ok: true }, 200, req);
+};
+
 const handleContactsBatch = async (req: Request): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
@@ -2853,7 +3187,7 @@ const handleContactsBatch = async (req: Request): Promise<Response> => {
   let updated = 0;
 
   if (action === "changeStatus") {
-    const denied = requireAdmin(current, req);
+    const denied = requirePermission(current, req, PERMISSIONS.LEADS_MANAGE_STATUS);
     if (denied) return denied;
     const status = typeof input.status === "string" ? input.status : "";
     if (!["open", "won", "lost"].includes(status)) {
@@ -2865,6 +3199,8 @@ const handleContactsBatch = async (req: Request): Promise<Response> => {
     });
     updated = result.count;
   } else if (action === "addTag") {
+    const denied = requirePermission(current, req, PERMISSIONS.CONTACTS_MANAGE_TAGS);
+    if (denied) return denied;
     const tagId = typeof input.tagId === "number" ? input.tagId : Number(input.tagId);
     if (!Number.isFinite(tagId)) {
       return json({ error: "tagId required" }, 400, req);
@@ -2879,6 +3215,8 @@ const handleContactsBatch = async (req: Request): Promise<Response> => {
       updated = data.length;
     }
   } else if (action === "toggleBot") {
+    const denied = requirePermission(current, req, PERMISSIONS.CONTACTS_MANAGE_BOT);
+    if (denied) return denied;
     const botEnabled = input.botEnabled === true;
     const result = await current.prisma.contact.updateMany({
       where: { waId: { in: waIds } },
@@ -2886,6 +3224,8 @@ const handleContactsBatch = async (req: Request): Promise<Response> => {
     });
     updated = result.count;
   } else if (action === "requestHandoff") {
+    const denied = requirePermission(current, req, PERMISSIONS.CONTACTS_MANAGE_HANDOFF);
+    if (denied) return denied;
     const result = await current.prisma.contact.updateMany({
       where: { waId: { in: waIds } },
       data: {
@@ -2911,6 +3251,8 @@ const handleContactBotToggle = async (
 ): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.CONTACTS_MANAGE_BOT);
+  if (denied) return denied;
 
   let body: unknown;
   try {
@@ -2953,6 +3295,8 @@ const handleContactSend = async (
 ): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.CONVERSATIONS_REPLY);
+  if (denied) return denied;
 
   let body: unknown;
   try {
@@ -2981,6 +3325,8 @@ const handleContactSend = async (
 const handleFaqList = async (req: Request): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.FAQS_VIEW);
+  if (denied) return denied;
 
   const url = new URL(req.url);
   const limit = Math.min(
@@ -3012,6 +3358,8 @@ const handleFaqList = async (req: Request): Promise<Response> => {
 const handleFaqCreate = async (req: Request): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.FAQS_MANAGE);
+  if (denied) return denied;
 
   let body: unknown;
   try {
@@ -3040,6 +3388,8 @@ const handleFaqCreate = async (req: Request): Promise<Response> => {
 const handleFaqUpdate = async (req: Request, id: number): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.FAQS_MANAGE);
+  if (denied) return denied;
 
   let body: unknown;
   try {
@@ -3061,6 +3411,8 @@ const handleFaqUpdate = async (req: Request, id: number): Promise<Response> => {
 const handleFaqDelete = async (req: Request, id: number): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.FAQS_MANAGE);
+  if (denied) return denied;
 
   await current.prisma.faq.delete({ where: { id } });
   return json({ ok: true }, 200, req);
@@ -3071,6 +3423,8 @@ const handleFaqDelete = async (req: Request, id: number): Promise<Response> => {
 const handleTemplateList = async (req: Request): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.TEMPLATES_VIEW);
+  if (denied) return denied;
 
   const url = new URL(req.url);
   const limit = Math.min(
@@ -3108,6 +3462,8 @@ const handleTemplateList = async (req: Request): Promise<Response> => {
 const handleTemplateCreate = async (req: Request): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.TEMPLATES_MANAGE);
+  if (denied) return denied;
 
   let body: unknown;
   try {
@@ -3136,6 +3492,8 @@ const handleTemplateCreate = async (req: Request): Promise<Response> => {
 const handleTemplateUpdate = async (req: Request, id: number): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.TEMPLATES_MANAGE);
+  if (denied) return denied;
 
   let body: unknown;
   try {
@@ -3157,6 +3515,8 @@ const handleTemplateUpdate = async (req: Request, id: number): Promise<Response>
 const handleTemplateDelete = async (req: Request, id: number): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.TEMPLATES_MANAGE);
+  if (denied) return denied;
 
   await current.prisma.messageTemplate.delete({ where: { id } });
   return json({ ok: true }, 200, req);
@@ -3167,6 +3527,8 @@ const handleTemplateDelete = async (req: Request, id: number): Promise<Response>
 const handleTagList = async (req: Request): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.TAGS_VIEW);
+  if (denied) return denied;
 
   const url = new URL(req.url);
   const limit = Math.min(
@@ -3192,6 +3554,8 @@ const handleTagList = async (req: Request): Promise<Response> => {
 const handleTagCreate = async (req: Request): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.TAGS_MANAGE);
+  if (denied) return denied;
 
   let body: unknown;
   try {
@@ -3217,6 +3581,8 @@ const handleTagCreate = async (req: Request): Promise<Response> => {
 const handleTagDelete = async (req: Request, id: number): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.TAGS_MANAGE);
+  if (denied) return denied;
 
   await current.prisma.tag.delete({ where: { id } });
   void invalidateDashboardCaches();
@@ -3226,6 +3592,8 @@ const handleTagDelete = async (req: Request, id: number): Promise<Response> => {
 const handleTagUpdate = async (req: Request, id: number): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.TAGS_MANAGE);
+  if (denied) return denied;
 
   let body: unknown;
   try {
@@ -3264,6 +3632,8 @@ const handleContactAuditLog = async (
 ): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.CONTACTS_VIEW);
+  if (denied) return denied;
 
   const contact = await current.prisma.contact.findUnique({
     where: { waId },
@@ -3299,6 +3669,8 @@ const handleContactTagAdd = async (
 ): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.CONTACTS_MANAGE_TAGS);
+  if (denied) return denied;
 
   let body: unknown;
   try {
@@ -3333,6 +3705,8 @@ const handleContactTagRemove = async (
 ): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.CONTACTS_MANAGE_TAGS);
+  if (denied) return denied;
 
   const contact = await current.prisma.contact.findUnique({ where: { waId }, select: { id: true } });
   if (!contact) return json({ error: "Contact not found" }, 404, req);
@@ -3349,6 +3723,8 @@ const handleContactTagRemove = async (
 const handleHandoffQueueList = async (req: Request): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.HANDOFF_VIEW);
+  if (denied) return denied;
 
   const url = new URL(req.url);
   const onlyMineParam = url.searchParams.get("onlyMine");
@@ -3438,6 +3814,8 @@ const handleHandoffAssign = async (
 ): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.HANDOFF_ASSIGN);
+  if (denied) return denied;
 
   let body: unknown = {};
   if (req.method === "PUT") {
@@ -3491,6 +3869,8 @@ const handleHandoffAssign = async (
 const handleTaskList = async (req: Request): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.TASKS_VIEW);
+  if (denied) return denied;
 
   const url = new URL(req.url);
   const waId = url.searchParams.get("waId")?.trim();
@@ -3546,6 +3926,8 @@ const handleTaskList = async (req: Request): Promise<Response> => {
 const handleTaskCreate = async (req: Request): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.TASKS_MANAGE);
+  if (denied) return denied;
 
   let body: unknown;
   try {
@@ -3648,6 +4030,8 @@ const handleTaskCreate = async (req: Request): Promise<Response> => {
 const handleTaskUpdate = async (req: Request, id: number): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.TASKS_MANAGE);
+  if (denied) return denied;
 
   let body: unknown;
   try {
@@ -3772,6 +4156,8 @@ const handleTaskUpdate = async (req: Request, id: number): Promise<Response> => 
 const handleTaskDelete = async (req: Request, id: number): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.TASKS_MANAGE);
+  if (denied) return denied;
 
   let task;
   try {
@@ -3818,6 +4204,8 @@ const handleAudioList = async (req: Request): Promise<Response> => {
   try {
     const current = await getAuthenticatedUser(req);
     if (current instanceof Response) return current;
+    const denied = requirePermission(current, req, PERMISSIONS.AUDIOS_VIEW);
+    if (denied) return denied;
 
     const url = new URL(req.url);
     const limit = Math.min(100, Math.max(1, Number(url.searchParams.get("limit") ?? "50") || 50));
@@ -3852,6 +4240,8 @@ const handleAudioUpload = async (req: Request): Promise<Response> => {
   try {
     const current = await getAuthenticatedUser(req);
     if (current instanceof Response) return current;
+    const denied = requirePermission(current, req, PERMISSIONS.AUDIOS_MANAGE);
+    if (denied) return denied;
 
     const contentType = req.headers.get("content-type") ?? "";
     if (!contentType.includes("multipart/form-data")) {
@@ -3913,6 +4303,8 @@ const handleAudioUpdate = async (req: Request, id: number): Promise<Response> =>
   try {
     const current = await getAuthenticatedUser(req);
     if (current instanceof Response) return current;
+    const denied = requirePermission(current, req, PERMISSIONS.AUDIOS_MANAGE);
+    if (denied) return denied;
 
     let body: unknown;
     try {
@@ -3938,6 +4330,8 @@ const handleAudioStream = async (req: Request, id: number): Promise<Response> =>
   try {
     const current = await getAuthenticatedUser(req);
     if (current instanceof Response) return current;
+    const denied = requirePermission(current, req, PERMISSIONS.AUDIOS_VIEW);
+    if (denied) return denied;
 
     const audio = await current.prisma.audio.findUnique({
       where: { id },
@@ -3971,6 +4365,8 @@ const handleAudioStreamByUrl = async (req: Request): Promise<Response> => {
   try {
     const current = await getAuthenticatedUser(req);
     if (current instanceof Response) return current;
+    const denied = requirePermission(current, req, PERMISSIONS.AUDIOS_VIEW);
+    if (denied) return denied;
 
     const rawUrl = new URL(req.url).searchParams.get("url");
     if (!rawUrl) return json({ error: "Parametro url obrigatorio" }, 400, req);
@@ -4008,6 +4404,8 @@ const handleAudioDelete = async (req: Request, id: number): Promise<Response> =>
   try {
     const current = await getAuthenticatedUser(req);
     if (current instanceof Response) return current;
+    const denied = requirePermission(current, req, PERMISSIONS.AUDIOS_MANAGE);
+    if (denied) return denied;
 
     let audio: { r2Key: string };
     try {
@@ -4307,8 +4705,22 @@ const server = Bun.serve<WsUserData>({
       if (req.method === "GET") return handleTaskList(req);
       if (req.method === "POST") return handleTaskCreate(req);
     }
-    if (usersPaths.has(url.pathname) && req.method === "POST") {
-      return handleUserCreate(req);
+    if (rolesPaths.has(url.pathname)) {
+      if (req.method === "GET") return handleRoleList(req);
+      if (req.method === "POST") return handleRoleCreate(req);
+    }
+    if (usersPaths.has(url.pathname)) {
+      if (req.method === "GET") return handleUserList(req);
+      if (req.method === "POST") return handleUserCreate(req);
+    }
+    const roleSuffix = extractPathSuffix(url.pathname, rolesPrefix);
+    if (roleSuffix) {
+      if (req.method === "PUT") return handleRoleUpdate(req, roleSuffix);
+      if (req.method === "DELETE") return handleRoleDelete(req, roleSuffix);
+    }
+    const userSuffix = extractPathSuffix(url.pathname, usersPrefix);
+    if (userSuffix) {
+      if (req.method === "DELETE") return handleUserDelete(req, userSuffix);
     }
     const taskSuffix = extractPathSuffix(url.pathname, taskPrefix);
     if (taskSuffix) {

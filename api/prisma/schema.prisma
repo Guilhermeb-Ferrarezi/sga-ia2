@@ -9,7 +9,10 @@ datasource db {
 
 enum UserRole {
   ADMIN
+  MANAGER
   AGENT
+  VIEWER
+  CUSTOM
 }
 
 model User {
@@ -19,9 +22,23 @@ model User {
   avatarUrl    String?
   passwordHash String
   role         UserRole @default(ADMIN)
+  customRoleId String?
+  customRole   CustomRole? @relation(fields: [customRoleId], references: [id], onDelete: SetNull)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
   auditLogs    ContactAuditLog[]
+
+  @@index([customRoleId])
+}
+
+model CustomRole {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  description String?
+  permissions Json
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  users       User[]
 }
 
 model Contact {

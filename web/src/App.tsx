@@ -4,6 +4,8 @@ import { AuthProvider, useAuth } from "@/contexts/AuthContext";
 import { WebSocketProvider } from "@/contexts/WebSocketContext";
 import { ToastProvider } from "@/contexts/ToastContext";
 import LoadingScreen from "@/components/ui/loading-screen";
+import AccessDenied from "@/components/auth/AccessDenied";
+import { PERMISSIONS, hasPermission, type Permission } from "@/lib/rbac";
 
 const isElectronDesktop = (): boolean => {
   if (typeof navigator === "undefined") return false;
@@ -20,12 +22,30 @@ const PipelineBoard = lazy(() => import("@/components/dashboard/PipelineBoard"))
 const FaqsPage = lazy(() => import("@/pages/FaqsPage"));
 const HandoffQueuePage = lazy(() => import("@/pages/HandoffQueuePage"));
 const ContactsPage = lazy(() => import("@/pages/ContactsPage"));
+const UsersPage = lazy(() => import("@/pages/UsersPage"));
 const CreateUserPage = lazy(() => import("@/pages/CreateUserPage"));
 const TemplatesPage = lazy(() => import("@/pages/TemplatesPage"));
 const TagsPage = lazy(() => import("@/pages/TagsPage"));
 const TasksPage = lazy(() => import("@/pages/TasksPage"));
 const AudiosPage = lazy(() => import("@/pages/AudiosPage"));
 const WhatsAppProfilePage = lazy(() => import("@/pages/WhatsAppProfilePage"));
+const SettingsPage = lazy(() => import("@/pages/SettingsPage"));
+
+function PermissionRoute({
+  permission,
+  children,
+}: {
+  permission: Permission;
+  children: JSX.Element;
+}) {
+  const { user } = useAuth();
+
+  if (!hasPermission(user, permission)) {
+    return <AccessDenied />;
+  }
+
+  return children;
+}
 
 function AuthGate() {
   const { token, user, bootLoading } = useAuth();
@@ -68,18 +88,119 @@ function AuthGate() {
         }
       >
         <Routes>
-          <Route path="/dashboard" element={<DashboardPage />}>
-            <Route index element={<OverviewTab />} />
-            <Route path="conversations" element={<ConversationsTab />} />
-            <Route path="contacts" element={<ContactsPage />} />
-            <Route path="users/new" element={<CreateUserPage />} />
-            <Route path="pipeline" element={<PipelineBoard />} />
-            <Route path="handoffs" element={<HandoffQueuePage />} />
-            <Route path="tasks" element={<TasksPage />} />
-            <Route path="faqs" element={<FaqsPage />} />
-            <Route path="templates" element={<TemplatesPage />} />
-            <Route path="tags" element={<TagsPage />} />
-            <Route path="audios" element={<AudiosPage />} />
+          <Route
+            path="/dashboard"
+            element={
+              <PermissionRoute permission={PERMISSIONS.DASHBOARD_VIEW}>
+                <DashboardPage />
+              </PermissionRoute>
+            }
+          >
+            <Route
+              index
+              element={
+                <PermissionRoute permission={PERMISSIONS.DASHBOARD_VIEW}>
+                  <OverviewTab />
+                </PermissionRoute>
+              }
+            />
+            <Route
+              path="conversations"
+              element={
+                <PermissionRoute permission={PERMISSIONS.CONVERSATIONS_VIEW}>
+                  <ConversationsTab />
+                </PermissionRoute>
+              }
+            />
+            <Route
+              path="contacts"
+              element={
+                <PermissionRoute permission={PERMISSIONS.CONTACTS_VIEW}>
+                  <ContactsPage />
+                </PermissionRoute>
+              }
+            />
+            <Route
+              path="users"
+              element={
+                <PermissionRoute permission={PERMISSIONS.USERS_MANAGE}>
+                  <UsersPage />
+                </PermissionRoute>
+              }
+            />
+            <Route
+              path="users/new"
+              element={
+                <PermissionRoute permission={PERMISSIONS.USERS_MANAGE}>
+                  <CreateUserPage />
+                </PermissionRoute>
+              }
+            />
+            <Route
+              path="pipeline"
+              element={
+                <PermissionRoute permission={PERMISSIONS.PIPELINE_VIEW}>
+                  <PipelineBoard />
+                </PermissionRoute>
+              }
+            />
+            <Route
+              path="handoffs"
+              element={
+                <PermissionRoute permission={PERMISSIONS.HANDOFF_VIEW}>
+                  <HandoffQueuePage />
+                </PermissionRoute>
+              }
+            />
+            <Route
+              path="tasks"
+              element={
+                <PermissionRoute permission={PERMISSIONS.TASKS_VIEW}>
+                  <TasksPage />
+                </PermissionRoute>
+              }
+            />
+            <Route
+              path="faqs"
+              element={
+                <PermissionRoute permission={PERMISSIONS.FAQS_VIEW}>
+                  <FaqsPage />
+                </PermissionRoute>
+              }
+            />
+            <Route
+              path="templates"
+              element={
+                <PermissionRoute permission={PERMISSIONS.TEMPLATES_VIEW}>
+                  <TemplatesPage />
+                </PermissionRoute>
+              }
+            />
+            <Route
+              path="tags"
+              element={
+                <PermissionRoute permission={PERMISSIONS.TAGS_VIEW}>
+                  <TagsPage />
+                </PermissionRoute>
+              }
+            />
+            <Route
+              path="audios"
+              element={
+                <PermissionRoute permission={PERMISSIONS.AUDIOS_VIEW}>
+                  <AudiosPage />
+                </PermissionRoute>
+              }
+            />
+            <Route
+              path="whatsapp-profile"
+              element={
+                <PermissionRoute permission={PERMISSIONS.WHATSAPP_PROFILE_VIEW}>
+                  <WhatsAppProfilePage />
+                </PermissionRoute>
+              }
+            />
+            <Route path="settings" element={<SettingsPage />} />
           </Route>
           <Route path="*" element={<Navigate to="/dashboard" replace />} />
         </Routes>

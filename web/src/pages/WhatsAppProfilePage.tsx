@@ -13,6 +13,7 @@ import {
   type UpdateWhatsAppProfileInput,
   type WhatsAppProfileSummary,
 } from "@/lib/api";
+import { PERMISSIONS, hasPermission } from "@/lib/rbac";
 import { cn } from "@/lib/utils";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
@@ -110,6 +111,7 @@ export default function WhatsAppProfilePage() {
   const [photoFile, setPhotoFile] = useState<File | null>(null);
   const [photoPreviewUrl, setPhotoPreviewUrl] = useState<string | null>(null);
   const [photoInputKey, setPhotoInputKey] = useState(0);
+  const canManageProfile = hasPermission(user, PERMISSIONS.WHATSAPP_PROFILE_MANAGE);
 
   const load = useCallback(async () => {
     if (!token) return;
@@ -213,7 +215,7 @@ export default function WhatsAppProfilePage() {
   };
 
   const canEdit = Boolean(
-    profile?.capabilities.canEditBusinessProfile ?? user?.role === "ADMIN",
+    profile?.capabilities.canEditBusinessProfile ?? canManageProfile,
   );
   const photoSrc = photoPreviewUrl ?? profile?.profile.profilePictureUrl ?? undefined;
   const displayName = profile?.phoneNumber.verifiedName ?? "Conta conectada";
@@ -375,7 +377,7 @@ export default function WhatsAppProfilePage() {
                 </div>
                 {!canEdit && (
                   <p className="text-xs text-muted-foreground">
-                    Apenas administradores podem salvar alteracoes desse perfil.
+                    Seu cargo pode visualizar, mas nao salvar alteracoes desse perfil.
                   </p>
                 )}
               </CardContent>

@@ -1,5 +1,11 @@
 import { SignJWT, jwtVerify } from "jose";
-import type { PrismaClient, User, UserRole } from "@prisma/client";
+import type { Prisma, PrismaClient, UserRole } from "@prisma/client";
+import {
+  ROLE_LABELS,
+  getRolePermissions,
+  normalizePermissionList,
+  type Permission,
+} from "./rbac";
 
 export interface AuthServiceConfig {
   jwtSecret: string;
@@ -14,17 +20,56 @@ export interface PublicUser {
   name: string | null;
   avatarUrl: string | null;
   role: UserRole;
+  roleLabel: string;
+  customRole: PublicCustomRole | null;
+  permissions: Permission[];
   createdAt: string;
 }
 
-const toPublicUser = (user: User): PublicUser => ({
-  id: user.id,
-  email: user.email,
-  name: user.name,
-  avatarUrl: user.avatarUrl,
-  role: user.role,
-  createdAt: user.createdAt.toISOString(),
-});
+export interface PublicCustomRole {
+  id: string;
+  name: string;
+  description: string | null;
+  permissions: Permission[];
+}
+
+type UserWithCustomRole = Prisma.UserGetPayload<{
+  include: { customRole: true };
+}>;
+
+const toPublicCustomRole = (
+  role: UserWithCustomRole["customRole"],
+): PublicCustomRole | null => {
+  if (!role) return null;
+
+  return {
+    id: role.id,
+    name: role.name,
+    description: role.description,
+    permissions: normalizePermissionList(role.permissions),
+  };
+};
+
+const resolveUserPermissions = (user: UserWithCustomRole): Permission[] =>
+  user.role === "CUSTOM"
+    ? toPublicCustomRole(user.customRole)?.permissions ?? []
+    : getRolePermissions(user.role);
+
+export const toPublicUser = (user: UserWithCustomRole): PublicUser => {
+  const customRole = toPublicCustomRole(user.customRole);
+
+  return {
+    id: user.id,
+    email: user.email,
+    name: user.name,
+    avatarUrl: user.avatarUrl,
+    role: user.role,
+    roleLabel: customRole?.name ?? ROLE_LABELS[user.role],
+    customRole,
+    permissions: resolveUserPermissions(user),
+    createdAt: user.createdAt.toISOString(),
+  };
+};
 
 export class AuthService {
   private readonly secretKey: Uint8Array;
@@ -65,6 +110,7 @@ export class AuthService {
     const normalizedEmail = email.trim().toLowerCase();
     const user = await prisma.user.findUnique({
       where: { email: normalizedEmail },
+      include: { customRole: true },
     });
     if (!user) {
       return null;
@@ -90,7 +136,10 @@ export class AuthService {
       const subject = payload.sub;
       if (!subject) return null;
 
-      const user = await prisma.user.findUnique({ where: { id: subject } });
+      const user = await prisma.user.findUnique({
+        where: { id: subject },
+        include: { customRole: true },
+      });
       if (!user) return null;
 
       return toPublicUser(user);
@@ -99,7 +148,7 @@ export class AuthService {
     }
   }
 
-  private async signToken(user: User): Promise<string> {
+  private async signToken(user: UserWithCustomRole): Promise<string> {
     const issuedAt = Math.floor(Date.now() / 1000);
     const expiresAt = issuedAt + this.config.jwtTtlSeconds;
 

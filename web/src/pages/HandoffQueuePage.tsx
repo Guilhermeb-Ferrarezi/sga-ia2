@@ -13,6 +13,7 @@ import { useToast } from "@/contexts/ToastContext";
 import { useOperationalAlerts } from "@/contexts/OperationalAlertsContext";
 import { useWebSocket } from "@/contexts/WebSocketContext";
 import { api, type HandoffQueueItem } from "@/lib/api";
+import { PERMISSIONS, hasPermission } from "@/lib/rbac";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -55,6 +56,8 @@ export default function HandoffQueuePage() {
   const [loading, setLoading] = useState(false);
   const [updatingWaId, setUpdatingWaId] = useState<string | null>(null);
   const [onlyMine, setOnlyMine] = useState(false);
+  const canAssignHandoffs = hasPermission(user, PERMISSIONS.HANDOFF_ASSIGN);
+  const canManageHandoffContacts = hasPermission(user, PERMISSIONS.CONTACTS_MANAGE_HANDOFF);
 
   const load = useCallback(async () => {
     if (!token) return;
@@ -85,7 +88,7 @@ export default function HandoffQueuePage() {
   }, [subscribeFiltered, load]);
 
   const assume = async (item: HandoffQueueItem) => {
-    if (!token || !user) return;
+    if (!token || !user || !canAssignHandoffs) return;
     setUpdatingWaId(item.waId);
     try {
       await api.assignHandoff(token, item.waId, user.email);
@@ -103,7 +106,7 @@ export default function HandoffQueuePage() {
   };
 
   const release = async (item: HandoffQueueItem) => {
-    if (!token) return;
+    if (!token || !canAssignHandoffs) return;
     setUpdatingWaId(item.waId);
     try {
       await api.assignHandoff(token, item.waId, null);
@@ -121,7 +124,7 @@ export default function HandoffQueuePage() {
   };
 
   const resumeBot = async (item: HandoffQueueItem) => {
-    if (!token) return;
+    if (!token || !canManageHandoffContacts) return;
     setUpdatingWaId(item.waId);
     try {
       await api.updateContact(token, item.waId, {
@@ -199,6 +202,12 @@ export default function HandoffQueuePage() {
           </CardContent>
         </Card>
       </div>
+
+      {!canAssignHandoffs && !canManageHandoffContacts && (
+        <p className="text-sm text-muted-foreground">
+          Seu cargo pode acompanhar a fila, mas nao assumir, liberar nem retomar o bot.
+        </p>
+      )}
 
       <div className="space-y-3">
         {loading && !items.length && (
@@ -298,7 +307,7 @@ export default function HandoffQueuePage() {
                       size="sm"
                       variant="outline"
                       onClick={() => void assume(item)}
-                      disabled={isUpdating}
+                      disabled={isUpdating || !canAssignHandoffs}
                     >
                       <UserCheck className="h-4 w-4" />
                       Assumir
@@ -308,7 +317,7 @@ export default function HandoffQueuePage() {
                       size="sm"
                       variant="outline"
                       onClick={() => void release(item)}
-                      disabled={isUpdating}
+                      disabled={isUpdating || !canAssignHandoffs}
                     >
                       <UserMinus className="h-4 w-4" />
                       Liberar
@@ -317,7 +326,7 @@ export default function HandoffQueuePage() {
                   <Button
                     size="sm"
                     onClick={() => void resumeBot(item)}
-                    disabled={isUpdating}
+                    disabled={isUpdating || !canManageHandoffContacts}
                   >
                     <ArrowRightCircle className="h-4 w-4" />
                     Retomar bot
