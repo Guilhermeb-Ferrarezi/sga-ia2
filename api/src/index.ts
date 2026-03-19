@@ -492,6 +492,13 @@ const saveFaqFeedbackCache = async (
   await cacheSetJson(`${FAQ_FEEDBACK_CACHE_PREFIX}${key}`, aiReply, FAQ_FEEDBACK_TTL_SECONDS);
 };
 
+const invalidateReplyCaches = async (): Promise<void> => {
+  await Promise.all([
+    cacheDeleteByPrefix(FAQ_FEEDBACK_CACHE_PREFIX),
+    cacheDeleteByPrefix(SEMANTIC_REPLY_CACHE_PREFIX),
+  ]);
+};
+
 // ── Auto Tasks: detect task/reminder intent in user messages ──
 const tryAutoTask = async (
   prisma: PrismaClient,
@@ -3382,6 +3389,7 @@ const handleFaqCreate = async (req: Request): Promise<Response> => {
       isActive: input.isActive !== false,
     },
   });
+  void invalidateReplyCaches();
   return json(faq, 201, req);
 };
 
@@ -3405,6 +3413,7 @@ const handleFaqUpdate = async (req: Request, id: number): Promise<Response> => {
   if (typeof input.isActive === "boolean") data.isActive = input.isActive;
 
   const faq = await current.prisma.faq.update({ where: { id }, data });
+  void invalidateReplyCaches();
   return json(faq, 200, req);
 };
 
@@ -3415,6 +3424,7 @@ const handleFaqDelete = async (req: Request, id: number): Promise<Response> => {
   if (denied) return denied;
 
   await current.prisma.faq.delete({ where: { id } });
+  void invalidateReplyCaches();
   return json({ ok: true }, 200, req);
 };
 
@@ -4769,6 +4779,7 @@ const server = Bun.serve<WsUserData>({
 
 // Start the heartbeat timer
 startHeartbeat(30_000);
+void invalidateReplyCaches();
 if (config.enableDb) {
   startAlertsBroadcast();
   startHandoffEscalation();

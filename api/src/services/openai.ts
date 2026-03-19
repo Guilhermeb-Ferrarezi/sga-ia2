@@ -49,6 +49,125 @@ const allowedExtractionKeys = new Set<keyof LeadExtraction>([
 const MAX_WHATSAPP_TEXT_SIZE = 3500;
 const CONTEXT_MESSAGE_LIMIT = 20;
 const SUMMARY_TRIGGER_COUNT = 40;
+const FAQ_SELECTION_LIMIT = 3;
+const FAQ_MAX_CONTEXT_CHARS = 4000;
+
+type FaqCandidate = {
+  question: string;
+  answer: string;
+};
+
+const FAQ_STOP_WORDS = new Set([
+  "a",
+  "ao",
+  "aos",
+  "as",
+  "com",
+  "como",
+  "da",
+  "das",
+  "de",
+  "do",
+  "dos",
+  "e",
+  "em",
+  "na",
+  "nas",
+  "no",
+  "nos",
+  "o",
+  "os",
+  "ou",
+  "para",
+  "por",
+  "pra",
+  "qual",
+  "quais",
+  "que",
+  "se",
+  "sem",
+  "uma",
+  "umas",
+  "um",
+  "uns",
+]);
+
+const normalizeFaqText = (value: string): string =>
+  value
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+const tokenizeFaqText = (value: string): string[] =>
+  normalizeFaqText(value)
+    .split(" ")
+    .filter((token) => token.length >= 3 && !FAQ_STOP_WORDS.has(token));
+
+const buildRelevantFaqContext = (
+  faqs: FaqCandidate[],
+  userMessage: string,
+  historyMessages: ChatMessage[],
+  contactInfo?: string,
+): string | undefined => {
+  if (!faqs.length) return undefined;
+
+  const recentHistory = historyMessages
+    .slice(-6)
+    .map((message) => message.content.map((item) => item.text).join(" "))
+    .join(" ");
+  const query = [userMessage, recentHistory, contactInfo]
+    .filter(Boolean)
+    .join(" ")
+    .trim();
+  const queryTokens = new Set(tokenizeFaqText(query));
+
+  const rankedFaqs = faqs
+    .map((faq) => {
+      const questionText = normalizeFaqText(faq.question);
+      const answerText = normalizeFaqText(faq.answer);
+      const combinedTokens = tokenizeFaqText(`${faq.question} ${faq.answer}`);
+      let score = 0;
+
+      for (const token of queryTokens) {
+        if (questionText.includes(token)) score += 5;
+        else if (answerText.includes(token)) score += 2;
+      }
+
+      for (const token of combinedTokens) {
+        if (queryTokens.has(token)) {
+          score += questionText.includes(token) ? 3 : 1;
+        }
+      }
+
+      if (
+        questionText.includes("campeonato") &&
+        (queryTokens.has("campeonato") || queryTokens.has("torneio"))
+      ) {
+        score += 2;
+      }
+
+      return { ...faq, score };
+    })
+    .filter((faq) => faq.score > 0)
+    .sort((left, right) => right.score - left.score)
+    .slice(0, FAQ_SELECTION_LIMIT);
+
+  const selectedFaqs = rankedFaqs.length > 0 ? rankedFaqs : faqs.slice(0, 1);
+  let totalChars = 0;
+  const chunks: string[] = [];
+
+  for (const faq of selectedFaqs) {
+    const section = `P: ${faq.question}\nR: ${faq.answer}`;
+    if (totalChars > 0 && totalChars + section.length > FAQ_MAX_CONTEXT_CHARS) break;
+    chunks.push(section);
+    totalChars += section.length;
+  }
+
+  return chunks.length > 0 ? chunks.join("\n\n") : undefined;
+};
 
 const trimForWhatsApp = (text: string): string => {
   if (text.length <= MAX_WHATSAPP_TEXT_SIZE) return text;
@@ -174,6 +293,8 @@ export class OpenAIService {
           "- Faca perguntas objetivas quando faltar contexto.",
           "- Evite texto longo e sem acao.",
           "- Nao invente informacoes.",
+          "- Quando houver FAQ recuperada para a pergunta atual, use essa informacao como fonte principal.",
+          "- Se a informacao procurada nao estiver no contexto recuperado, diga isso claramente em vez de supor.",
           "- Priorize triagem de lead para campeonato: nome, campeonato, data, categoria, cidade e time ou quantidade de jogadores.",
           "- E-mail e opcional: so solicite se fizer sentido, sem travar o atendimento.",
           "- Se o usuario pedir humano, confirme o encaminhamento e nao insista na automacao.",
@@ -317,9 +438,12 @@ export class OpenAIService {
         select: { question: true, answer: true },
       });
       if (faqs.length) {
-        extras.faqs = faqs
-          .map((f) => `P: ${f.question}\nR: ${f.answer}`)
-          .join("\n\n");
+        extras.faqs = buildRelevantFaqContext(
+          faqs,
+          userMessage,
+          historyMessages,
+          extras.contactInfo,
+        );
       }
 
       // Load available audios for the AI to choose from
