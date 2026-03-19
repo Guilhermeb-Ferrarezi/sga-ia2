@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState, type ChangeEvent } from "react";
+import { motion } from "framer-motion";
 import {
   ImagePlus,
   RefreshCcw,
@@ -222,7 +223,7 @@ export default function WhatsAppProfilePage() {
   const displayPhone = profile?.phoneNumber.displayPhoneNumber ?? "Numero nao informado";
 
   return (
-    <div className="stagger space-y-5">
+    <motion.div className="space-y-5" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.5, ease: "easeOut" }}>
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="space-y-1">
           <h2 className="text-xl font-bold">Perfil WhatsApp</h2>
@@ -473,6 +474,6 @@ export default function WhatsAppProfilePage() {
           </CardContent>
         </Card>
       )}
-    </div>
+    </motion.div>
   );
 }

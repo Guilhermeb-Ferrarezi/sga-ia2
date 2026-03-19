@@ -97,6 +97,17 @@ export interface UpdateProfileInput {
   avatar?: File | null;
 }
 
+export interface AiSettingsSummary {
+  model: string;
+  language: string;
+  personality: string;
+  style: string;
+  systemPrompt: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+  source: "environment" | "database";
+}
+
 export interface AuthCustomRole {
   id: string;
   name: string;
@@ -174,6 +185,7 @@ export interface PipelineContact {
   playersCount?: number | null;
   stageId: number | null;
   leadStatus: "open" | "won" | "lost" | string;
+  leadScore?: number;
   triageCompleted?: boolean;
   handoffRequested?: boolean;
   handoffStatus?: string;
@@ -199,13 +211,45 @@ export interface PipelineBoard {
   unassigned: PipelineContact[];
 }
 
+export type FaqType = "general" | "tournament" | "registration" | "rules" | "pricing" | "other";
+
 export interface Faq {
   id: number;
   question: string;
   answer: string;
+  subject: string | null;
+  edition: string | null;
+  faqType: FaqType | string;
+  content: string | null;
   isActive: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface LeadsReport {
+  period: { days: number; since: string };
+  totalLeads: number;
+  qualifiedLeads: number;
+  wonLeads: number;
+  lostLeads: number;
+  conversionRate: number;
+  qualificationRate: number;
+  totalMessages: number;
+  avgResponseMinutes: number | null;
+  dailyTrend: Array<{ day: string; count: number }>;
+}
+
+export interface AgentPerformance {
+  agentId: string;
+  name: string;
+  email: string;
+  messagesSent: number;
+  handoffsResolved: number;
+}
+
+export interface PerformanceReport {
+  period: { days: number; since: string };
+  agents: AgentPerformance[];
 }
 
 export interface MessageTemplate {
@@ -521,6 +565,24 @@ export const api = {
     return payload as UpdateProfileResponse;
   },
 
+  async aiSettings(token: string): Promise<AiSettingsSummary> {
+    return request<AiSettingsSummary>("/settings/ai", { method: "GET" }, token);
+  },
+
+  async updateAiSettings(
+    token: string,
+    input: Pick<AiSettingsSummary, "model" | "language" | "personality" | "style" | "systemPrompt">,
+  ): Promise<AiSettingsSummary> {
+    return request<AiSettingsSummary>(
+      "/settings/ai",
+      {
+        method: "PUT",
+        body: JSON.stringify(input),
+      },
+      token,
+    );
+  },
+
   async whatsappProfile(token: string): Promise<WhatsAppProfileSummary> {
     return request<WhatsAppProfileSummary>(
       "/whatsapp/profile",
@@ -823,21 +885,44 @@ export const api = {
 
   async faqs(
     token: string,
-    filters?: { limit?: number; offset?: number; search?: string; isActive?: boolean | null },
-  ): Promise<PaginatedResult<Faq>> {
+    filters?: {
+      limit?: number;
+      offset?: number;
+      search?: string;
+      isActive?: boolean | null;
+      subject?: string;
+      edition?: string;
+      faqType?: string;
+    },
+  ): Promise<PaginatedResult<Faq> & { subjects?: string[]; editions?: string[] }> {
     const params = new URLSearchParams();
     if (typeof filters?.limit === "number") params.set("limit", String(filters.limit));
     if (typeof filters?.offset === "number") params.set("offset", String(filters.offset));
     if (filters?.search) params.set("search", filters.search);
     if (filters?.isActive === true) params.set("isActive", "true");
     if (filters?.isActive === false) params.set("isActive", "false");
+    if (filters?.subject) params.set("subject", filters.subject);
+    if (filters?.edition) params.set("edition", filters.edition);
+    if (filters?.faqType) params.set("faqType", filters.faqType);
     const suffix = params.toString() ? `?${params.toString()}` : "";
-    return request<PaginatedResult<Faq>>(`/faqs${suffix}`, { method: "GET" }, token);
+    return request<PaginatedResult<Faq> & { subjects?: string[]; editions?: string[] }>(
+      `/faqs${suffix}`,
+      { method: "GET" },
+      token,
+    );
   },
 
   async createFaq(
     token: string,
-    data: { question: string; answer: string; isActive?: boolean },
+    data: {
+      question: string;
+      answer: string;
+      isActive?: boolean;
+      subject?: string;
+      edition?: string;
+      faqType?: string;
+      content?: string;
+    },
   ): Promise<Faq> {
     return request<Faq>(
       "/faqs",
@@ -849,7 +934,15 @@ export const api = {
   async updateFaq(
     token: string,
     id: number,
-    data: Partial<{ question: string; answer: string; isActive: boolean }>,
+    data: Partial<{
+      question: string;
+      answer: string;
+      isActive: boolean;
+      subject: string;
+      edition: string;
+      faqType: string;
+      content: string;
+    }>,
   ): Promise<Faq> {
     return request<Faq>(
       `/faqs/${id}`,
@@ -1108,6 +1201,35 @@ export const api = {
 
   async deleteTask(token: string, id: number): Promise<void> {
     await request(`/tasks/${id}`, { method: "DELETE" }, token);
+  },
+
+  // ── Reports ─────────────────────────────────────────────
+
+  async reportsLeads(token: string, days = 30): Promise<LeadsReport> {
+    return request<LeadsReport>(
+      `/reports/leads?days=${days}`,
+      { method: "GET" },
+      token,
+    );
+  },
+
+  async reportsPerformance(token: string, days = 30): Promise<PerformanceReport> {
+    return request<PerformanceReport>(
+      `/reports/performance?days=${days}`,
+      { method: "GET" },
+      token,
+    );
+  },
+
+  async reportsExportCsv(token: string): Promise<Blob> {
+    const res = await fetch(`${API_BASE}/reports/export`, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+    if (!res.ok) throw new Error("Erro ao exportar contatos");
+    return res.blob();
   },
 };
 

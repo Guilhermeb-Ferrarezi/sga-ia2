@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type UIEvent } from "react";
+import { motion } from "framer-motion";
 import { createPortal } from "react-dom";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
@@ -439,7 +440,7 @@ export default function ContactsPage() {
   };
 
   return (
-    <div className="stagger space-y-5">
+    <motion.div className="space-y-5" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.5, ease: "easeOut" }}>
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h2 className="text-xl font-bold">Contatos</h2>
         <Button variant="secondary" size="sm" onClick={() => void load()} disabled={loading}>
@@ -1055,6 +1056,6 @@ export default function ContactsPage() {
         </div>,
         document.body,
       )}
-    </div>
+    </motion.div>
   );
 }

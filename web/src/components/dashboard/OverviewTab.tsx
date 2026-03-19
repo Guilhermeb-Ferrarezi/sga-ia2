@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { motion } from "framer-motion";
 import {
   Activity,
   Bot,
@@ -156,7 +157,7 @@ export default function OverviewTab() {
   );
 
   return (
-    <div className="stagger space-y-5">
+    <motion.div className="space-y-5" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.5, ease: "easeOut" }}>
       <div className="flex items-center justify-between">
         <h2 className="text-xl font-bold">Visao Geral</h2>
         <Button
@@ -399,6 +400,6 @@ export default function OverviewTab() {
           ))}
         </CardContent>
       </Card>
-    </div>
+    </motion.div>
   );
 }

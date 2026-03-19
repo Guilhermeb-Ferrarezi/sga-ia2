@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { motion } from "framer-motion";
 import { useAuth } from "@/contexts/AuthContext";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -25,7 +26,12 @@ export default function LoginPage() {
   return (
     <main className="relative flex min-h-screen items-center justify-center px-4 py-12">
       <div className="pointer-events-none absolute inset-0 opacity-70 [background:radial-gradient(circle_at_20%_20%,rgba(255,127,17,0.22),transparent_32%),radial-gradient(circle_at_80%_10%,rgba(0,128,128,0.25),transparent_35%),radial-gradient(circle_at_50%_80%,rgba(255,204,128,0.18),transparent_40%)]" />
-      <Card className="glass-panel w-full max-w-md animate-fade-up">
+      <motion.div
+        initial={{ opacity: 0, y: 40, scale: 0.95 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        transition={{ duration: 0.6, ease: [0.16, 1, 0.3, 1] }}
+      >
+      <Card className="glass-panel w-full max-w-md">
         <CardHeader className="space-y-2">
           <Badge variant="secondary" className="w-fit">
             Painel Operacional
@@ -72,6 +78,7 @@ export default function LoginPage() {
           </form>
         </CardContent>
       </Card>
+      </motion.div>
     </main>
   );
 }

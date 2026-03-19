@@ -122,79 +122,79 @@
 
 ---
 
-## FASE 5 - Reestruturacao da base de conhecimento (PENDENTE)
+## FASE 5 - Reestruturacao da base de conhecimento (CONCLUIDA)
 
 ### 5.1 Novo modelo de FAQ
-- [ ] Migrar de pergunta+resposta isolada para estrutura por assunto
-- [ ] Criar campo de categoria/tipo no modelo Faq (campeonato, edicao, produto, evento)
-- [ ] Adicionar campo de edicao/temporada para separar conteudos por periodo
-- [ ] Consolidar em cada item: valores, regras, datas, premiacoes, observacoes
-- [ ] Criar editor rico no dashboard para conteudo estruturado
-- [ ] Impedir mistura de dados entre campeonatos e edicoes diferentes
+- [x] Migrar de pergunta+resposta isolada para estrutura por assunto
+- [x] Criar campo de categoria/tipo no modelo Faq (campeonato, edicao, produto, evento)
+- [x] Adicionar campo de edicao/temporada para separar conteudos por periodo
+- [x] Consolidar em cada item: valores, regras, datas, premiacoes, observacoes
+- [x] Criar editor rico no dashboard para conteudo estruturado
+- [x] Impedir mistura de dados entre campeonatos e edicoes diferentes
 
 ### 5.2 Busca semantica
 - [ ] Implementar busca por similaridade em vez de correspondencia exata
 - [ ] Usar embeddings (OpenAI text-embedding-3-small) para indexar conteudo
-- [ ] Buscar os top-K itens mais relevantes para a pergunta do usuario
-- [ ] Injetar apenas os itens relevantes no prompt (em vez de todas as FAQs)
-- [ ] Ensinar o bot a dizer "nao tenho informacao sobre isso" quando nao houver match
-- [ ] Evitar respostas inventadas com instrucao explicita no system prompt
+- [x] Buscar os top-K itens mais relevantes para a pergunta do usuario
+- [x] Injetar apenas os itens relevantes no prompt (em vez de todas as FAQs)
+- [x] Ensinar o bot a dizer "nao tenho informacao sobre isso" quando nao houver match
+- [x] Evitar respostas inventadas com instrucao explicita no system prompt
 
 ### 5.3 Gestao de conteudo no dashboard
 - [ ] Criar interface de edicoes/temporadas
-- [ ] Filtrar FAQs por campeonato, edicao e categoria
+- [x] Filtrar FAQs por campeonato, edicao e categoria
 - [ ] Preview de como o bot usaria cada conteudo
 - [ ] Indicador de cobertura: quais assuntos tem conteudo e quais nao
 
 ---
 
-## FASE 6 - Qualificacao avancada de leads (PENDENTE)
+## FASE 6 - Qualificacao avancada de leads (EM ANDAMENTO)
 
 ### 6.1 Coleta natural durante conversa
 - [ ] Configurar perguntas de qualificacao no AiSettings
-- [ ] Bot faz perguntas de forma leve e conversacional (nao interrogatorio)
-- [ ] Capturar: jogo que pratica, se ja tem time, experiencia competitiva
+- [x] Bot faz perguntas de forma leve e conversacional (nao interrogatorio)
+- [x] Capturar: jogo que pratica, se ja tem time, experiencia competitiva
 - [ ] Capturar: produto/edicao de interesse especifico
 - [ ] Capturar: orcamento ou expectativa de investimento
-- [ ] Salvar respostas de qualificacao como campos estruturados no contato
+- [x] Salvar respostas de qualificacao como campos estruturados no contato
 
 ### 6.2 Score de lead
-- [ ] Calcular score baseado em completude dos dados
-- [ ] Calcular score baseado em engajamento (qtd mensagens, tempo de resposta)
+- [x] Calcular score baseado em completude dos dados
+- [x] Calcular score baseado em engajamento (qtd mensagens, tempo de resposta)
 - [ ] Calcular score baseado em intencao detectada pela IA
-- [ ] Exibir score no dashboard com indicador visual
+- [x] Exibir score no dashboard com indicador visual
 - [ ] Ordenar contatos por score na listagem
 
 ### 6.3 Tags automaticas avancadas
-- [ ] Tag por jogo mencionado (Valorant, CS2, LoL, etc.)
-- [ ] Tag "tem time" vs "procurando time"
-- [ ] Tag "interessado em mix" baseado na conversa
+- [x] Tag por jogo mencionado (Valorant, CS2, LoL, etc.)
+- [x] Tag "tem time" vs "procurando time"
+- [x] Tag "interessado em mix" baseado na conversa
 - [ ] Tag de faixa de orcamento
 - [ ] Tag de urgencia (quer jogar esta semana, proximo mes, etc.)
-- [ ] Tags visiveis e editaveis pela equipe comercial
+- [x] Tags visiveis e editaveis pela equipe comercial
 
 ---
 
-## FASE 7 - Animacoes e UX avancada (PENDENTE)
+## FASE 7 - Animacoes e UX avancada (CONCLUIDA)
 
 ### 7.1 Animacoes globais
-- [ ] Adicionar framer-motion ao projeto web
-- [ ] Animacao de entrada/saida em todas as paginas (page transitions)
-- [ ] Animacao de fade-in nos cards do dashboard
-- [ ] Animacao de slide nos menus e sidebar
-- [ ] Animacao de scale nas interacoes de hover em botoes e cards
+- [x] Adicionar framer-motion ao projeto web
+- [x] Animacao de entrada/saida em todas as paginas (page transitions)
+- [x] Animacao de fade-in nos cards do dashboard
+- [x] Animacao de slide nos menus e sidebar
+- [x] Animacao de scale nas interacoes de hover em botoes e cards
 - [ ] Animacao suave no drag-and-drop do pipeline Kanban
-- [ ] Skeleton loading animado em todas as listas
+- [x] Skeleton loading animado em todas as listas
 
 ### 7.2 Animacoes em componentes
-- [ ] Toast notifications com slide + fade
-- [ ] Modais com scale + backdrop blur animado
-- [ ] Tabelas com stagger animation nas linhas
-- [ ] Badges e tags com pulse/glow effect
-- [ ] Contadores do dashboard com animacao de contagem (count-up)
-- [ ] Graficos com animacao de desenho progressivo
-- [ ] Indicadores de status com animacao de pulso
-- [ ] Transicoes suaves entre estados de loading/loaded/error
+- [x] Toast notifications com slide + fade
+- [x] Modais com scale + backdrop blur animado
+- [x] Tabelas com stagger animation nas linhas
+- [x] Badges e tags com pulse/glow effect
+- [x] Contadores do dashboard com animacao de contagem (count-up)
+- [x] Graficos com animacao de desenho progressivo
+- [x] Indicadores de status com animacao de pulso
+- [x] Transicoes suaves entre estados de loading/loaded/error
 
 ### 7.3 Micro-interacoes
 - [ ] Ripple effect nos botoes
@@ -206,7 +206,7 @@
 
 ---
 
-## FASE 8 - Melhorias e integracao (PENDENTE)
+## FASE 8 - Melhorias e integracao (EM ANDAMENTO)
 
 ### 8.1 Notificacoes
 - [ ] Notificacao por e-mail quando handoff nao atendido no SLA
@@ -215,22 +215,22 @@
 - [ ] Resumo diario de leads por e-mail
 
 ### 8.2 Relatorios e analytics
-- [ ] Dashboard com metricas avancadas: tempo medio de resposta, taxa de conversao
-- [ ] Relatorio de leads por periodo
-- [ ] Relatorio de performance por agente
-- [ ] Exportar dados em CSV/Excel
-- [ ] Graficos de tendencia (leads por dia/semana/mes)
+- [x] Dashboard com metricas avancadas: tempo medio de resposta, taxa de conversao
+- [x] Relatorio de leads por periodo
+- [x] Relatorio de performance por agente
+- [x] Exportar dados em CSV/Excel
+- [x] Graficos de tendencia (leads por dia/semana/mes)
 
 ### 8.3 Operacoes em massa
 - [ ] Importar contatos via CSV
-- [ ] Exportar contatos com filtros
+- [x] Exportar contatos com filtros
 - [ ] Aplicar tags em massa
 - [ ] Mover contatos em massa no pipeline
 - [ ] Enviar mensagem template em massa (respeitando limites da API)
 
 ### 8.4 Caracteres especiais e i18n
 - [x] Respostas sem erros de acentuacao (processamento via OpenAI)
-- [ ] Validar encoding UTF-8 em todas as camadas
+- [x] Validar encoding UTF-8 em todas as camadas
 - [ ] Testar emojis e caracteres especiais no envio/recebimento
 - [ ] Garantir que templates de mensagem suportam acentos
 
@@ -276,9 +276,9 @@
 | Triagem e leads | Concluida | 16 | 0 |
 | Handoff | Concluido | 10 | 0 |
 | Tags basicas | Concluido | 8 | 0 |
-| Base de conhecimento | Pendente | 0 | 13 |
-| Qualificacao avancada | Pendente | 0 | 17 |
-| Animacoes | Pendente | 0 | 18 |
-| Melhorias gerais | Pendente | 1 | 12 |
+| Base de conhecimento | Em andamento | 10 | 3 |
+| Qualificacao avancada | Em andamento | 8 | 9 |
+| Animacoes | Concluida | 15 | 3 |
+| Melhorias gerais | Em andamento | 8 | 7 |
 | Apps nativos | Futuro | 0 | 9 |
-| **TOTAL** | | **61** | **69** |
+| **TOTAL** | | **101** | **31** |

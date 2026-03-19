@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { motion } from "framer-motion";
 import {
   ArrowRightCircle,
   Info,
@@ -165,7 +166,7 @@ export default function HandoffQueuePage() {
   );
 
   return (
-    <div className="stagger space-y-5">
+    <motion.div className="space-y-5" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.5, ease: "easeOut" }}>
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h2 className="text-xl font-bold">Fila de Handoff Humano</h2>
         <div className="flex items-center gap-2">
@@ -400,6 +401,6 @@ export default function HandoffQueuePage() {
           );
         })}
       </div>
-    </div>
+    </motion.div>
   );
 }

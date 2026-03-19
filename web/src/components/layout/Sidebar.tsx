@@ -15,6 +15,7 @@ import {
   Settings2,
   LogOut,
   X,
+  PieChart,
 } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { useOperationalAlerts } from "@/contexts/OperationalAlertsContext";
@@ -37,6 +38,7 @@ const links = [
   { to: "/dashboard/tags", label: "Tags", icon: Tags, permission: PERMISSIONS.TAGS_VIEW },
   { to: "/dashboard/audios", label: "Audios", icon: Volume2, permission: PERMISSIONS.AUDIOS_VIEW },
   { to: "/dashboard/whatsapp-profile", label: "Perfil WhatsApp", icon: Smartphone, permission: PERMISSIONS.WHATSAPP_PROFILE_VIEW },
+  { to: "/dashboard/reports", label: "Relatorios", icon: PieChart, permission: PERMISSIONS.DASHBOARD_VIEW },
   { to: "/dashboard/settings", label: "Configuracoes", icon: Settings2 },
 ];
 

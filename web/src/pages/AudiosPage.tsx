@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { motion } from "framer-motion";
 import { Edit2, Plus, Save, Trash2, Upload, X } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { api, type Audio } from "@/lib/api";
@@ -121,7 +122,7 @@ export default function AudiosPage() {
   }, [stopAudio]);
 
   return (
-    <div className="stagger space-y-5">
+    <motion.div className="space-y-5" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.5, ease: "easeOut" }}>
       <div className="flex items-center justify-between">
         <h2 className="text-xl font-bold">Audios</h2>
         <Button size="sm" onClick={() => { resetForm(); setShowForm(true); }} disabled={!canManageAudios}>
@@ -312,6 +313,6 @@ export default function AudiosPage() {
           </Button>
         </div>
       </div>
-    </div>
+    </motion.div>
   );
 }

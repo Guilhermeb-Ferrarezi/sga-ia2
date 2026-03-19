@@ -12,6 +12,11 @@ import { toPublicUser, type PublicUser } from "./services/auth";
 import { DashboardService } from "./services/dashboard";
 import { OpenAIService } from "./services/openai";
 import {
+  resolveAiSettings,
+  saveAiSettings,
+  type AiSettingsInput,
+} from "./services/aiSettings";
+import {
   extractInboundMessages,
   isWhatsAppPermissionError,
   WhatsAppApiError,
@@ -50,13 +55,8 @@ import {
 
 const openAI = new OpenAIService(
   config.openaiApiKey,
-  config.openaiModel,
   config.appName,
   config.openaiTranscriptionModel,
-  config.assistantLanguage,
-  config.assistantPersonality,
-  config.assistantStyle,
-  config.assistantSystemPrompt,
 );
 const auth = new AuthService({
   jwtSecret: config.jwtSecret,
@@ -297,6 +297,10 @@ const whatsappProfilePaths = new Set<string>([
   `${config.apiBasePath}/whatsapp/profile`,
   "/whatsapp/profile",
 ]);
+const aiSettingsPaths = new Set<string>([
+  `${config.apiBasePath}/settings/ai`,
+  "/settings/ai",
+]);
 const wsUpgradePaths = new Set<string>([
   `${config.apiBasePath}/ws`,
   "/ws",
@@ -461,7 +465,7 @@ const buildNoHandoffState = (): Partial<Prisma.ContactUncheckedCreateInput> => (
 });
 
 const buildHandoffAcknowledgement = (): string =>
-  "Perfeito. Um atendente do nosso time vai verificar essa informacao e continuar seu atendimento em instantes.";
+  "Perfeito. Um atendente do nosso time vai verificar essa informação e continuar seu atendimento em instantes.";
 
 const computeMissingLeadFields = (contact: ContactTriageSnapshot): string[] => {
   const missing: string[] = [];
@@ -637,7 +641,7 @@ const tryAutoTask = async (
   userMessage: string,
 ): Promise<void> => {
   try {
-    const taskIntent = await openAI.detectTaskIntent(userMessage);
+    const taskIntent = await openAI.detectTaskIntent(userMessage, prisma);
     if (!taskIntent) return;
 
     await prisma.task.create({
@@ -675,6 +679,7 @@ const tryAutoSummaryOnStageChange = async (
   if (newStageId === null) return;
 
   try {
+    const aiSettings = await openAI.getRuntimeSettings(prisma);
     const stage = await prisma.pipelineStage.findUnique({
       where: { id: newStageId },
       select: { name: true },
@@ -698,7 +703,7 @@ const tryAutoSummaryOnStageChange = async (
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: config.openaiModel,
+        model: aiSettings.model,
         input: [
           {
             role: "system",
@@ -1063,7 +1068,7 @@ const tryAutoFaq = async (
     const uniqueContacts = new Set(similarMessages.map((m) => m.contactId));
     if (uniqueContacts.size < 1) return;
 
-    const suggestion = await openAI.suggestFaqEntry(userMessage, aiReply);
+    const suggestion = await openAI.suggestFaqEntry(userMessage, aiReply, prisma);
     if (!suggestion) return;
 
     // Check if a similar FAQ already exists before creating
@@ -1672,6 +1677,104 @@ const handleProfileUpdate = async (req: Request): Promise<Response> => {
   }
 };
 
+const readTrimmedString = (
+  input: Record<string, unknown>,
+  field: string,
+): string | null => {
+  const value = input[field];
+  if (typeof value !== "string") return null;
+  return value.trim();
+};
+
+const parseAiSettingsInput = (
+  input: Record<string, unknown>,
+): { value: AiSettingsInput } | { error: string } => {
+  const model = readTrimmedString(input, "model");
+  const language = readTrimmedString(input, "language");
+  const personality = readTrimmedString(input, "personality");
+  const style = readTrimmedString(input, "style");
+  const rawSystemPrompt = input.systemPrompt;
+
+  if (!model || model.length < 2) {
+    return { error: "Modelo da IA invalido" };
+  }
+  if (!language || language.length < 2) {
+    return { error: "Idioma principal invalido" };
+  }
+  if (!personality || personality.length < 5) {
+    return { error: "Personalidade deve ter ao menos 5 caracteres" };
+  }
+  if (!style || style.length < 5) {
+    return { error: "Estilo de resposta deve ter ao menos 5 caracteres" };
+  }
+  if (
+    rawSystemPrompt !== undefined &&
+    rawSystemPrompt !== null &&
+    typeof rawSystemPrompt !== "string"
+  ) {
+    return { error: "Prompt base deve ser texto" };
+  }
+
+  const systemPrompt = typeof rawSystemPrompt === "string"
+    ? rawSystemPrompt.trim() || null
+    : null;
+
+  if (personality.length > 500) {
+    return { error: "Personalidade deve ter no maximo 500 caracteres" };
+  }
+  if (style.length > 500) {
+    return { error: "Estilo de resposta deve ter no maximo 500 caracteres" };
+  }
+  if (systemPrompt && systemPrompt.length > 8000) {
+    return { error: "Prompt base deve ter no maximo 8000 caracteres" };
+  }
+
+  return {
+    value: {
+      model,
+      language,
+      personality,
+      style,
+      systemPrompt,
+    },
+  };
+};
+
+const handleAiSettingsGet = async (req: Request): Promise<Response> => {
+  const current = await getAuthenticatedUser(req);
+  if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.USERS_MANAGE);
+  if (denied) return denied;
+
+  const settings = await resolveAiSettings(current.prisma);
+  return json(settings, 200, req);
+};
+
+const handleAiSettingsUpdate = async (req: Request): Promise<Response> => {
+  const current = await getAuthenticatedUser(req);
+  if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.USERS_MANAGE);
+  if (denied) return denied;
+
+  let body: unknown;
+  try {
+    body = await req.json();
+  } catch {
+    return json({ error: "Invalid JSON" }, 400, req);
+  }
+
+  const input = typeof body === "object" && body !== null
+    ? (body as Record<string, unknown>)
+    : {};
+  const parsed = parseAiSettingsInput(input);
+  if ("error" in parsed) {
+    return json({ error: parsed.error }, 400, req);
+  }
+
+  const saved = await saveAiSettings(current.prisma, parsed.value);
+  return json(saved, 200, req);
+};
+
 const dashboardOverview = async (req: Request): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
@@ -1972,7 +2075,7 @@ const webhookEvent = async (req: Request): Promise<Response> => {
 
           let extraction: Awaited<ReturnType<OpenAIService["extractLeadData"]>> = {};
           try {
-            extraction = await openAI.extractLeadData(userText);
+            extraction = await openAI.extractLeadData(userText, prisma);
           } catch (error) {
             console.warn(`[phone:${message.from}] extraction failed`, error);
           }
@@ -2041,6 +2144,12 @@ const webhookEvent = async (req: Request): Promise<Response> => {
               age: contact.age,
               level: contact.level,
             });
+
+            // Phase 5: Advanced game/context auto-tagging
+            void tryAdvancedAutoTag(prisma, contact.id, userText);
+
+            // Phase 6: Recompute lead score
+            void updateLeadScore(prisma, contact.id);
           }
 
           if (wantsHuman) {
@@ -3643,23 +3752,44 @@ const handleFaqList = async (req: Request): Promise<Response> => {
   const offset = Math.max(0, Number(url.searchParams.get("offset") ?? "0") || 0);
   const search = url.searchParams.get("search")?.trim();
   const isActiveParam = url.searchParams.get("isActive");
+  const subject = url.searchParams.get("subject")?.trim();
+  const faqType = url.searchParams.get("faqType")?.trim();
+  const edition = url.searchParams.get("edition")?.trim();
 
   const where: Prisma.FaqWhereInput = {};
   if (search) {
     where.OR = [
       { question: { contains: search, mode: "insensitive" } },
       { answer: { contains: search, mode: "insensitive" } },
+      { content: { contains: search, mode: "insensitive" } },
+      { subject: { contains: search, mode: "insensitive" } },
     ];
   }
   if (isActiveParam === "true") where.isActive = true;
   if (isActiveParam === "false") where.isActive = false;
+  if (subject) where.subject = { equals: subject, mode: "insensitive" };
+  if (faqType) where.faqType = faqType;
+  if (edition) where.edition = { equals: edition, mode: "insensitive" };
 
   const [items, total] = await Promise.all([
     current.prisma.faq.findMany({ where, orderBy: { createdAt: "desc" }, skip: offset, take: limit }),
     current.prisma.faq.count({ where }),
   ]);
 
-  return json({ items, total, limit, offset }, 200, req);
+  // Gather unique subjects and editions for filter dropdowns
+  const [subjects, editions] = await Promise.all([
+    current.prisma.faq.findMany({ distinct: ["subject"], select: { subject: true }, where: { subject: { not: null } } }),
+    current.prisma.faq.findMany({ distinct: ["edition"], select: { edition: true }, where: { edition: { not: null } } }),
+  ]);
+
+  return json({
+    items,
+    total,
+    limit,
+    offset,
+    subjects: subjects.map((s) => s.subject).filter(Boolean),
+    editions: editions.map((e) => e.edition).filter(Boolean),
+  }, 200, req);
 };
 
 const handleFaqCreate = async (req: Request): Promise<Response> => {
@@ -3686,6 +3816,10 @@ const handleFaqCreate = async (req: Request): Promise<Response> => {
     data: {
       question,
       answer,
+      subject: typeof input.subject === "string" ? input.subject.trim() || "geral" : "geral",
+      edition: typeof input.edition === "string" ? input.edition.trim() || null : null,
+      faqType: typeof input.faqType === "string" ? input.faqType.trim() || "qa" : "qa",
+      content: typeof input.content === "string" ? input.content.trim() || null : null,
       isActive: input.isActive !== false,
     },
   });
@@ -3710,6 +3844,12 @@ const handleFaqUpdate = async (req: Request, id: number): Promise<Response> => {
   if (typeof input.question === "string") data.question = input.question.trim();
   if (typeof input.answer === "string") data.answer = input.answer.trim();
   if (typeof input.isActive === "boolean") data.isActive = input.isActive;
+  if (typeof input.subject === "string") data.subject = input.subject.trim() || "geral";
+  if (typeof input.edition === "string") data.edition = input.edition.trim() || null;
+  if (input.edition === null) data.edition = null;
+  if (typeof input.faqType === "string") data.faqType = input.faqType.trim() || "qa";
+  if (typeof input.content === "string") data.content = input.content.trim() || null;
+  if (input.content === null) data.content = null;
 
   const faq = await current.prisma.faq.update({ where: { id }, data });
   return json(faq, 200, req);
@@ -4797,6 +4937,266 @@ const handleAudioDelete = async (req: Request, id: number): Promise<Response> =>
   }
 };
 
+// ── Phase 5: Lead Score calculation ────────────────────────────────
+
+const computeLeadScore = (contact: {
+  name?: string | null;
+  email?: string | null;
+  tournament?: string | null;
+  eventDate?: string | null;
+  category?: string | null;
+  city?: string | null;
+  teamName?: string | null;
+  playersCount?: number | null;
+  triageCompleted?: boolean;
+  level?: string | null;
+  objective?: string | null;
+}, messageCount: number): number => {
+  let score = 0;
+  // Completude: 5 pts cada campo preenchido
+  if (contact.name) score += 5;
+  if (contact.email) score += 10;
+  if (contact.tournament) score += 10;
+  if (contact.eventDate) score += 5;
+  if (contact.category) score += 5;
+  if (contact.city) score += 5;
+  if (contact.teamName) score += 5;
+  if (typeof contact.playersCount === "number" && contact.playersCount > 0) score += 5;
+  if (contact.level) score += 3;
+  if (contact.objective) score += 3;
+  if (contact.triageCompleted) score += 10;
+  // Engajamento: pontos por mensagens
+  if (messageCount >= 3) score += 5;
+  if (messageCount >= 10) score += 10;
+  if (messageCount >= 20) score += 5;
+  return Math.min(100, score);
+};
+
+const updateLeadScore = async (
+  prisma: PrismaClient,
+  contactId: number,
+): Promise<void> => {
+  try {
+    const contact = await prisma.contact.findUnique({
+      where: { id: contactId },
+      select: {
+        name: true, email: true, tournament: true, eventDate: true,
+        category: true, city: true, teamName: true, playersCount: true,
+        triageCompleted: true, level: true, objective: true,
+      },
+    });
+    if (!contact) return;
+    const msgCount = await prisma.message.count({ where: { contactId, direction: "in" } });
+    const score = computeLeadScore(contact, msgCount);
+    await prisma.contact.update({ where: { id: contactId }, data: { leadScore: score } });
+  } catch (error) {
+    console.error("[lead-score] failed for contact", contactId, error);
+  }
+};
+
+// ── Phase 5: Advanced auto-tagging ─────────────────────────────────
+
+const ADVANCED_TAG_RULES: Array<{
+  name: string;
+  color: string;
+  match: (text: string) => boolean;
+}> = [
+  { name: "Valorant", color: "#ff4655", match: (t) => /\bvalorant\b/i.test(t) },
+  { name: "CS2", color: "#de9b35", match: (t) => /\b(cs2|counter[- ]?strike|csgo|cs:go)\b/i.test(t) },
+  { name: "League of Legends", color: "#c8aa6e", match: (t) => /\b(lol|league of legends)\b/i.test(t) },
+  { name: "Fortnite", color: "#00bfff", match: (t) => /\bfortnite\b/i.test(t) },
+  { name: "Free Fire", color: "#ff6a00", match: (t) => /\b(free ?fire|freefire|ff)\b/i.test(t) },
+  { name: "Tem Time", color: "#10b981", match: (t) => /\b(tenho time|meu time|nosso time|tenho equipe|ja tenho)\b/i.test(t) },
+  { name: "Procura Time", color: "#f59e0b", match: (t) => /\b(procur\w+ time|sem time|sozinho|preciso de time|nao tenho time)\b/i.test(t) },
+  { name: "Interesse Mix", color: "#8b5cf6", match: (t) => /\b(mix|avulso|solo|individual)\b/i.test(t) },
+];
+
+const tryAdvancedAutoTag = async (
+  prisma: PrismaClient,
+  contactId: number,
+  userMessage: string,
+): Promise<void> => {
+  try {
+    const lowerMsg = userMessage.toLowerCase();
+    const matchedRules = ADVANCED_TAG_RULES.filter((rule) => rule.match(lowerMsg));
+    if (matchedRules.length === 0) return;
+
+    for (const rule of matchedRules) {
+      const tag = await prisma.tag.upsert({
+        where: { name: rule.name },
+        update: {},
+        create: { name: rule.name, color: rule.color },
+      });
+      const existing = await prisma.contactTag.findUnique({
+        where: { contactId_tagId: { contactId, tagId: tag.id } },
+        select: { id: true },
+      });
+      if (!existing) {
+        await prisma.contactTag.create({ data: { contactId, tagId: tag.id } });
+        broadcast("contact:tagged", { contactId, tagName: rule.name, tagId: tag.id });
+      }
+    }
+  } catch (error) {
+    console.error("[advanced-auto-tag] failed for contact", contactId, error);
+  }
+};
+
+// ── Phase 8: Reports / Analytics endpoints ─────────────────────────
+
+const reportsPaths = new Set<string>([
+  `${config.apiBasePath}/reports/leads`,
+  "/reports/leads",
+]);
+const reportsPerformancePaths = new Set<string>([
+  `${config.apiBasePath}/reports/performance`,
+  "/reports/performance",
+]);
+const reportsExportPaths = new Set<string>([
+  `${config.apiBasePath}/reports/export`,
+  "/reports/export",
+]);
+
+const handleReportsLeads = async (req: Request): Promise<Response> => {
+  const current = await getAuthenticatedUser(req);
+  if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.DASHBOARD_VIEW);
+  if (denied) return denied;
+
+  const url = new URL(req.url);
+  const days = Math.min(365, Math.max(1, Number(url.searchParams.get("days") ?? "30") || 30));
+  const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+
+  const [totalLeads, qualifiedLeads, wonLeads, lostLeads, totalMessages, avgResponseTime] = await Promise.all([
+    current.prisma.contact.count({ where: { createdAt: { gte: since } } }),
+    current.prisma.contact.count({ where: { createdAt: { gte: since }, triageCompleted: true } }),
+    current.prisma.contact.count({ where: { createdAt: { gte: since }, leadStatus: "won" } }),
+    current.prisma.contact.count({ where: { createdAt: { gte: since }, leadStatus: "lost" } }),
+    current.prisma.message.count({ where: { createdAt: { gte: since } } }),
+    current.prisma.$queryRawUnsafe<Array<{ avg_minutes: number | null }>>(
+      `SELECT AVG(EXTRACT(EPOCH FROM (m2."createdAt" - m1."createdAt")) / 60) as avg_minutes
+       FROM "Message" m1
+       JOIN "Message" m2 ON m1."contactId" = m2."contactId"
+       WHERE m1.direction = 'in' AND m2.direction = 'out'
+       AND m2."createdAt" > m1."createdAt"
+       AND m1."createdAt" >= $1
+       AND m2."createdAt" = (
+         SELECT MIN(sub."createdAt") FROM "Message" sub
+         WHERE sub."contactId" = m1."contactId" AND sub.direction = 'out'
+         AND sub."createdAt" > m1."createdAt"
+       )`,
+      since,
+    ),
+  ]);
+
+  // Daily trend
+  const dailyTrend = await current.prisma.$queryRawUnsafe<Array<{ day: string; count: bigint }>>(
+    `SELECT DATE("createdAt") as day, COUNT(*)::bigint as count
+     FROM "Contact" WHERE "createdAt" >= $1
+     GROUP BY DATE("createdAt") ORDER BY day`,
+    since,
+  );
+
+  return json({
+    period: { days, since: since.toISOString() },
+    totalLeads,
+    qualifiedLeads,
+    wonLeads,
+    lostLeads,
+    conversionRate: totalLeads > 0 ? Math.round((wonLeads / totalLeads) * 100) : 0,
+    qualificationRate: totalLeads > 0 ? Math.round((qualifiedLeads / totalLeads) * 100) : 0,
+    totalMessages,
+    avgResponseMinutes: avgResponseTime[0]?.avg_minutes ? Math.round(avgResponseTime[0].avg_minutes * 10) / 10 : null,
+    dailyTrend: dailyTrend.map((d) => ({ day: String(d.day).slice(0, 10), count: Number(d.count) })),
+  }, 200, req);
+};
+
+const handleReportsPerformance = async (req: Request): Promise<Response> => {
+  const current = await getAuthenticatedUser(req);
+  if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.DASHBOARD_VIEW);
+  if (denied) return denied;
+
+  const url = new URL(req.url);
+  const days = Math.min(365, Math.max(1, Number(url.searchParams.get("days") ?? "30") || 30));
+  const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+
+  const agents = await current.prisma.user.findMany({
+    where: { role: { in: ["ADMIN", "AGENT", "MANAGER"] } },
+    select: { id: true, name: true, email: true },
+  });
+
+  const results = await Promise.all(
+    agents.map(async (agent) => {
+      const [messagesSent, handoffsResolved] = await Promise.all([
+        current.prisma.message.count({
+          where: { sentByUserId: agent.id, createdAt: { gte: since } },
+        }),
+        current.prisma.contact.count({
+          where: { handoffResolvedByUserId: agent.id, handoffResolvedAt: { gte: since } },
+        }),
+      ]);
+      return {
+        agentId: agent.id,
+        name: agent.name ?? agent.email,
+        email: agent.email,
+        messagesSent,
+        handoffsResolved,
+      };
+    }),
+  );
+
+  return json({ period: { days, since: since.toISOString() }, agents: results }, 200, req);
+};
+
+const handleReportsExport = async (req: Request): Promise<Response> => {
+  const current = await getAuthenticatedUser(req);
+  if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.CONTACTS_VIEW);
+  if (denied) return denied;
+
+  const contacts = await current.prisma.contact.findMany({
+    include: { tags: { include: { tag: true } }, stage: true },
+    orderBy: { createdAt: "desc" },
+    take: 5000,
+  });
+
+  const headers = ["waId", "name", "email", "tournament", "eventDate", "category", "city", "teamName", "playersCount", "leadStatus", "leadScore", "triageCompleted", "stage", "tags", "createdAt"];
+  const csvRows = [headers.join(",")];
+
+  for (const c of contacts) {
+    const row = [
+      c.waId,
+      (c.name ?? "").replace(/,/g, ";"),
+      c.email ?? "",
+      (c.tournament ?? "").replace(/,/g, ";"),
+      c.eventDate ?? "",
+      c.category ?? "",
+      (c.city ?? "").replace(/,/g, ";"),
+      (c.teamName ?? "").replace(/,/g, ";"),
+      c.playersCount ?? "",
+      c.leadStatus,
+      c.leadScore,
+      c.triageCompleted ? "sim" : "nao",
+      c.stage?.name ?? "",
+      c.tags.map((ct) => ct.tag.name).join(";"),
+      c.createdAt.toISOString().slice(0, 10),
+    ];
+    csvRows.push(row.join(","));
+  }
+
+  const csv = csvRows.join("\n");
+  return new Response(csv, {
+    status: 200,
+    headers: {
+      "Content-Type": "text/csv; charset=utf-8",
+      "Content-Disposition": "attachment; filename=contacts-export.csv",
+      "Access-Control-Allow-Origin": resolveAllowOrigin(req),
+      "Access-Control-Allow-Headers": "Authorization, Content-Type",
+      Vary: "Origin",
+    },
+  });
+};
+
 // ── Helper: parse suffix from a matching prefix list ───────────────
 
 const extractPathSuffix = (pathname: string, prefixes: string[]): string | null => {
@@ -4869,6 +5269,10 @@ const server = Bun.serve<WsUserData>({
     }
     if (authMePaths.has(url.pathname) && req.method === "GET") {
       return authMe(req);
+    }
+    if (aiSettingsPaths.has(url.pathname)) {
+      if (req.method === "GET") return handleAiSettingsGet(req);
+      if (req.method === "PUT") return handleAiSettingsUpdate(req);
     }
     if (whatsappProfilePaths.has(url.pathname)) {
       if (req.method === "GET") return handleWhatsAppProfileGet(req);
@@ -5101,6 +5505,18 @@ const server = Bun.serve<WsUserData>({
     if (handoffQueuePaths.has(url.pathname) && req.method === "GET") {
       return handleHandoffQueueList(req);
     }
+
+    // ── Reports routes ───────────────────────────────────────
+    if (reportsPaths.has(url.pathname) && req.method === "GET") {
+      return handleReportsLeads(req);
+    }
+    if (reportsPerformancePaths.has(url.pathname) && req.method === "GET") {
+      return handleReportsPerformance(req);
+    }
+    if (reportsExportPaths.has(url.pathname) && req.method === "GET") {
+      return handleReportsExport(req);
+    }
+
     const handoffSuffix = extractPathSuffix(url.pathname, handoffQueuePrefix);
     if (handoffSuffix) {
       const parts = handoffSuffix.split("/");
