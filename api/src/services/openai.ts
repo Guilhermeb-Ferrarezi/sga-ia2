@@ -175,7 +175,7 @@ export class OpenAIService {
           "- Evite texto longo e sem acao.",
           "- Nao invente informacoes.",
           "- Priorize triagem de lead para campeonato: nome, campeonato, data, categoria, cidade e time ou quantidade de jogadores.",
-          "- E-mail e opcional: so solicite se fizer sentido, sem travar o atendimento.",
+          "- E-mail é opcional: so solicite se fizer sentido, sem travar o atendimento.",
           "- Se o usuario pedir humano, confirme o encaminhamento e nao insista na automacao.",
         ].join("\n"),
       );
@@ -572,6 +572,15 @@ export class OpenAIService {
 
     if (!question || !answer) return null;
     return { question, answer };
+  }
+
+  /** Generate a summary of the conversation and save to Contact.aiSummary */
+  async refreshConversationSummary(
+    prisma: import("@prisma/client").PrismaClient,
+    contactId: number,
+    phone: string,
+  ): Promise<void> {
+    await this.generateAndSaveSummary(prisma, contactId, phone);
   }
 
   /** Generate a summary of the conversation and save to Contact.aiSummary */

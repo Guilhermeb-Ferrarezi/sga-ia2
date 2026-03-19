@@ -36,6 +36,13 @@ const formatDateTime = (value: string): string =>
     timeStyle: "short",
   }).format(new Date(value));
 
+const getTurnLabel = (turn: DashboardTurn): string => {
+  if (turn.source === "AGENT") return turn.sentBy?.name || turn.sentBy?.email || "Equipe";
+  if (turn.source === "SYSTEM") return "Equipe";
+  if (turn.source === "AI") return "Assistente";
+  return turn.role === "assistant" ? "Assistente" : "Cliente";
+};
+
 interface ConversationDetailProps {
   phone: string;
   contactName?: string | null;
@@ -146,8 +153,18 @@ export default function ConversationDetail({
             const newTurn: DashboardTurn = {
               id: `ws-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
               role,
+              source:
+                typeof event.payload.source === "string"
+                  ? event.payload.source
+                  : role === "assistant"
+                    ? "AI"
+                    : "USER",
               content,
               createdAt: new Date().toISOString(),
+              sentBy:
+                typeof event.payload.sentBy === "string"
+                  ? { email: event.payload.sentBy, name: null }
+                  : null,
             };
             setTurns((prev) => [...prev, newTurn]);
           }
@@ -299,16 +316,16 @@ export default function ConversationDetail({
                   ) : (
                     <p className="whitespace-pre-wrap text-sm">{turn.content}</p>
                   )}
-                  <p
-                    className={cn(
-                      "mt-2 text-[11px]",
-                      turn.role === "assistant"
-                        ? "text-primary-foreground/80"
-                        : "text-secondary-foreground/70",
-                    )}
-                  >
-                    {turn.role} • {formatDateTime(turn.createdAt)}
-                  </p>
+                    <p
+                      className={cn(
+                        "mt-2 text-[11px]",
+                        turn.role === "assistant"
+                          ? "text-primary-foreground/80"
+                          : "text-secondary-foreground/70",
+                      )}
+                    >
+                      {getTurnLabel(turn)} • {formatDateTime(turn.createdAt)}
+                    </p>
                 </div>
               );
             })}

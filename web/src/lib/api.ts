@@ -94,8 +94,10 @@ export interface DashboardConversation {
 export interface DashboardTurn {
   id: string;
   role: string;
+  source: string | null;
   content: string;
   createdAt: string;
+  sentBy: { email: string; name: string | null } | null;
 }
 
 // ── Phase 2 types ──────────────────────────────────────────────────
@@ -136,14 +138,18 @@ export interface PipelineContact {
   leadStatus: "open" | "won" | "lost" | string;
   triageCompleted?: boolean;
   handoffRequested?: boolean;
+  handoffStatus?: string;
   handoffReason?: string | null;
   handoffAt?: string | null;
+  handoffAssignedAt?: string | null;
+  handoffFirstHumanReplyAt?: string | null;
   source: string | null;
   notes: string | null;
   age: string | null;
   level: string | null;
   objective: string | null;
   botEnabled: boolean;
+  aiSummary?: string | null;
   lastInteractionAt: string | null;
   createdAt: string;
   tags: ContactTag[];
@@ -278,15 +284,31 @@ export interface HandoffQueueItem {
     name: string;
     color: string;
   } | null;
+  handoffStatus: string;
   handoffReason: string | null;
   handoffAt: string | null;
   waitMinutes: number;
   slaLevel: HandoffSlaLevel;
   assignedTo: string | null;
   assignedAt: string | null;
+  firstHumanReplyAt: string | null;
+  aiSummary: string | null;
+  triageMissing: string[];
+  triageSnapshot: {
+    email: string | null;
+    tournament: string | null;
+    eventDate: string | null;
+    category: string | null;
+    city: string | null;
+    teamName: string | null;
+    playersCount: number | null;
+  };
   latestMessage: {
     body: string;
     createdAt: string;
+    direction: string;
+    source: string | null;
+    sentByUser: { email: string; name: string | null } | null;
   } | null;
   openTasks: Array<{
     id: number;

@@ -18,8 +18,10 @@ export interface DashboardConversation {
 export interface ConversationTurnView {
   id: string;
   role: string;
+  source: string | null;
   content: string;
   createdAt: string;
+  sentBy: { email: string; name: string | null } | null;
 }
 
 const toPreview = (text: string): string => {
@@ -124,8 +126,15 @@ export class DashboardService {
       select: {
         id: true,
         direction: true,
+        source: true,
         body: true,
         createdAt: true,
+        sentByUser: {
+          select: {
+            email: true,
+            name: true,
+          },
+        },
       },
     });
 
@@ -134,8 +143,10 @@ export class DashboardService {
     return turns.map((turn) => ({
       id: String(turn.id),
       role: turn.direction === "in" ? "user" : "assistant",
+      source: turn.source,
       content: turn.body,
       createdAt: turn.createdAt.toISOString(),
+      sentBy: turn.sentByUser,
     }));
   }
 }

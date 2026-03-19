@@ -295,6 +295,144 @@ type OperationalAlertsSummary = {
   updatedAt: string;
 };
 
+type HandoffStatusValue =
+  | "NONE"
+  | "QUEUED"
+  | "ASSIGNED"
+  | "IN_PROGRESS"
+  | "RESOLVED";
+
+type MessageSourceValue = "USER" | "AI" | "AGENT" | "SYSTEM";
+
+type HandoffStateSnapshot = {
+  handoffRequested?: boolean | null;
+  handoffStatus?: string | null;
+  handoffAssignedToUserId?: string | null;
+  handoffAssignedAt?: Date | null;
+  handoffFirstHumanReplyAt?: Date | null;
+};
+
+const ACTIVE_HANDOFF_STATUSES: HandoffStatusValue[] = [
+  "QUEUED",
+  "ASSIGNED",
+  "IN_PROGRESS",
+];
+
+const activeHandoffWhere = (): Prisma.ContactWhereInput => ({
+  OR: [
+    { handoffRequested: true },
+    { handoffStatus: { in: ACTIVE_HANDOFF_STATUSES } },
+  ],
+});
+
+const deriveHandoffStatus = (contact: HandoffStateSnapshot): HandoffStatusValue => {
+  const currentStatus = contact.handoffStatus?.trim().toUpperCase() ?? "";
+  if (
+    currentStatus === "QUEUED" ||
+    currentStatus === "ASSIGNED" ||
+    currentStatus === "IN_PROGRESS" ||
+    currentStatus === "RESOLVED"
+  ) {
+    return currentStatus;
+  }
+
+  if (contact.handoffRequested) {
+    if (contact.handoffFirstHumanReplyAt) return "IN_PROGRESS";
+    if (contact.handoffAssignedToUserId) return "ASSIGNED";
+    return "QUEUED";
+  }
+
+  return "NONE";
+};
+
+const buildQueuedHandoffState = (
+  reason: string,
+  handoffAt: Date = new Date(),
+): Prisma.ContactUncheckedUpdateInput => ({
+  botEnabled: false,
+  handoffRequested: true,
+  handoffStatus: "QUEUED",
+  handoffReason: reason,
+  handoffAt,
+  handoffAssignedAt: null,
+  handoffAssignedToUserId: null,
+  handoffFirstHumanReplyAt: null,
+  handoffResolvedAt: null,
+  handoffResolvedByUserId: null,
+});
+
+const buildAssignedHandoffState = (
+  contact: HandoffStateSnapshot,
+  userId: string,
+  assignedAt: Date = new Date(),
+): Prisma.ContactUncheckedUpdateInput => ({
+  botEnabled: false,
+  handoffRequested: true,
+  handoffStatus: contact.handoffFirstHumanReplyAt ? "IN_PROGRESS" : "ASSIGNED",
+  handoffAssignedToUserId: userId,
+  handoffAssignedAt: contact.handoffAssignedAt ?? assignedAt,
+  handoffResolvedAt: null,
+  handoffResolvedByUserId: null,
+});
+
+const buildReleasedHandoffState = (): Prisma.ContactUncheckedUpdateInput => ({
+  botEnabled: false,
+  handoffRequested: true,
+  handoffStatus: "QUEUED",
+  handoffAssignedToUserId: null,
+  handoffAssignedAt: null,
+  handoffFirstHumanReplyAt: null,
+  handoffResolvedAt: null,
+  handoffResolvedByUserId: null,
+});
+
+const buildInProgressHandoffState = (
+  contact: HandoffStateSnapshot,
+  userId: string,
+  respondedAt: Date = new Date(),
+): Prisma.ContactUncheckedUpdateInput => ({
+  botEnabled: false,
+  handoffRequested: true,
+  handoffStatus: "IN_PROGRESS",
+  handoffAssignedToUserId: contact.handoffAssignedToUserId ?? userId,
+  handoffAssignedAt: contact.handoffAssignedAt ?? respondedAt,
+  handoffFirstHumanReplyAt: contact.handoffFirstHumanReplyAt ?? respondedAt,
+  handoffResolvedAt: null,
+  handoffResolvedByUserId: null,
+});
+
+const buildResolvedHandoffState = (
+  userId: string,
+  resolvedAt: Date = new Date(),
+): Prisma.ContactUncheckedUpdateInput => ({
+  botEnabled: true,
+  handoffRequested: false,
+  handoffStatus: "RESOLVED",
+  handoffReason: null,
+  handoffAt: null,
+  handoffAssignedAt: null,
+  handoffAssignedToUserId: null,
+  handoffFirstHumanReplyAt: null,
+  handoffResolvedAt: resolvedAt,
+  handoffResolvedByUserId: userId,
+});
+
+const buildNoHandoffState = (): Partial<Prisma.ContactUncheckedCreateInput> => ({
+  handoffRequested: false,
+  handoffStatus: "NONE",
+  handoffReason: null,
+  handoffAt: null,
+  handoffAssignedAt: null,
+  handoffAssignedToUserId: null,
+  handoffFirstHumanReplyAt: null,
+  handoffResolvedAt: null,
+  handoffResolvedByUserId: null,
+  botEnabled: true,
+});
+
+const buildHandoffAcknowledgement = (): string =>
+  "Perfeito. Um atendente do nosso time vai verificar essa informacao e continuar seu atendimento em instantes.";
+
 const computeMissingLeadFields = (contact: ContactTriageSnapshot): string[] => {
   const missing: string[] = [];
 
@@ -617,7 +755,9 @@ const runHandoffEscalation = async (): Promise<void> => {
     // Find contacts waiting for handoff > 15 min that still have no human response
     const staleHandoffs = await prisma.contact.findMany({
       where: {
-        handoffRequested: true,
+        AND: [
+          activeHandoffWhere(),
+        ],
         botEnabled: false,
         handoffAt: {
           not: null,
@@ -630,7 +770,7 @@ const runHandoffEscalation = async (): Promise<void> => {
         name: true,
         handoffAt: true,
         messages: {
-          where: { direction: "out" },
+          where: { direction: "out", source: "SYSTEM" },
           orderBy: { createdAt: "desc" },
           take: 1,
           select: { createdAt: true, body: true },
@@ -638,27 +778,44 @@ const runHandoffEscalation = async (): Promise<void> => {
       },
     });
 
+    const agentReplies = await prisma.message.findMany({
+      where: {
+        contactId: { in: staleHandoffs.map((contact) => contact.id) },
+        direction: "out",
+        source: "AGENT",
+      },
+      orderBy: { createdAt: "desc" },
+      select: { contactId: true, createdAt: true },
+    });
+
+    const latestAgentReplyByContact = new Map<number, Date>();
+    for (const message of agentReplies) {
+      if (!latestAgentReplyByContact.has(message.contactId)) {
+        latestAgentReplyByContact.set(message.contactId, message.createdAt);
+      }
+    }
+
     for (const contact of staleHandoffs) {
-      const lastOut = contact.messages[0];
-      // Only escalate if the last outbound message was BEFORE handleoff (= no human replied)
-      const lastOutTime = lastOut?.createdAt?.getTime() ?? 0;
+      const lastSystemOut = contact.messages[0];
+      const latestAgentReply = latestAgentReplyByContact.get(contact.id);
       const handoffTime = contact.handoffAt?.getTime() ?? 0;
 
-      // Skip if a human already replied after handoff
-      if (lastOutTime > handoffTime) continue;
+      // Skip if a human already replied after handoff.
+      if ((latestAgentReply?.getTime() ?? 0) > handoffTime) continue;
 
       // Skip if we already sent an escalation follow-up (check body pattern)
-      if (lastOut?.body?.includes("ainda estamos buscando")) continue;
+      if (lastSystemOut?.body?.includes("nosso time segue analisando")) continue;
 
       const waitMin = Math.floor((Date.now() - handoffTime) / 60_000);
-      const followUp = `Oi${contact.name ? ` ${contact.name}` : ""}, ainda estamos buscando um atendente para voce. Tempo de espera: ${waitMin} min. Obrigado pela paciencia!`;
+      const followUp = `Oi${contact.name ? ` ${contact.name}` : ""}, nosso time segue analisando sua solicitacao. Tempo de espera atual: ${waitMin} min. Obrigado pela paciencia!`;
 
       try {
         await whatsapp.sendTextMessage(contact.waId, followUp);
-        await persistTurn(contact.waId, "assistant", followUp);
+        await persistTurn(contact.waId, "assistant", followUp, { source: "SYSTEM" });
         broadcast("message:new", {
           phone: contact.waId,
           role: "assistant",
+          source: "SYSTEM",
           content: followUp,
         });
         broadcast("handoff:escalation", {
@@ -698,7 +855,6 @@ const VALID_LEAD_STATUS = new Set(["open", "won", "lost"]);
 const VALID_TASK_STATUS = new Set(["open", "in_progress", "done", "cancelled"]);
 const VALID_TASK_PRIORITY = new Set(["low", "medium", "high", "urgent"]);
 const ALERTS_BROADCAST_INTERVAL_MS = 20_000;
-const handoffAssignments = new Map<string, { owner: string; assignedAt: number }>();
 let lastBroadcastedAlertsSignature = "";
 let alertsBroadcastInterval: ReturnType<typeof setInterval> | null = null;
 const DASHBOARD_CACHE_PREFIX = "esports:dashboard:";
@@ -764,11 +920,13 @@ const getOperationalAlertsSummary = async (
       },
     }),
     prisma.contact.count({
-      where: { handoffRequested: true },
+      where: activeHandoffWhere(),
     }),
     prisma.contact.count({
       where: {
-        handoffRequested: true,
+        AND: [
+          activeHandoffWhere(),
+        ],
         handoffAt: {
           not: null,
           lte: criticalThreshold,
@@ -972,8 +1130,12 @@ const persistTurn = async (
   phone: string,
   role: "user" | "assistant",
   content: string,
-  externalMessageId?: string,
-  contactName?: string,
+  options?: {
+    externalMessageId?: string;
+    contactName?: string;
+    source?: MessageSourceValue;
+    sentByUserId?: string | null;
+  },
 ): Promise<void> => {
   const prisma = await getPrismaClient();
   if (!prisma) return;
@@ -986,24 +1148,25 @@ const persistTurn = async (
       },
       create: {
         waId: phone,
-        name: contactName || null,
+        name: options?.contactName || null,
         lastInteractionAt: new Date(),
       },
     });
 
     if (
-      contactName &&
-      contactName.trim() &&
-      (contact.name ?? "").trim().toLowerCase() !== contactName.trim().toLowerCase()
+      options?.contactName &&
+      options.contactName.trim() &&
+      (contact.name ?? "").trim().toLowerCase() !== options.contactName.trim().toLowerCase()
     ) {
       await prisma.contact.update({
         where: { id: contact.id },
-        data: { name: contactName.trim() },
+        data: { name: options.contactName.trim() },
       });
     }
 
     const direction = role === "user" ? "in" : "out";
-    const waMessageId = direction === "in" ? externalMessageId : undefined;
+    const source = options?.source ?? (role === "user" ? "USER" : "AI");
+    const waMessageId = direction === "in" ? options?.externalMessageId : undefined;
 
     if (waMessageId) {
       const existing = await prisma.message.findFirst({
@@ -1020,7 +1183,9 @@ const persistTurn = async (
       data: {
         contactId: contact.id,
         direction,
+        source,
         body: content,
+        sentByUserId: options?.sentByUserId ?? null,
         waMessageId,
       },
     });
@@ -1521,12 +1686,16 @@ const webhookEvent = async (req: Request): Promise<Response> => {
               message.from,
               "user",
               (await resolveInboundText(message)).trim() || "[mensagem nao processada]",
-              message.messageId,
-              message.contactName,
+              {
+                externalMessageId: message.messageId,
+                contactName: message.contactName,
+                source: "USER",
+              },
             );
             broadcast("message:new", {
               phone: message.from,
               role: "user",
+              source: "USER",
               content: (await resolveInboundText(message)).trim() || "[mensagem nao processada]",
             });
             continue;
@@ -1551,12 +1720,20 @@ const webhookEvent = async (req: Request): Promise<Response> => {
           message.from,
           "user",
           userText,
-          message.messageId,
-          message.contactName,
+          {
+            externalMessageId: message.messageId,
+            contactName: message.contactName,
+            source: "USER",
+          },
         );
 
         // Emit WS events: new user message + AI processing
-        broadcast("message:new", { phone: message.from, role: "user", content: userText });
+        broadcast("message:new", {
+          phone: message.from,
+          role: "user",
+          source: "USER",
+          content: userText,
+        });
         broadcast("ai:processing", { phone: message.from });
         broadcast("notification", {
           phone: message.from,
@@ -1581,8 +1758,13 @@ const webhookEvent = async (req: Request): Promise<Response> => {
             const typingDelay = Math.min(2000, Math.max(500, cachedReply.length * 15));
             await sleep(typingDelay);
             await whatsapp.sendTextMessage(message.from, cachedReply);
-            await persistTurn(message.from, "assistant", cachedReply);
-            broadcast("message:new", { phone: message.from, role: "assistant", content: cachedReply });
+            await persistTurn(message.from, "assistant", cachedReply, { source: "AI" });
+            broadcast("message:new", {
+              phone: message.from,
+              role: "assistant",
+              source: "AI",
+              content: cachedReply,
+            });
             broadcast("ai:done", { phone: message.from });
             console.log(`[cache-reply] served cached reply to ${message.from}`);
             continue;
@@ -1608,11 +1790,13 @@ const webhookEvent = async (req: Request): Promise<Response> => {
 
           const updateData = buildContactUpdateFromExtraction(extraction);
           if (wantsHuman) {
-            updateData.botEnabled = false;
-            updateData.handoffRequested = true;
-            updateData.handoffAt = new Date();
-            updateData.handoffReason =
-              extraction.handoffReason ?? "Pedido explicito de atendimento humano";
+            Object.assign(
+              updateData,
+              buildQueuedHandoffState(
+                extraction.handoffReason ?? "Solicitacao de verificacao humana",
+                new Date(),
+              ),
+            );
           }
 
           const mergedSnapshot: ContactTriageSnapshot = {
@@ -1645,6 +1829,9 @@ const webhookEvent = async (req: Request): Promise<Response> => {
               contact: contact as unknown as Record<string, unknown>,
             });
             void emitAlertsSummary(prisma);
+            if (wantsHuman) {
+              void openAI.refreshConversationSummary(prisma, contact.id, message.from);
+            }
 
             // Auto-qualify if triage just completed
             if (updateData.triageCompleted === true && !wantsHuman) {
@@ -1665,14 +1852,16 @@ const webhookEvent = async (req: Request): Promise<Response> => {
           }
 
           if (wantsHuman) {
-            const handoffReply =
-              "Perfeito, vou encaminhar voce para o atendimento humano agora. Enquanto isso, se quiser, me diga campeonato e cidade para agilizar.";
+            const handoffReply = buildHandoffAcknowledgement();
             await sleep(computeReplyDelayMs(handoffReply));
             await whatsapp.sendTextMessage(message.from, handoffReply);
-            await persistTurn(message.from, "assistant", handoffReply);
+            await persistTurn(message.from, "assistant", handoffReply, {
+              source: "SYSTEM",
+            });
             broadcast("message:new", {
               phone: message.from,
               role: "assistant",
+              source: "SYSTEM",
               content: handoffReply,
             });
             broadcast("ai:done", { phone: message.from });
@@ -1728,10 +1917,13 @@ const webhookEvent = async (req: Request): Promise<Response> => {
               const textDelay = Math.min(3000, Math.max(800, audioTag.textWithoutTag.length * 15));
               await sleep(textDelay);
               await whatsapp.sendTextMessage(message.from, audioTag.textWithoutTag);
-              await persistTurn(message.from, "assistant", audioTag.textWithoutTag);
+              await persistTurn(message.from, "assistant", audioTag.textWithoutTag, {
+                source: "AI",
+              });
               broadcast("message:new", {
                 phone: message.from,
                 role: "assistant",
+                source: "AI",
                 content: audioTag.textWithoutTag,
               });
             }
@@ -1756,10 +1948,11 @@ const webhookEvent = async (req: Request): Promise<Response> => {
               );
               await whatsapp.sendAudioMessageById(message.from, mediaId);
               const persistBody = `[AUDIO:${audioRecord.url}|${audioRecord.title}]`;
-              await persistTurn(message.from, "assistant", persistBody);
+              await persistTurn(message.from, "assistant", persistBody, { source: "AI" });
               broadcast("message:new", {
                 phone: message.from,
                 role: "assistant",
+                source: "AI",
                 content: persistBody,
               });
               console.log(
@@ -1776,17 +1969,23 @@ const webhookEvent = async (req: Request): Promise<Response> => {
             // Audio not found, send the full text reply without the tag
             const fallbackText = audioTag.textWithoutTag || aiReply.replace(AUDIO_TAG_REGEX, "").trim();
             await whatsapp.sendTextMessage(message.from, fallbackText);
-            await persistTurn(message.from, "assistant", fallbackText);
+            await persistTurn(message.from, "assistant", fallbackText, { source: "AI" });
             broadcast("message:new", {
               phone: message.from,
               role: "assistant",
+              source: "AI",
               content: fallbackText,
             });
           }
         } else {
           await whatsapp.sendTextMessage(message.from, aiReply);
-          await persistTurn(message.from, "assistant", aiReply);
-          broadcast("message:new", { phone: message.from, role: "assistant", content: aiReply });
+          await persistTurn(message.from, "assistant", aiReply, { source: "AI" });
+          broadcast("message:new", {
+            phone: message.from,
+            role: "assistant",
+            source: "AI",
+            content: aiReply,
+          });
         }
 
         // Emit WS events: AI done + updated overview
@@ -2089,10 +2288,7 @@ const handleContactCreate = async (req: Request): Promise<Response> => {
     waId,
     leadStatus: "open",
     triageCompleted: false,
-    handoffRequested: false,
-    handoffAt: null,
-    handoffReason: null,
-    botEnabled: true,
+    ...buildNoHandoffState(),
   };
 
   if (hasOwn(input, "name")) {
@@ -2256,17 +2452,20 @@ const handleContactCreate = async (req: Request): Promise<Response> => {
     triageCompleted ?? computeMissingLeadFields(computedTriageSnapshot).length === 0;
 
   const finalHandoffRequested = !botEnabled ? true : (handoffRequested ?? false);
-  data.handoffRequested = finalHandoffRequested;
   if (finalHandoffRequested) {
-    data.handoffAt = handoffAt ?? new Date();
-    if (handoffReason !== undefined) {
-      data.handoffReason = handoffReason;
-    } else if (!botEnabled) {
-      data.handoffReason = "Bot desativado manualmente no cadastro";
-    }
+    Object.assign(
+      data,
+      buildQueuedHandoffState(
+        handoffReason ??
+          (!botEnabled
+            ? "Bot desativado manualmente no cadastro"
+            : "Solicitacao manual de atendimento humano"),
+        handoffAt ?? new Date(),
+      ),
+    );
   } else {
-    data.handoffAt = null;
-    data.handoffReason = null;
+    Object.assign(data, buildNoHandoffState());
+    data.botEnabled = true;
   }
 
   let contact;
@@ -2436,6 +2635,12 @@ const handleContactUpdate = async (
       stageId: true,
       botEnabled: true,
       handoffRequested: true,
+      handoffStatus: true,
+      handoffReason: true,
+      handoffAt: true,
+      handoffAssignedAt: true,
+      handoffAssignedToUserId: true,
+      handoffFirstHumanReplyAt: true,
       triageCompleted: true,
       source: true,
       notes: true,
@@ -2542,35 +2747,30 @@ const handleContactUpdate = async (
     data.triageCompleted = computeMissingLeadFields(snapshot).length === 0;
   }
 
-  if (typeof input.handoffRequested === "boolean") {
-    data.handoffRequested = input.handoffRequested;
-    if (input.handoffRequested) {
-      if (!hasOwn(input, "handoffAt")) {
-        data.handoffAt = new Date();
-      }
-    } else {
-      if (!hasOwn(input, "handoffAt")) {
-        data.handoffAt = null;
-      }
-      if (!hasOwn(input, "handoffReason")) {
-        data.handoffReason = null;
-      }
-    }
-  }
+  const requestedHandoff =
+    typeof input.handoffRequested === "boolean" ? input.handoffRequested : undefined;
+  let handoffReason: string | null | undefined;
   if (hasOwn(input, "handoffReason")) {
     const value = normalizeNullableText(input.handoffReason);
-    if (value !== undefined) data.handoffReason = value;
+    if (value !== undefined) {
+      handoffReason = value;
+      data.handoffReason = value;
+    }
   }
+  let handoffAt: Date | null | undefined;
   if (hasOwn(input, "handoffAt")) {
     const parsed = parseDateInput(input.handoffAt);
     if (parsed === undefined) {
       return json({ error: "handoffAt must be a valid date string or null" }, 400, req);
     }
+    handoffAt = parsed;
     data.handoffAt = parsed;
   }
 
-  if (typeof input.botEnabled === "boolean") {
-    data.botEnabled = input.botEnabled;
+  const requestedBotEnabled =
+    typeof input.botEnabled === "boolean" ? input.botEnabled : undefined;
+  if (requestedBotEnabled !== undefined) {
+    data.botEnabled = requestedBotEnabled;
   }
 
   if (hasOwn(input, "leadStatus")) {
@@ -2590,6 +2790,35 @@ const handleContactUpdate = async (
     data.stageId = stageId;
   }
 
+  const currentHandoffStatus = deriveHandoffStatus(existing);
+  const currentlyActiveHandoff =
+    currentHandoffStatus !== "NONE" && currentHandoffStatus !== "RESOLVED";
+  const desiredBotEnabled = requestedBotEnabled ?? existing.botEnabled;
+  const desiredHandoffRequested = requestedHandoff ?? existing.handoffRequested;
+  const shouldHaveActiveHandoff = !desiredBotEnabled || desiredHandoffRequested;
+
+  if (shouldHaveActiveHandoff) {
+    if (!currentlyActiveHandoff) {
+      Object.assign(
+        data,
+        buildQueuedHandoffState(
+          handoffReason ??
+            existing.handoffReason ??
+            (desiredBotEnabled === false
+              ? "Bot desativado manualmente no painel"
+              : "Solicitacao manual de atendimento humano"),
+          handoffAt ?? existing.handoffAt ?? new Date(),
+        ),
+      );
+    } else {
+      data.botEnabled = false;
+      data.handoffRequested = true;
+      data.handoffStatus = currentHandoffStatus;
+    }
+  } else if (currentlyActiveHandoff) {
+    Object.assign(data, buildResolvedHandoffState(current.user.id));
+  }
+
   if (!Object.keys(data).length) {
     return json({ error: "No valid fields provided" }, 400, req);
   }
@@ -2606,9 +2835,6 @@ const handleContactUpdate = async (
       },
     },
   });
-  if (!contact.handoffRequested) {
-    handoffAssignments.delete(contact.waId);
-  }
 
   // Audit log
   void logContactChanges(
@@ -2693,8 +2919,6 @@ const handleContactDelete = async (
   } catch {
     return json({ error: "Contact not found" }, 404, req);
   }
-  handoffAssignments.delete(waId);
-
   broadcast("contact:deleted", { waId });
   void invalidateDashboardCaches();
   return json({ ok: true }, 200, req);
@@ -2806,18 +3030,15 @@ const handleContactsBatch = async (req: Request): Promise<Response> => {
     const botEnabled = input.botEnabled === true;
     const result = await current.prisma.contact.updateMany({
       where: { waId: { in: waIds } },
-      data: { botEnabled },
+      data: botEnabled
+        ? buildResolvedHandoffState(current.user.id)
+        : buildQueuedHandoffState("Bot desativado em lote no painel"),
     });
     updated = result.count;
   } else if (action === "requestHandoff") {
     const result = await current.prisma.contact.updateMany({
       where: { waId: { in: waIds } },
-      data: {
-        handoffRequested: true,
-        handoffAt: new Date(),
-        handoffReason: "Solicitação em lote via painel",
-        botEnabled: false,
-      },
+      data: buildQueuedHandoffState("Solicitacao em lote via painel"),
     });
     updated = result.count;
   } else {
@@ -2849,12 +3070,24 @@ const handleContactBotToggle = async (
   }
   const botEnabled = input.botEnabled;
 
-  const data: Prisma.ContactUncheckedUpdateInput = { botEnabled };
-  if (!botEnabled) {
-    data.handoffRequested = true;
-    data.handoffAt = new Date();
-    data.handoffReason = "Bot desativado manualmente no painel";
+  const existing = await current.prisma.contact.findUnique({
+    where: { waId },
+    select: {
+      waId: true,
+      handoffRequested: true,
+      handoffStatus: true,
+      handoffAssignedAt: true,
+      handoffAssignedToUserId: true,
+      handoffFirstHumanReplyAt: true,
+    },
+  });
+  if (!existing) {
+    return json({ error: "Contact not found" }, 404, req);
   }
+
+  const data = botEnabled
+    ? buildResolvedHandoffState(current.user.id)
+    : buildQueuedHandoffState("Bot desativado manualmente no painel");
 
   let contact;
   try {
@@ -2866,8 +3099,14 @@ const handleContactBotToggle = async (
     return json({ error: "Contact not found" }, 404, req);
   }
 
-  broadcast("contact:updated", { waId, botEnabled });
+  broadcast("contact:updated", {
+    waId,
+    botEnabled: contact.botEnabled,
+    handoffRequested: contact.handoffRequested,
+    handoffStatus: contact.handoffStatus,
+  });
   void invalidateDashboardCaches();
+  void emitAlertsSummary(current.prisma);
   return json(contact, 200, req);
 };
 
@@ -2891,11 +3130,79 @@ const handleContactSend = async (
     return json({ error: "message is required" }, 400, req);
   }
 
-  await whatsapp.sendTextMessage(waId, message);
-  await persistTurn(waId, "assistant", message);
+  const existing = await current.prisma.contact.findUnique({
+    where: { waId },
+    select: {
+      id: true,
+      handoffRequested: true,
+      handoffStatus: true,
+      handoffAssignedAt: true,
+      handoffAssignedToUserId: true,
+      handoffFirstHumanReplyAt: true,
+    },
+  });
+  if (!existing) {
+    return json({ error: "Contact not found" }, 404, req);
+  }
 
-  broadcast("message:sent", { phone: waId, role: "assistant", content: message, sentBy: current.user.email });
-  broadcast("message:new", { phone: waId, role: "assistant", content: message });
+  const existingHandoffStatus = deriveHandoffStatus(existing);
+  const shouldAdvanceHandoff =
+    existingHandoffStatus !== "NONE" && existingHandoffStatus !== "RESOLVED";
+
+  await whatsapp.sendTextMessage(waId, message);
+  await persistTurn(waId, "assistant", message, {
+    source: "AGENT",
+    sentByUserId: current.user.id,
+  });
+
+  let handoffProgress:
+    | {
+        handoffStatus: HandoffStatusValue;
+        assignedAt: string | null;
+        firstHumanReplyAt: string | null;
+      }
+    | null = null;
+  if (shouldAdvanceHandoff) {
+    const updatedContact = await current.prisma.contact.update({
+      where: { waId },
+      data: buildInProgressHandoffState(existing, current.user.id),
+      select: {
+        handoffStatus: true,
+        handoffAssignedAt: true,
+        handoffFirstHumanReplyAt: true,
+      },
+    });
+    handoffProgress = {
+      handoffStatus: deriveHandoffStatus(updatedContact),
+      assignedAt: updatedContact.handoffAssignedAt?.toISOString() ?? null,
+      firstHumanReplyAt: updatedContact.handoffFirstHumanReplyAt?.toISOString() ?? null,
+    };
+  }
+
+  broadcast("message:sent", {
+    phone: waId,
+    role: "assistant",
+    source: "AGENT",
+    content: message,
+    sentBy: current.user.email,
+  });
+  broadcast("message:new", {
+    phone: waId,
+    role: "assistant",
+    source: "AGENT",
+    content: message,
+    sentBy: current.user.email,
+  });
+  if (handoffProgress) {
+    broadcast("handoff:updated", {
+      waId,
+      assignedTo: current.user.email,
+      assignedAt: handoffProgress.assignedAt,
+      handoffStatus: handoffProgress.handoffStatus,
+      firstHumanReplyAt: handoffProgress.firstHumanReplyAt,
+    });
+  }
+  void emitAlertsSummary(current.prisma);
 
   return json({ ok: true }, 200, req);
 };
@@ -3280,7 +3587,7 @@ const handleHandoffQueueList = async (req: Request): Promise<Response> => {
   const now = new Date();
 
   const contacts = await current.prisma.contact.findMany({
-    where: { handoffRequested: true },
+    where: activeHandoffWhere(),
     include: {
       stage: {
         select: {
@@ -3289,10 +3596,25 @@ const handleHandoffQueueList = async (req: Request): Promise<Response> => {
           color: true,
         },
       },
+      handoffAssignedToUser: {
+        select: {
+          id: true,
+          email: true,
+          name: true,
+        },
+      },
       messages: {
         orderBy: { createdAt: "desc" },
         take: 1,
-        select: { body: true, createdAt: true },
+        select: {
+          body: true,
+          createdAt: true,
+          direction: true,
+          source: true,
+          sentByUser: {
+            select: { email: true, name: true },
+          },
+        },
       },
       tasks: {
         where: {
@@ -3315,20 +3637,33 @@ const handleHandoffQueueList = async (req: Request): Promise<Response> => {
 
   const queue = contacts
     .map((contact) => {
+      const handoffStatus = deriveHandoffStatus(contact);
       const startedAt = contact.handoffAt ?? contact.lastInteractionAt ?? contact.createdAt;
       const waitMinutes = computeHandoffWaitMinutes(startedAt, now);
       const slaLevel = classifyHandoffSla(waitMinutes);
-      const assignment = handoffAssignments.get(contact.waId);
       return {
         waId: contact.waId,
         name: contact.name,
         stage: contact.stage,
+        handoffStatus,
         handoffReason: contact.handoffReason,
         handoffAt: contact.handoffAt,
         waitMinutes,
         slaLevel,
-        assignedTo: assignment?.owner ?? null,
-        assignedAt: assignment ? new Date(assignment.assignedAt).toISOString() : null,
+        assignedTo: contact.handoffAssignedToUser?.email ?? null,
+        assignedAt: contact.handoffAssignedAt?.toISOString() ?? null,
+        firstHumanReplyAt: contact.handoffFirstHumanReplyAt?.toISOString() ?? null,
+        aiSummary: contact.aiSummary ?? null,
+        triageMissing: computeMissingLeadFields(contact),
+        triageSnapshot: {
+          email: contact.email,
+          tournament: contact.tournament,
+          eventDate: contact.eventDate,
+          category: contact.category,
+          city: contact.city,
+          teamName: contact.teamName,
+          playersCount: contact.playersCount,
+        },
         openTasks: contact.tasks,
         latestMessage: contact.messages[0] ?? null,
       };
@@ -3344,14 +3679,6 @@ const handleHandoffQueueList = async (req: Request): Promise<Response> => {
       if (rankDiff !== 0) return rankDiff;
       return b.waitMinutes - a.waitMinutes;
     });
-
-  // Cleanup assignments for contacts no longer in queue
-  const queueWaIds = new Set(queue.map((item) => item.waId));
-  for (const waId of handoffAssignments.keys()) {
-    if (!queueWaIds.has(waId)) {
-      handoffAssignments.delete(waId);
-    }
-  }
 
   return json(queue, 200, req);
 };
@@ -3386,29 +3713,69 @@ const handleHandoffAssign = async (
 
   const contact = await current.prisma.contact.findUnique({
     where: { waId },
-    select: { waId: true, handoffRequested: true },
+    select: {
+      waId: true,
+      handoffRequested: true,
+      handoffStatus: true,
+      handoffAssignedAt: true,
+      handoffAssignedToUserId: true,
+      handoffFirstHumanReplyAt: true,
+    },
   });
   if (!contact) return json({ error: "Contact not found" }, 404, req);
-  if (!contact.handoffRequested) {
+  if (deriveHandoffStatus(contact) === "NONE" || deriveHandoffStatus(contact) === "RESOLVED") {
     return json({ error: "Contact is not in human handoff queue" }, 400, req);
   }
 
+  let assignee:
+    | {
+        id: string;
+        email: string;
+      }
+    | null = null;
+
+  let data: Prisma.ContactUncheckedUpdateInput;
   if (ownerRaw === null) {
-    handoffAssignments.delete(waId);
+    data = buildReleasedHandoffState();
   } else {
     const owner = ownerRaw && ownerRaw.length > 0 ? ownerRaw : current.user.email;
-    handoffAssignments.set(waId, { owner, assignedAt: Date.now() });
+    assignee = await current.prisma.user.findUnique({
+      where: { email: owner },
+      select: { id: true, email: true },
+    });
+    if (!assignee) {
+      return json({ error: "Owner not found" }, 404, req);
+    }
+    data = buildAssignedHandoffState(contact, assignee.id);
   }
 
-  const assignment = handoffAssignments.get(waId);
+  const updatedContact = await current.prisma.contact.update({
+    where: { waId },
+    data,
+    select: {
+      waId: true,
+      handoffStatus: true,
+      handoffAssignedAt: true,
+      handoffFirstHumanReplyAt: true,
+      handoffAssignedToUser: {
+        select: {
+          email: true,
+        },
+      },
+    },
+  });
+
   const payload = {
     waId,
-    assignedTo: assignment?.owner ?? null,
-    assignedAt: assignment ? new Date(assignment.assignedAt).toISOString() : null,
+    assignedTo: updatedContact.handoffAssignedToUser?.email ?? null,
+    assignedAt: updatedContact.handoffAssignedAt?.toISOString() ?? null,
+    handoffStatus: deriveHandoffStatus(updatedContact),
+    firstHumanReplyAt: updatedContact.handoffFirstHumanReplyAt?.toISOString() ?? null,
   };
 
   broadcast("handoff:updated", payload as unknown as Record<string, unknown>);
   void invalidateDashboardCaches();
+  void emitAlertsSummary(current.prisma);
   return json(payload, 200, req);
 };
 
