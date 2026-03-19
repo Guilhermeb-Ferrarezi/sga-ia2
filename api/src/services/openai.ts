@@ -491,7 +491,7 @@ export class OpenAIService {
         );
 
         historyMessages = dedupedMessages
-          .map((m) => ({
+          .map((m: any) => ({
             role: (m.direction === "in" ? "user" : "assistant") as "user" | "assistant",
             content: [
               { type: m.direction === "in" ? "input_text" : "output_text", text: m.body },
@@ -534,7 +534,7 @@ export class OpenAIService {
       body: JSON.stringify({
         model: settings.model,
         input,
-        max_output_tokens: 350,
+        max_output_tokens: 600,
       }),
     });
 
@@ -576,7 +576,7 @@ export class OpenAIService {
                 text: [
                   "Extraia dados estruturados de lead para atendimento de campeonato de esports.",
                   "Retorne APENAS JSON valido (sem markdown, sem texto extra).",
-                  "Campos permitidos: name, email, tournament, eventDate, category, city, teamName, playersCount, wantsHuman, handoffReason.",
+                  "Campos permitidos: name, email, tournament, category, city, teamName, playersCount, wantsHuman, handoffReason.",
                   "Use null para campos desconhecidos.",
                   "wantsHuman=true somente se o usuario pedir atendimento humano explicitamente.",
                   "handoffReason deve ser curta e objetiva quando wantsHuman=true.",
@@ -713,7 +713,7 @@ export class OpenAIService {
             ],
           },
         ],
-        max_output_tokens: 200,
+        max_output_tokens: 350,
       }),
     });
 
