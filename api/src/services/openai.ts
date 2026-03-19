@@ -23,6 +23,11 @@ interface ChatMessage {
   content: Array<{ type: string; text: string }>;
 }
 
+type StoredHistoryMessage = {
+  direction: "in" | "out";
+  body: string;
+};
+
 export interface LeadExtraction {
   name?: string;
   email?: string;
@@ -34,6 +39,13 @@ export interface LeadExtraction {
   playersCount?: number;
   wantsHuman?: boolean;
   handoffReason?: string;
+}
+
+export interface GenerateReplyOptions {
+  triageMissing?: string[];
+  resumePendingContext?: string;
+  resumeMergedUserMessagesCount?: number;
+  mode?: "webhook" | "resume";
 }
 
 const allowedExtractionKeys = new Set<keyof LeadExtraction>([
@@ -52,6 +64,28 @@ const allowedExtractionKeys = new Set<keyof LeadExtraction>([
 const MAX_WHATSAPP_TEXT_SIZE = 3500;
 const CONTEXT_MESSAGE_LIMIT = 20;
 const SUMMARY_TRIGGER_COUNT = 40;
+const FAQ_CONTENT_ONLY_PREFIX = "__content__:";
+
+const isGeneratedFaqQuestion = (question: string | null | undefined): boolean =>
+  typeof question === "string" && question.startsWith(FAQ_CONTENT_ONLY_PREFIX);
+
+const trimTrailingMergedUserMessages = (
+  messages: StoredHistoryMessage[],
+  mergedUserMessagesCount: number,
+): StoredHistoryMessage[] => {
+  if (mergedUserMessagesCount <= 0) return messages.slice(0, -1);
+
+  const trimmed = [...messages];
+  let remaining = mergedUserMessagesCount;
+
+  for (let index = trimmed.length - 1; index >= 0 && remaining > 0; index -= 1) {
+    if (trimmed[index]?.direction !== "in") continue;
+    trimmed.splice(index, 1);
+    remaining -= 1;
+  }
+
+  return trimmed;
+};
 
 const trimForWhatsApp = (text: string): string => {
   if (text.length <= MAX_WHATSAPP_TEXT_SIZE) return text;
@@ -269,11 +303,11 @@ export class OpenAIService {
     userMessage: string,
     prisma?: PrismaClient,
     phone?: string,
-    options?: { triageMissing?: string[] },
+    options?: GenerateReplyOptions,
   ): Promise<string> {
     const settings = await this.getRuntimeSettings(prisma);
     console.log(
-      `[openai:webhook] generateReply model=${settings.model}${phone ? ` phone=${phone}` : ""}`,
+      `[openai:reply] mode=${options?.mode ?? "webhook"} model=${settings.model}${phone ? ` phone=${phone}` : ""}`,
     );
     let historyMessages: ChatMessage[] = [];
     let extras: {
@@ -323,11 +357,23 @@ export class OpenAIService {
       // Load active FAQs
       const faqs = await prisma.faq.findMany({
         where: { isActive: true },
-        select: { question: true, answer: true },
+        select: { question: true, answer: true, content: true, subject: true },
       });
       if (faqs.length) {
         extras.faqs = faqs
-          .map((f) => `P: ${f.question}\nR: ${f.answer}`)
+          .map((f) => {
+            const content = f.content?.trim();
+            if (content) {
+              const subjectLine = f.subject?.trim() ? `Assunto: ${f.subject.trim()}\n` : "";
+              return `${subjectLine}FAQ: ${content}`;
+            }
+
+            if (isGeneratedFaqQuestion(f.question)) {
+              return `FAQ: ${f.answer}`;
+            }
+
+            return `P: ${f.question}\nR: ${f.answer}`;
+          })
           .join("\n\n");
       }
 
@@ -351,10 +397,13 @@ export class OpenAIService {
           select: { direction: true, body: true },
         });
 
-        // Reverse to chronological order, exclude last user message (we add it ourselves)
-        historyMessages = recentMessages
-          .reverse()
-          .slice(0, -1) // drop the latest (current user message already persisted)
+        const chronologicalMessages = recentMessages.reverse() as StoredHistoryMessage[];
+        const dedupedMessages = trimTrailingMergedUserMessages(
+          chronologicalMessages,
+          Math.max(0, options?.resumeMergedUserMessagesCount ?? 0),
+        );
+
+        historyMessages = dedupedMessages
           .map((m) => ({
             role: (m.direction === "in" ? "user" : "assistant") as "user" | "assistant",
             content: [
@@ -380,7 +429,12 @@ export class OpenAIService {
       ...historyMessages,
       {
         role: "user",
-        content: [{ type: "input_text", text: userMessage }],
+        content: [
+          {
+            type: "input_text",
+            text: options?.resumePendingContext?.trim() || userMessage,
+          },
+        ],
       },
     ];
 

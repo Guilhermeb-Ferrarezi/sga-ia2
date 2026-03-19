@@ -1,7 +1,9 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import {
   BookOpen,
   Check,
+  ChevronDown,
+  ChevronUp,
   Edit2,
   Filter,
   Plus,
@@ -25,6 +27,7 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 
 const FAQ_TYPES: { value: FaqType; label: string }[] = [
   { value: "general", label: "Geral" },
@@ -44,11 +47,112 @@ const typeColor: Record<string, string> = {
   other: "bg-gray-500/15 text-gray-400",
 };
 
+const FAQ_CONTENT_ONLY_PREFIX = "__content__:";
+
+const isGeneratedFaqQuestion = (question: string): boolean =>
+  question.startsWith(FAQ_CONTENT_ONLY_PREFIX);
+
+const getFaqTitle = (faq: Faq): string => {
+  if (!isGeneratedFaqQuestion(faq.question) && faq.question.trim()) {
+    return faq.question;
+  }
+
+  if (faq.subject?.trim()) {
+    return faq.subject.trim();
+  }
+
+  return FAQ_TYPES.find((type) => type.value === faq.faqType)?.label ?? "FAQ";
+};
+
+const getFaqBody = (faq: Faq): string => faq.content?.trim() || faq.answer?.trim() || "";
+
 const listItem = {
   hidden: { opacity: 0, y: 20, scale: 0.97 },
   show: { opacity: 1, y: 0, scale: 1 },
   exit: { opacity: 0, x: -30, scale: 0.95 },
 };
+
+const FAQ_BODY_COLLAPSED_HEIGHT = 150;
+
+function FaqBodyPreview({ content }: { content: string }) {
+  const contentId = useId();
+  const contentRef = useRef<HTMLDivElement | null>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [isOverflowing, setIsOverflowing] = useState(false);
+  const [contentHeight, setContentHeight] = useState(FAQ_BODY_COLLAPSED_HEIGHT);
+
+  useEffect(() => {
+    const element = contentRef.current;
+    if (!element) return;
+
+    const measure = () => {
+      const nextHeight = element.scrollHeight;
+      setContentHeight(nextHeight);
+      setIsOverflowing(nextHeight > FAQ_BODY_COLLAPSED_HEIGHT);
+    };
+
+    measure();
+
+    if (typeof ResizeObserver === "undefined") return;
+
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+
+    return () => observer.disconnect();
+  }, [content]);
+
+  useEffect(() => {
+    if (!isOverflowing && expanded) {
+      setExpanded(false);
+    }
+  }, [expanded, isOverflowing]);
+
+  return (
+    <div className="space-y-2">
+      <motion.div
+        initial={false}
+        animate={{
+          height: expanded || !isOverflowing ? contentHeight : FAQ_BODY_COLLAPSED_HEIGHT,
+        }}
+        transition={{ duration: 0.32, ease: "easeOut" }}
+        className="relative overflow-hidden"
+      >
+        <div id={contentId} ref={contentRef}>
+          <p className="text-sm text-muted-foreground whitespace-pre-wrap">
+            {content}
+          </p>
+        </div>
+        {!expanded && isOverflowing && (
+          <div className="pointer-events-none absolute inset-x-0 bottom-0 h-14 bg-gradient-to-t from-card via-card/90 to-transparent" />
+        )}
+      </motion.div>
+
+      {isOverflowing && (
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="h-8 px-2 text-xs text-primary hover:text-primary"
+          aria-expanded={expanded}
+          aria-controls={contentId}
+          onClick={() => setExpanded((current) => !current)}
+        >
+          {expanded ? (
+            <>
+              <ChevronUp className="mr-1 h-3.5 w-3.5" />
+              Mostrar menos
+            </>
+          ) : (
+            <>
+              <ChevronDown className="mr-1 h-3.5 w-3.5" />
+              Mostrar tudo
+            </>
+          )}
+        </Button>
+      )}
+    </div>
+  );
+}
 
 export default function FaqsPage() {
   const { token, user } = useAuth();
@@ -59,8 +163,6 @@ export default function FaqsPage() {
   const [loading, setLoading] = useState(false);
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
-  const [question, setQuestion] = useState("");
-  const [answer, setAnswer] = useState("");
   const [subject, setSubject] = useState("");
   const [edition, setEdition] = useState("");
   const [faqType, setFaqType] = useState<string>("general");
@@ -114,8 +216,6 @@ export default function FaqsPage() {
   const resetForm = () => {
     setShowForm(false);
     setEditingId(null);
-    setQuestion("");
-    setAnswer("");
     setSubject("");
     setEdition("");
     setFaqType("general");
@@ -124,21 +224,17 @@ export default function FaqsPage() {
 
   const startEdit = (faq: Faq) => {
     setEditingId(faq.id);
-    setQuestion(faq.question);
-    setAnswer(faq.answer);
     setSubject(faq.subject ?? "");
     setEdition(faq.edition ?? "");
     setFaqType(faq.faqType ?? "general");
-    setContent(faq.content ?? "");
+    setContent(getFaqBody(faq));
     setShowForm(true);
   };
 
   const save = async () => {
-    if (!token || !question.trim() || !answer.trim() || !canManageFaqs) return;
+    if (!token || !content.trim() || !canManageFaqs) return;
     try {
       const payload = {
-        question,
-        answer,
         subject: subject || undefined,
         edition: edition || undefined,
         faqType: faqType || "general",
@@ -319,24 +415,6 @@ export default function FaqsPage() {
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
-                <div className="grid gap-4 sm:grid-cols-2">
-                  <div className="space-y-1">
-                    <Label>Pergunta *</Label>
-                    <Input
-                      value={question}
-                      onChange={(e) => setQuestion(e.target.value)}
-                      placeholder="Ex: Qual o horario do campeonato?"
-                    />
-                  </div>
-                  <div className="space-y-1">
-                    <Label>Resposta *</Label>
-                    <Input
-                      value={answer}
-                      onChange={(e) => setAnswer(e.target.value)}
-                      placeholder="Ex: O campeonato acontece todos os sabados as 14h."
-                    />
-                  </div>
-                </div>
                 <div className="grid gap-4 sm:grid-cols-3">
                   <div className="space-y-1">
                     <Label>Assunto</Label>
@@ -383,17 +461,21 @@ export default function FaqsPage() {
                 </div>
                 <div className="space-y-1">
                   <Label>Conteudo Complementar</Label>
-                  <textarea
+                  <Textarea
                     value={content}
                     onChange={(e) => setContent(e.target.value)}
-                    placeholder="Informacoes adicionais, regras, links, etc."
-                    rows={3}
-                    className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm resize-none"
+                    placeholder="Escreva o conteudo da FAQ, regras, links, observacoes e qualquer texto que a IA possa usar."
+                    rows={6}
+                    className="min-h-[160px] resize-y text-sm"
                   />
                 </div>
                 <div className="flex gap-2">
                   <motion.div whileHover={{ scale: 1.03 }} whileTap={{ scale: 0.97 }}>
-                    <Button size="sm" onClick={() => void save()} disabled={!canManageFaqs}>
+                    <Button
+                      size="sm"
+                      onClick={() => void save()}
+                      disabled={!canManageFaqs || !content.trim()}
+                    >
                       <Save className="h-4 w-4 mr-1" /> Salvar
                     </Button>
                   </motion.div>
@@ -417,7 +499,7 @@ export default function FaqsPage() {
             <Input
               value={search}
               onChange={(event) => setSearch(event.target.value)}
-              placeholder="Buscar por pergunta ou resposta"
+              placeholder="Buscar por conteudo, assunto ou texto"
             />
             <select
               value={activeFilter}
@@ -587,7 +669,7 @@ export default function FaqsPage() {
                   )}
                   <div className="flex-1 min-w-0 space-y-1.5">
                     <div className="flex items-center gap-2 flex-wrap">
-                      <p className="font-medium text-base">{faq.question}</p>
+                      <p className="font-medium text-base">{getFaqTitle(faq)}</p>
                       <span
                         className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium ${typeColor[faq.faqType] ?? typeColor.other}`}
                       >
@@ -597,10 +679,10 @@ export default function FaqsPage() {
                         <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-red-500/15 text-red-400">
                           Inativo
                         </span>
-                      )}
+                        )}
                     </div>
-                    <p className="text-sm text-muted-foreground">{faq.answer}</p>
-                    {(faq.subject || faq.edition || faq.content) && (
+                    <FaqBodyPreview content={getFaqBody(faq)} />
+                    {(faq.subject || faq.edition) && (
                       <div className="flex items-center gap-3 text-xs text-muted-foreground/70 pt-0.5">
                         {faq.subject && (
                           <span className="bg-muted/40 px-2 py-0.5 rounded">
@@ -610,11 +692,6 @@ export default function FaqsPage() {
                         {faq.edition && (
                           <span className="bg-muted/40 px-2 py-0.5 rounded">
                             Ed. {faq.edition}
-                          </span>
-                        )}
-                        {faq.content && (
-                          <span className="truncate max-w-[200px]" title={faq.content}>
-                            {faq.content}
                           </span>
                         )}
                       </div>

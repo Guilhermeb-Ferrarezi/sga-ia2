@@ -11,6 +11,7 @@ import { AuthService } from "./services/auth";
 import { toPublicUser, type PublicUser } from "./services/auth";
 import { DashboardService } from "./services/dashboard";
 import { OpenAIService } from "./services/openai";
+import { buildOpenApiDocument, renderSwaggerUiHtml } from "./services/swagger";
 import {
   resolveAiSettings,
   saveAiSettings,
@@ -171,6 +172,14 @@ const authMePaths = new Set<string>([
   `${config.apiBasePath}/auth/me`,
   "/auth/me",
 ]);
+const openApiJsonPaths = new Set<string>([
+  `${config.apiBasePath}/openapi.json`,
+  "/openapi.json",
+]);
+const swaggerUiPaths = new Set<string>([
+  `${config.apiBasePath}/swagger`,
+  "/swagger",
+]);
 const authProfilePaths = new Set<string>([
   `${config.apiBasePath}/auth/profile`,
   "/auth/profile",
@@ -313,6 +322,8 @@ const wsUpgradePaths = new Set<string>([
 const processedMessageIds = new Map<string, number>();
 const resumedBotReplyLocks = new Set<string>();
 const MESSAGE_ID_TTL_MS = 10 * 60 * 1000;
+const MAX_RESUME_PENDING_MESSAGES = 10;
+const MAX_RESUME_PENDING_CONTEXT_CHARS = 4000;
 const HUMAN_HANDOFF_REGEX =
   /\b(atendente|humano|pessoa real|suporte humano|falar com alguem|falar com pessoa|time de atendimento)\b/i;
 
@@ -362,6 +373,12 @@ type HandoffStateSnapshot = {
   handoffAssignedToUserId?: string | null;
   handoffAssignedAt?: Date | null;
   handoffFirstHumanReplyAt?: Date | null;
+};
+
+type ResumePendingMessage = {
+  body: string;
+  waMessageId: string | null;
+  createdAt: Date;
 };
 
 const ACTIVE_HANDOFF_STATUSES: HandoffStatusValue[] = [
@@ -1424,6 +1441,55 @@ const persistTurn = async (
   }
 };
 
+const buildResumePendingContext = (
+  pendingMessages: ResumePendingMessage[],
+): {
+  latestMessage: string;
+  latestMessageId: string | null;
+  latestCreatedAt: Date;
+  mergedCount: number;
+  mergedPlainText: string;
+  prompt: string;
+} | null => {
+  const normalized = pendingMessages
+    .map((message) => ({
+      ...message,
+      body: message.body.trim(),
+    }))
+    .filter((message) => message.body && message.body !== "[mensagem nao processada]")
+    .slice(-MAX_RESUME_PENDING_MESSAGES);
+
+  if (!normalized.length) return null;
+
+  let keptMessages = [...normalized];
+  const renderPrompt = (messages: ResumePendingMessage[]): string => {
+    const latest = messages[messages.length - 1];
+    const latestBody = latest?.body ?? "";
+    return [
+      "O bot foi retomado apos uma pausa ou handoff.",
+      "Estas foram as mensagens mais recentes do usuario que ficaram sem resposta. Considere TODO o bloco antes de responder.",
+      ...messages.map((message, index) => `${index + 1}. ${message.body}`),
+      `Pendencia mais recente e prioridade atual: ${latestBody}`,
+      "Responda com base no bloco inteiro acima e nao peca para o usuario repetir o que ja informou.",
+    ].join("\n");
+  };
+
+  while (keptMessages.length > 1 && renderPrompt(keptMessages).length > MAX_RESUME_PENDING_CONTEXT_CHARS) {
+    keptMessages = keptMessages.slice(1);
+  }
+
+  const latest = keptMessages[keptMessages.length - 1];
+  if (!latest) return null;
+  return {
+    latestMessage: latest.body,
+    latestMessageId: latest.waMessageId ?? null,
+    latestCreatedAt: latest.createdAt,
+    mergedCount: keptMessages.length,
+    mergedPlainText: keptMessages.map((message) => message.body).join("\n"),
+    prompt: renderPrompt(keptMessages),
+  };
+};
+
 const canBotAutoReply = async (
   prisma: PrismaClient,
   waId: string,
@@ -1437,6 +1503,36 @@ const canBotAutoReply = async (
   });
 
   return Boolean(contact?.botEnabled && !contact.handoffRequested);
+};
+
+const hasOutboundAfter = async (
+  prisma: PrismaClient,
+  contactId: number,
+  createdAt: Date,
+): Promise<boolean> => {
+  const newerOutbound = await prisma.message.findFirst({
+    where: {
+      contactId,
+      direction: "out",
+      createdAt: { gt: createdAt },
+    },
+    select: { id: true },
+  });
+
+  return Boolean(newerOutbound);
+};
+
+const canResumeAutoReply = async (
+  prisma: PrismaClient,
+  waId: string,
+  contactId: number,
+  latestPendingCreatedAt: Date,
+): Promise<boolean> => {
+  if (!await canBotAutoReply(prisma, waId)) {
+    return false;
+  }
+
+  return !await hasOutboundAfter(prisma, contactId, latestPendingCreatedAt);
 };
 
 const replyPendingContactAfterBotResume = async (
@@ -1466,13 +1562,14 @@ const replyPendingContactAfterBotResume = async (
       },
     });
 
-    const pendingInbound = await prisma.message.findFirst({
+    const pendingInboundMessages = await prisma.message.findMany({
       where: {
         contactId: contact.id,
         direction: "in",
         ...(lastOutbound ? { createdAt: { gt: lastOutbound.createdAt } } : {}),
       },
       orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      take: MAX_RESUME_PENDING_MESSAGES,
       select: {
         body: true,
         waMessageId: true,
@@ -1480,61 +1577,28 @@ const replyPendingContactAfterBotResume = async (
       },
     });
 
-    const userText = pendingInbound?.body?.trim();
-    if (!userText || userText === "[mensagem nao processada]") {
+    const resumeBacklog = buildResumePendingContext(pendingInboundMessages.reverse());
+    if (!resumeBacklog) {
       return;
     }
-    const pendingMessageId = pendingInbound?.waMessageId ?? null;
+    const pendingMessageId = resumeBacklog.latestMessageId;
+    const resumeMergedText = resumeBacklog.mergedPlainText;
+    console.log(
+      `[resume-reply] backlog ready for ${waId} pending_messages=${resumeBacklog.mergedCount}`,
+    );
 
     broadcast("ai:processing", { phone: waId });
 
-    const cachedReply =
-      (await tryFaqFeedbackCache(userText)) ??
-      (await trySemanticReplyCache(userText));
-
-    if (cachedReply) {
-      if (!await canBotAutoReply(prisma, waId)) {
-        broadcast("ai:done", { phone: waId });
-        return;
-      }
-
-      if (pendingMessageId) {
-        await whatsapp.sendTypingIndicator(pendingMessageId, "text");
-      }
-
-      const typingDelay = Math.min(2000, Math.max(500, cachedReply.length * 15));
-      await sleep(typingDelay);
-
-      if (!await canBotAutoReply(prisma, waId)) {
-        broadcast("ai:done", { phone: waId });
-        return;
-      }
-
-      await whatsapp.sendTextMessage(waId, cachedReply);
-      await persistTurn(waId, "assistant", cachedReply, { source: "AI" });
-      broadcast("message:new", {
-        phone: waId,
-        role: "assistant",
-        source: "AI",
-        content: cachedReply,
-      });
-      broadcast("ai:done", { phone: waId });
-
-      const overview = await dashboard.getOverview(prisma);
-      broadcast("overview:updated", overview as unknown as Record<string, unknown>);
-      console.log(`[resume-reply] served cached reply to ${waId}`);
-      return;
-    }
-
     let extraction: Awaited<ReturnType<OpenAIService["extractLeadData"]>> = {};
     try {
-      extraction = await openAI.extractLeadData(userText, prisma);
+      extraction = await openAI.extractLeadData(resumeMergedText, prisma);
     } catch (error) {
       console.warn(`[resume-reply:${waId}] extraction failed`, error);
     }
 
     const wantsHuman =
-      extraction.wantsHuman === true || HUMAN_HANDOFF_REGEX.test(userText);
+      extraction.wantsHuman === true ||
+      HUMAN_HANDOFF_REGEX.test(resumeBacklog.latestMessage);
 
     const updateData = buildContactUpdateFromExtraction(extraction);
     if (wantsHuman) {
@@ -1595,12 +1659,16 @@ const replyPendingContactAfterBotResume = async (
         age: contact.age,
         level: contact.level,
       });
-      void tryAdvancedAutoTag(prisma, contact.id, userText);
+      void tryAdvancedAutoTag(prisma, contact.id, resumeMergedText);
       void updateLeadScore(prisma, contact.id);
     }
 
     if (wantsHuman) {
       const handoffReply = buildHandoffAcknowledgement();
+      if (await hasOutboundAfter(prisma, contact.id, resumeBacklog.latestCreatedAt)) {
+        broadcast("ai:done", { phone: waId });
+        return;
+      }
       if (pendingMessageId) {
         await whatsapp.sendTypingIndicator(pendingMessageId, "text");
       }
@@ -1619,11 +1687,14 @@ const replyPendingContactAfterBotResume = async (
       return;
     }
 
-    const aiReply = await openAI.generateReply(userText, prisma, waId, {
+    const aiReply = await openAI.generateReply(resumeBacklog.latestMessage, prisma, waId, {
       triageMissing: missingFields,
+      resumePendingContext: resumeBacklog.prompt,
+      resumeMergedUserMessagesCount: resumeBacklog.mergedCount,
+      mode: "resume",
     });
 
-    void tryAutoTask(prisma, contact.id, userText);
+    void tryAutoTask(prisma, contact.id, resumeMergedText);
 
     if (pendingMessageId) {
       await whatsapp.sendTypingIndicator(pendingMessageId, "text");
@@ -1632,7 +1703,7 @@ const replyPendingContactAfterBotResume = async (
     const typingDelay = Math.min(3000, Math.max(800, aiReply.length * 12));
     await sleep(typingDelay);
 
-    if (!await canBotAutoReply(prisma, waId)) {
+    if (!await canResumeAutoReply(prisma, waId, contact.id, resumeBacklog.latestCreatedAt)) {
       broadcast("ai:done", { phone: waId });
       return;
     }
@@ -1738,10 +1809,10 @@ const replyPendingContactAfterBotResume = async (
 
     const overview = await dashboard.getOverview(prisma);
     broadcast("overview:updated", overview as unknown as Record<string, unknown>);
-    void tryAutoFaq(prisma, waId, userText, aiReply);
-    void saveFaqFeedbackCache(userText, aiReply);
-    void saveSemanticReplyCache(userText, aiReply);
-    console.log(`[resume-reply] answered pending message for ${waId}`);
+    void tryAutoFaq(prisma, waId, resumeMergedText, aiReply);
+    console.log(
+      `[resume-reply] answered pending message for ${waId} mode=resume pending_messages=${resumeBacklog.mergedCount}`,
+    );
   } catch (error) {
     logWhatsAppPermissionHint(error);
     console.error(`[resume-reply] failed processing pending message for ${waId}`, error);
@@ -4375,6 +4446,14 @@ const handleFaqList = async (req: Request): Promise<Response> => {
   }, 200, req);
 };
 
+const FAQ_CONTENT_ONLY_PREFIX = "__content__:";
+
+const isGeneratedFaqQuestion = (question: string | null | undefined): boolean =>
+  typeof question === "string" && question.startsWith(FAQ_CONTENT_ONLY_PREFIX);
+
+const buildGeneratedFaqQuestion = (): string =>
+  `${FAQ_CONTENT_ONLY_PREFIX}${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
 const handleFaqCreate = async (req: Request): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
@@ -4391,18 +4470,19 @@ const handleFaqCreate = async (req: Request): Promise<Response> => {
   const input = body as Record<string, unknown>;
   const question = typeof input.question === "string" ? input.question.trim() : "";
   const answer = typeof input.answer === "string" ? input.answer.trim() : "";
-  if (!question || !answer) {
-    return json({ error: "question and answer are required" }, 400, req);
+  const content = typeof input.content === "string" ? input.content.trim() : "";
+  if ((!question || !answer) && !content) {
+    return json({ error: "content is required" }, 400, req);
   }
 
   const faq = await current.prisma.faq.create({
     data: {
-      question,
-      answer,
+      question: question || buildGeneratedFaqQuestion(),
+      answer: answer || content,
       subject: typeof input.subject === "string" ? input.subject.trim() || "geral" : "geral",
       edition: typeof input.edition === "string" ? input.edition.trim() || null : null,
       faqType: typeof input.faqType === "string" ? input.faqType.trim() || "qa" : "qa",
-      content: typeof input.content === "string" ? input.content.trim() || null : null,
+      content: content || null,
       isActive: input.isActive !== false,
     },
   });
@@ -4423,6 +4503,14 @@ const handleFaqUpdate = async (req: Request, id: number): Promise<Response> => {
   }
 
   const input = body as Record<string, unknown>;
+  const existing = await current.prisma.faq.findUnique({
+    where: { id },
+    select: { question: true, answer: true, content: true },
+  });
+  if (!existing) {
+    return json({ error: "FAQ not found" }, 404, req);
+  }
+
   const data: Record<string, unknown> = {};
   if (typeof input.question === "string") data.question = input.question.trim();
   if (typeof input.answer === "string") data.answer = input.answer.trim();
@@ -4433,6 +4521,26 @@ const handleFaqUpdate = async (req: Request, id: number): Promise<Response> => {
   if (typeof input.faqType === "string") data.faqType = input.faqType.trim() || "qa";
   if (typeof input.content === "string") data.content = input.content.trim() || null;
   if (input.content === null) data.content = null;
+
+  if (typeof data.question === "string" && !data.question.trim()) {
+    delete data.question;
+  }
+  if (typeof data.answer === "string" && !data.answer.trim()) {
+    delete data.answer;
+  }
+
+  const nextContent =
+    typeof data.content === "string"
+      ? data.content
+      : data.content === null
+        ? null
+        : existing.content;
+
+  if (isGeneratedFaqQuestion(existing.question) && typeof nextContent === "string" && nextContent.trim()) {
+    if (!("answer" in data)) {
+      data.answer = nextContent.trim();
+    }
+  }
 
   const faq = await current.prisma.faq.update({ where: { id }, data });
   return json(faq, 200, req);
@@ -5844,6 +5952,18 @@ const server = Bun.serve<WsUserData>({
         { ok: true, app: config.appName, dbEnabled: config.enableDb },
         200,
         req,
+      );
+    }
+
+    if (openApiJsonPaths.has(url.pathname) && req.method === "GET") {
+      return json(buildOpenApiDocument(req), 200, req);
+    }
+    if (swaggerUiPaths.has(url.pathname) && req.method === "GET") {
+      return textResponse(
+        renderSwaggerUiHtml("./openapi.json", `${config.appName} Swagger`),
+        200,
+        req,
+        "text/html; charset=utf-8",
       );
     }
 

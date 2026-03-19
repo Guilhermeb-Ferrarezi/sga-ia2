@@ -984,8 +984,8 @@ export const api = {
   async createFaq(
     token: string,
     data: {
-      question: string;
-      answer: string;
+      question?: string;
+      answer?: string;
       isActive?: boolean;
       subject?: string;
       edition?: string;
