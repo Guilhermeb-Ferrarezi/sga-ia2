@@ -327,6 +327,18 @@ const MAX_RESUME_PENDING_CONTEXT_CHARS = 4000;
 const HUMAN_HANDOFF_REGEX =
   /\b(atendente|humano|pessoa real|suporte humano|falar com alguem|falar com pessoa|time de atendimento)\b/i;
 
+const hasExplicitHumanHandoffRequest = (text: string): boolean =>
+  HUMAN_HANDOFF_REGEX.test(text);
+
+const shouldTriggerHumanHandoff = (
+  userText: string,
+  extraction?: { wantsHuman?: boolean },
+): boolean => {
+  const explicitRequest = hasExplicitHumanHandoffRequest(userText);
+  if (explicitRequest) return true;
+  return extraction?.wantsHuman === true && explicitRequest;
+};
+
 type ContactTriageSnapshot = {
   name?: string | null;
   email?: string | null;
@@ -1603,9 +1615,10 @@ const replyPendingContactAfterBotResume = async (
       console.warn(`[resume-reply:${waId}] extraction failed`, error);
     }
 
-    const wantsHuman =
-      extraction.wantsHuman === true ||
-      HUMAN_HANDOFF_REGEX.test(resumeBacklog.latestMessage);
+    const wantsHuman = shouldTriggerHumanHandoff(
+      resumeBacklog.latestMessage,
+      extraction,
+    );
 
     const updateData = buildContactUpdateFromExtraction(extraction);
     if (wantsHuman) {
@@ -2684,8 +2697,7 @@ const webhookEvent = async (req: Request): Promise<Response> => {
             console.warn(`[phone:${message.from}] extraction failed`, error);
           }
 
-          const wantsHuman =
-            extraction.wantsHuman === true || HUMAN_HANDOFF_REGEX.test(userText);
+          const wantsHuman = shouldTriggerHumanHandoff(userText, extraction);
 
           const updateData = buildContactUpdateFromExtraction(extraction);
           if (wantsHuman) {

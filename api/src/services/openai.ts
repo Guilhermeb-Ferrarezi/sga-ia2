@@ -86,6 +86,16 @@ const CONTEXT_MESSAGE_LIMIT = 20;
 const SUMMARY_TRIGGER_COUNT = 40;
 const FAQ_SELECTION_LIMIT = 3;
 const FAQ_MAX_CONTEXT_CHARS = 4000;
+const FAQ_SYNONYM_GROUPS = [
+  ["preco", "valor", "custa", "custo", "ticket", "ingresso", "inscricao"],
+  ["campeonato", "torneio", "camp"],
+  ["edicao", "temporada"],
+  ["data", "dia", "quando"],
+  ["horario", "hora", "horas"],
+  ["local", "endereco", "cidade", "onde"],
+  ["time", "equipe", "elenco"],
+  ["regra", "regras", "formato", "md3", "md5", "double", "elimination"],
+];
 
 type FaqCandidate = {
   question: string;
@@ -143,6 +153,18 @@ const tokenizeFaqText = (value: string): string[] =>
     .split(" ")
     .filter((token) => token.length >= 3 && !FAQ_STOP_WORDS.has(token));
 
+const expandQueryTokens = (tokens: Set<string>): Set<string> => {
+  const expanded = new Set(tokens);
+  for (const group of FAQ_SYNONYM_GROUPS) {
+    const intersects = group.some((token) => expanded.has(token));
+    if (!intersects) continue;
+    for (const token of group) {
+      expanded.add(token);
+    }
+  }
+  return expanded;
+};
+
 const buildRelevantFaqContext = (
   faqs: FaqCandidate[],
   userMessage: string,
@@ -159,23 +181,28 @@ const buildRelevantFaqContext = (
     .filter(Boolean)
     .join(" ")
     .trim();
-  const queryTokens = new Set(tokenizeFaqText(query));
+  const queryTokens = expandQueryTokens(new Set(tokenizeFaqText(query)));
 
   const rankedFaqs = faqs
     .map((faq) => {
       const questionText = normalizeFaqText(faq.question);
       const answerText = normalizeFaqText(faq.answer);
-      const combinedTokens = tokenizeFaqText(`${faq.question} ${faq.answer}`);
+      const subjectText = normalizeFaqText(faq.subject ?? "");
+      const contentText = normalizeFaqText(faq.content ?? "");
+      const combinedText = [questionText, answerText, subjectText, contentText].join(" ");
+      const combinedTokens = tokenizeFaqText(combinedText);
       let score = 0;
 
       for (const token of queryTokens) {
         if (questionText.includes(token)) score += 5;
         else if (answerText.includes(token)) score += 2;
+        else if (subjectText.includes(token)) score += 4;
+        else if (contentText.includes(token)) score += 3;
       }
 
       for (const token of combinedTokens) {
         if (queryTokens.has(token)) {
-          score += questionText.includes(token) ? 3 : 1;
+          score += questionText.includes(token) ? 3 : contentText.includes(token) ? 2 : 1;
         }
       }
 
@@ -192,7 +219,7 @@ const buildRelevantFaqContext = (
     .sort((left, right) => right.score - left.score)
     .slice(0, FAQ_SELECTION_LIMIT);
 
-  const selectedFaqs = rankedFaqs.length > 0 ? rankedFaqs : faqs.slice(0, 1);
+  const selectedFaqs = rankedFaqs.length > 0 ? rankedFaqs : [];
   let totalChars = 0;
   const chunks: string[] = [];
 
@@ -610,6 +637,9 @@ export class OpenAIService {
                   "Campos permitidos: name, email, tournament, category, city, teamName, playersCount, wantsHuman, handoffReason.",
                   "Use null para campos desconhecidos.",
                   "wantsHuman=true somente se o usuario pedir atendimento humano explicitamente.",
+                  "Perguntas sobre preco, valor, custo, inscricao, ticket, horario, data, local, regras, formato, edicao e funcionamento NAO sao pedido de humano.",
+                  "Exemplo: 'quanto custa?' => wantsHuman=false.",
+                  "Exemplo: 'quero falar com um atendente' => wantsHuman=true.",
                   "handoffReason deve ser curta e objetiva quando wantsHuman=true.",
                 ].join(" "),
               },
