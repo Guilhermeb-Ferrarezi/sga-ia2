@@ -9,6 +9,7 @@ import {
   type TaskPriority,
   type TaskStatus,
 } from "@/lib/api";
+import { PERMISSIONS, hasPermission } from "@/lib/rbac";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -119,7 +120,7 @@ const extractContactsFromBoard = (board: PipelineBoard): ContactOption[] => {
 };
 
 export default function TasksPage() {
-  const { token, logout } = useAuth();
+  const { token, logout, user } = useAuth();
   const { toast } = useToast();
   const [tasks, setTasks] = useState<Task[]>([]);
   const [contacts, setContacts] = useState<ContactOption[]>([]);
@@ -131,6 +132,7 @@ export default function TasksPage() {
   const [createForm, setCreateForm] = useState<TaskFormState>(() => emptyTaskForm());
   const [editingTaskId, setEditingTaskId] = useState<number | null>(null);
   const [editForm, setEditForm] = useState<TaskFormState | null>(null);
+  const canManageTasks = hasPermission(user, PERMISSIONS.TASKS_MANAGE);
 
   const load = useCallback(async () => {
     if (!token) return;
@@ -178,7 +180,7 @@ export default function TasksPage() {
   );
 
   const createTask = async () => {
-    if (!token || !canCreate) return;
+    if (!token || !canCreate || !canManageTasks) return;
     setSaving(true);
     try {
       await api.createTask(token, {
@@ -216,7 +218,7 @@ export default function TasksPage() {
   };
 
   const saveTask = async (taskId: number) => {
-    if (!token || !editForm) return;
+    if (!token || !editForm || !canManageTasks) return;
     if (!editForm.title.trim() || !editForm.dueAt) return;
 
     setSaving(true);
@@ -245,7 +247,7 @@ export default function TasksPage() {
   };
 
   const removeTask = async (task: Task) => {
-    if (!token) return;
+    if (!token || !canManageTasks) return;
     const confirmed = window.confirm(
       `Excluir tarefa "${task.title}" de ${task.contact.name || task.contact.waId}?`,
     );
@@ -386,7 +388,7 @@ export default function TasksPage() {
             </select>
           </div>
           <div className="flex items-end justify-end">
-            <Button onClick={() => void createTask()} disabled={!canCreate || saving}>
+            <Button onClick={() => void createTask()} disabled={!canCreate || saving || !canManageTasks}>
               <Plus className="h-4 w-4" />
               Criar tarefa
             </Button>
@@ -465,6 +467,11 @@ export default function TasksPage() {
             Nenhuma tarefa encontrada com os filtros atuais.
           </p>
         )}
+        {!canManageTasks && (
+          <p className="text-sm text-muted-foreground">
+            Seu cargo possui acesso de consulta. Criacao, edicao e exclusao de tarefas estao bloqueadas.
+          </p>
+        )}
         {tasks.map((task) => {
           const isEditing = editingTaskId === task.id && editForm;
           const status = asTaskStatus(task.status);
@@ -511,7 +518,7 @@ export default function TasksPage() {
                         variant="secondary"
                         size="sm"
                         onClick={() => beginEditTask(task)}
-                        disabled={saving}
+                        disabled={saving || !canManageTasks}
                       >
                         <Edit2 className="h-4 w-4" />
                         Editar
@@ -520,7 +527,7 @@ export default function TasksPage() {
                         variant="destructive"
                         size="sm"
                         onClick={() => void removeTask(task)}
-                        disabled={saving}
+                        disabled={saving || !canManageTasks}
                       >
                         <Trash2 className="h-4 w-4" />
                         Excluir
@@ -645,7 +652,7 @@ export default function TasksPage() {
                       <Button
                         size="sm"
                         onClick={() => void saveTask(task.id)}
-                        disabled={saving}
+                        disabled={saving || !canManageTasks}
                       >
                         <Save className="h-4 w-4" />
                         Salvar

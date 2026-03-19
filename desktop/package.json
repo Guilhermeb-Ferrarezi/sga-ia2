@@ -10,7 +10,7 @@
     "start:web": "npm --prefix ../web run dev -- --port 5173 --strictPort",
     "electron:start": "electron-forge start",
     "start:desktop": "npm run start",
-    "web:build": "npm --prefix ../web run build",
+    "web:build": "npm --prefix ../web run build:desktop",
     "package": "npm run web:build && electron-forge package",
     "make": "npm run web:build && electron-forge make",
     "publish": "electron-forge publish",

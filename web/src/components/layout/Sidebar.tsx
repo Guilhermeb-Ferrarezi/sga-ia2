@@ -12,6 +12,7 @@ import {
   UserPlus,
   Volume2,
   Smartphone,
+  Settings2,
   LogOut,
   X,
 } from "lucide-react";
@@ -19,21 +20,24 @@ import { useAuth } from "@/contexts/AuthContext";
 import { useOperationalAlerts } from "@/contexts/OperationalAlertsContext";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { PERMISSIONS, hasPermission, type Permission } from "@/lib/rbac";
 import { cn } from "@/lib/utils";
 
 const links = [
-  { to: "/dashboard", label: "Visao Geral", icon: BarChart3, end: true },
-  { to: "/dashboard/conversations", label: "Conversas", icon: MessageSquareText },
-  { to: "/dashboard/contacts", label: "Contatos", icon: Users },
-  { to: "/dashboard/users/new", label: "Criar usuario", icon: UserPlus },
-  { to: "/dashboard/pipeline", label: "Pipeline", icon: Columns3 },
-  { to: "/dashboard/handoffs", label: "Handoff", icon: Users },
-  { to: "/dashboard/tasks", label: "Tarefas", icon: ListTodo },
-  { to: "/dashboard/faqs", label: "FAQs", icon: HelpCircle },
-  { to: "/dashboard/templates", label: "Templates", icon: FileText },
-  { to: "/dashboard/tags", label: "Tags", icon: Tags },
-  { to: "/dashboard/audios", label: "Audios", icon: Volume2 },
-  { to: "/dashboard/whatsapp-profile", label: "Perfil WhatsApp", icon: Smartphone },
+  { to: "/dashboard", label: "Visao Geral", icon: BarChart3, end: true, permission: PERMISSIONS.DASHBOARD_VIEW },
+  { to: "/dashboard/conversations", label: "Conversas", icon: MessageSquareText, permission: PERMISSIONS.CONVERSATIONS_VIEW },
+  { to: "/dashboard/contacts", label: "Contatos", icon: Users, permission: PERMISSIONS.CONTACTS_VIEW },
+  { to: "/dashboard/users", label: "Usuarios", icon: Users, permission: PERMISSIONS.USERS_MANAGE },
+  { to: "/dashboard/users/new", label: "Criar usuario", icon: UserPlus, permission: PERMISSIONS.USERS_MANAGE },
+  { to: "/dashboard/pipeline", label: "Pipeline", icon: Columns3, permission: PERMISSIONS.PIPELINE_VIEW },
+  { to: "/dashboard/handoffs", label: "Handoff", icon: Users, permission: PERMISSIONS.HANDOFF_VIEW },
+  { to: "/dashboard/tasks", label: "Tarefas", icon: ListTodo, permission: PERMISSIONS.TASKS_VIEW },
+  { to: "/dashboard/faqs", label: "FAQs", icon: HelpCircle, permission: PERMISSIONS.FAQS_VIEW },
+  { to: "/dashboard/templates", label: "Templates", icon: FileText, permission: PERMISSIONS.TEMPLATES_VIEW },
+  { to: "/dashboard/tags", label: "Tags", icon: Tags, permission: PERMISSIONS.TAGS_VIEW },
+  { to: "/dashboard/audios", label: "Audios", icon: Volume2, permission: PERMISSIONS.AUDIOS_VIEW },
+  { to: "/dashboard/whatsapp-profile", label: "Perfil WhatsApp", icon: Smartphone, permission: PERMISSIONS.WHATSAPP_PROFILE_VIEW },
+  { to: "/dashboard/settings", label: "Configuracoes", icon: Settings2 },
 ];
 
 interface SidebarProps {
@@ -42,7 +46,7 @@ interface SidebarProps {
 }
 
 export default function Sidebar({ mobileOpen, onCloseMobile }: SidebarProps) {
-  const { logout } = useAuth();
+  const { logout, user } = useAuth();
   const { summary } = useOperationalAlerts();
 
   useEffect(() => {
@@ -62,7 +66,9 @@ export default function Sidebar({ mobileOpen, onCloseMobile }: SidebarProps) {
   }, [mobileOpen, onCloseMobile]);
 
   const renderLinks = (onNavigate?: () => void) =>
-    links.map(({ to, label, icon: Icon, end }) => (
+    links
+      .filter(({ permission }) => !permission || hasPermission(user, permission as Permission))
+      .map(({ to, label, icon: Icon, end }) => (
       <NavLink
         key={to}
         to={to}

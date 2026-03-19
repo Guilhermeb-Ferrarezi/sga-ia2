@@ -2,7 +2,7 @@ import { AlertTriangle, Clock3, LogOut, Menu, X } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { useOperationalAlerts } from "@/contexts/OperationalAlertsContext";
 import { useWebSocket, type WsConnectionStatus } from "@/contexts/WebSocketContext";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
@@ -96,15 +96,20 @@ export default function Header({
             </div>
           )}
 
-          <Avatar className="h-9 w-9 border border-border">
-            <AvatarFallback className="bg-primary text-primary-foreground text-xs">
-              {user.email.slice(0, 2).toUpperCase()}
-            </AvatarFallback>
-          </Avatar>
-          <div className="hidden text-right lg:block">
-            <p className="text-sm font-medium">{user.email}</p>
-            <p className="text-xs text-muted-foreground">{user.role}</p>
-          </div>  
+          <div className="flex shrink-0 items-center gap-2 rounded-lg px-1 py-1">
+            <Avatar className="h-9 w-9 border border-border">
+              {user.avatarUrl ? (
+                <AvatarImage src={user.avatarUrl} alt="Avatar" />
+              ) : null}
+              <AvatarFallback className="bg-primary text-primary-foreground text-xs">
+                {(user.name ?? user.email).slice(0, 2).toUpperCase()}
+              </AvatarFallback>
+            </Avatar>
+            <div className="hidden text-right lg:block">
+              <p className="text-sm font-medium">{user.name ?? user.email}</p>
+              <p className="text-xs text-muted-foreground">{user.roleLabel}</p>
+            </div>
+          </div>
         </div>
       </div>
     </header>

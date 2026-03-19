@@ -31,6 +31,7 @@ import {
   type PipelineStage,
   type Tag,
 } from "@/lib/api";
+import { PERMISSIONS, hasAnyPermission } from "@/lib/rbac";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -346,7 +347,12 @@ export default function PipelineBoardView() {
   const [savingInlineStageTitle, setSavingInlineStageTitle] = useState(false);
   const [manualLeadForm, setManualLeadForm] = useState<ManualLeadFormState | null>(null);
   const [savingManualLead, setSavingManualLead] = useState(false);
-  const canManageLeads = user?.role === "ADMIN";
+  const canManageLeads = hasAnyPermission(user, [
+    PERMISSIONS.LEADS_MANAGE_STATUS,
+    PERMISSIONS.LEADS_MANAGE_STAGE,
+    PERMISSIONS.LEADS_DELETE,
+    PERMISSIONS.PIPELINE_MANAGE,
+  ]);
   const contextMenuRef = useRef<HTMLDivElement | null>(null);
   const [contextMenuMeasuredHeight, setContextMenuMeasuredHeight] = useState<number | null>(
     null,

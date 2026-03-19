@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Edit2, Plus, Save, ToggleLeft, ToggleRight, Trash2, X } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { api, type Faq } from "@/lib/api";
+import { PERMISSIONS, hasPermission } from "@/lib/rbac";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -14,7 +15,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
 export default function FaqsPage() {
-  const { token } = useAuth();
+  const { token, user } = useAuth();
   const [faqs, setFaqs] = useState<Faq[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
@@ -26,6 +27,7 @@ export default function FaqsPage() {
   const [activeFilter, setActiveFilter] = useState("");
   const [page, setPage] = useState(1);
   const limit = 10;
+  const canManageFaqs = hasPermission(user, PERMISSIONS.FAQS_MANAGE);
 
   const load = useCallback(async () => {
     if (!token) return;
@@ -74,7 +76,7 @@ export default function FaqsPage() {
   };
 
   const save = async () => {
-    if (!token || !question.trim() || !answer.trim()) return;
+    if (!token || !question.trim() || !answer.trim() || !canManageFaqs) return;
     try {
       if (editingId) {
         await api.updateFaq(token, editingId, { question, answer });
@@ -89,7 +91,7 @@ export default function FaqsPage() {
   };
 
   const toggleActive = async (faq: Faq) => {
-    if (!token) return;
+    if (!token || !canManageFaqs) return;
     try {
       await api.updateFaq(token, faq.id, { isActive: !faq.isActive });
       await load();
@@ -99,7 +101,7 @@ export default function FaqsPage() {
   };
 
   const remove = async (id: number) => {
-    if (!token) return;
+    if (!token || !canManageFaqs) return;
     try {
       await api.deleteFaq(token, id);
       await load();
@@ -112,10 +114,16 @@ export default function FaqsPage() {
     <div className="stagger space-y-5">
       <div className="flex items-center justify-between">
         <h2 className="text-xl font-bold">FAQs</h2>
-        <Button size="sm" onClick={() => setShowForm(true)}>
+        <Button size="sm" onClick={() => setShowForm(true)} disabled={!canManageFaqs}>
           <Plus className="h-4 w-4 mr-1" /> Nova FAQ
         </Button>
       </div>
+
+      {!canManageFaqs && (
+        <p className="text-sm text-muted-foreground">
+          Seu cargo pode consultar FAQs, mas nao criar, editar, ativar ou excluir.
+        </p>
+      )}
 
       {showForm && (
         <Card className="anim-pop">
@@ -140,7 +148,7 @@ export default function FaqsPage() {
               />
             </div>
             <div className="flex gap-2">
-              <Button size="sm" onClick={() => void save()}>
+                <Button size="sm" onClick={() => void save()} disabled={!canManageFaqs}>
                 <Save className="h-4 w-4 mr-1" /> Salvar
               </Button>
               <Button size="sm" variant="outline" onClick={resetForm}>
@@ -197,6 +205,7 @@ export default function FaqsPage() {
                   size="sm"
                   className="h-8 w-8 p-0"
                   onClick={() => void toggleActive(faq)}
+                  disabled={!canManageFaqs}
                   title={faq.isActive ? "Desativar" : "Ativar"}
                 >
                   {faq.isActive ? (
@@ -210,6 +219,7 @@ export default function FaqsPage() {
                   size="sm"
                   className="h-8 w-8 p-0"
                   onClick={() => startEdit(faq)}
+                  disabled={!canManageFaqs}
                 >
                   <Edit2 className="h-4 w-4" />
                 </Button>
@@ -218,6 +228,7 @@ export default function FaqsPage() {
                   size="sm"
                   className="h-8 w-8 p-0"
                   onClick={() => void remove(faq.id)}
+                  disabled={!canManageFaqs}
                 >
                   <Trash2 className="h-4 w-4 text-destructive" />
                 </Button>

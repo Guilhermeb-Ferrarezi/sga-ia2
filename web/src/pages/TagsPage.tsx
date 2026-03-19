@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Edit2, Plus, Save, Trash2, X } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { api, type Tag } from "@/lib/api";
+import { PERMISSIONS, hasPermission } from "@/lib/rbac";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -21,7 +22,7 @@ const colorPresets = [
 ];
 
 export default function TagsPage() {
-  const { token } = useAuth();
+  const { token, user } = useAuth();
   const [tags, setTags] = useState<Tag[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
@@ -31,6 +32,7 @@ export default function TagsPage() {
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
   const limit = 20;
+  const canManageTags = hasPermission(user, PERMISSIONS.TAGS_MANAGE);
 
   const load = useCallback(async () => {
     if (!token) return;
@@ -71,7 +73,7 @@ export default function TagsPage() {
   };
 
   const create = async () => {
-    if (!token || !name.trim()) return;
+    if (!token || !name.trim() || !canManageTags) return;
     try {
       if (editingId) {
         await api.updateTag(token, editingId, { name: name.trim(), color });
@@ -86,7 +88,7 @@ export default function TagsPage() {
   };
 
   const remove = async (id: number) => {
-    if (!token) return;
+    if (!token || !canManageTags) return;
     try {
       await api.deleteTag(token, id);
       await load();
@@ -98,6 +100,12 @@ export default function TagsPage() {
   return (
     <div className="stagger space-y-5">
       <h2 className="text-xl font-bold">Tags</h2>
+
+      {!canManageTags && (
+        <p className="text-sm text-muted-foreground">
+          Seu cargo pode consultar tags, mas nao criar, editar ou excluir.
+        </p>
+      )}
 
       <Card>
         <CardHeader className="pb-2">
@@ -124,6 +132,7 @@ export default function TagsPage() {
                     key={preset}
                     type="button"
                     onClick={() => setColor(preset)}
+                    disabled={!canManageTags}
                     className={cn(
                       "h-6 w-6 rounded-md border border-border/60",
                       color.toLowerCase() === preset.toLowerCase() &&
@@ -139,10 +148,11 @@ export default function TagsPage() {
                 onChange={(e) => setColor(e.target.value)}
                 className="h-9 w-28"
                 placeholder="#06b6d4"
+                disabled={!canManageTags}
               />
             </div>
           </div>
-          <Button size="sm" onClick={() => void create()} disabled={!name.trim()}>
+          <Button size="sm" onClick={() => void create()} disabled={!name.trim() || !canManageTags}>
             {editingId ? (
               <>
                 <Save className="h-4 w-4 mr-1" /> Salvar
@@ -154,7 +164,7 @@ export default function TagsPage() {
             )}
           </Button>
           {editingId && (
-            <Button size="sm" variant="outline" onClick={resetForm}>
+            <Button size="sm" variant="outline" onClick={resetForm} disabled={!canManageTags}>
               <X className="h-4 w-4 mr-1" /> Cancelar
             </Button>
           )}
@@ -196,6 +206,7 @@ export default function TagsPage() {
               size="sm"
               className="h-6 w-6 p-0"
               onClick={() => startEdit(tag)}
+              disabled={!canManageTags}
             >
               <Edit2 className="h-3.5 w-3.5" />
             </Button>
@@ -204,6 +215,7 @@ export default function TagsPage() {
               size="sm"
               className="h-6 w-6 p-0"
               onClick={() => void remove(tag.id)}
+              disabled={!canManageTags}
             >
               <Trash2 className="h-3.5 w-3.5 text-destructive" />
             </Button>

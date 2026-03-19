@@ -21,6 +21,7 @@ import { useWebSocket } from "@/contexts/WebSocketContext";
 import { useRetry } from "@/hooks/useRetry";
 import { useSavedFilters } from "@/hooks/useSavedFilters";
 import { api, type PipelineContact } from "@/lib/api";
+import { PERMISSIONS, hasAnyPermission } from "@/lib/rbac";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -135,7 +136,11 @@ export default function ContactsPage() {
   const [batchBusy, setBatchBusy] = useState(false);
   const [auditLog, setAuditLog] = useState<Array<{ id: number; action: string; field: string | null; oldValue: string | null; newValue: string | null; createdAt: string; user: { name: string | null; email: string } | null }>>([]);
   const [auditLoading, setAuditLoading] = useState(false);
-  const canManageLeads = user?.role === "ADMIN";
+  const canManageLeads = hasAnyPermission(user, [
+    PERMISSIONS.LEADS_MANAGE_STATUS,
+    PERMISSIONS.LEADS_MANAGE_STAGE,
+    PERMISSIONS.LEADS_DELETE,
+  ]);
   const contactsListRef = useRef<HTMLDivElement | null>(null);
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 

@@ -1,3 +1,5 @@
+import type { Permission, PresetUserRole, UserRole } from "@/lib/rbac";
+
 const ELECTRON_API_BASE = "https://zap.santos-games.com/api";
 const ELECTRON_WS_BASE = "wss://zap.santos-games.com/api";
 
@@ -17,7 +19,11 @@ export interface AuthUser {
   id: string;
   email: string;
   name: string | null;
-  role: "ADMIN" | "AGENT";
+  avatarUrl: string | null;
+  role: UserRole;
+  roleLabel: string;
+  customRole: AuthCustomRole | null;
+  permissions: Permission[];
   createdAt: string;
 }
 
@@ -25,6 +31,8 @@ export interface LoginResponse {
   token: string;
   user: AuthUser;
 }
+
+export interface ManagedUser extends AuthUser {}
 
 export interface WhatsAppPhoneNumberProfile {
   id: string;
@@ -73,7 +81,37 @@ export interface CreateUserInput {
   email: string;
   password: string;
   name?: string;
-  role?: "ADMIN" | "AGENT";
+  role?: PresetUserRole;
+  customRoleId?: string;
+}
+
+export interface UpdateProfileResponse {
+  user: AuthUser;
+}
+
+export interface UpdateProfileInput {
+  name?: string;
+  email?: string;
+  currentPassword?: string;
+  newPassword?: string;
+  avatar?: File | null;
+}
+
+export interface AuthCustomRole {
+  id: string;
+  name: string;
+  description: string | null;
+  permissions: Permission[];
+}
+
+export interface CustomRoleSummary {
+  id: string;
+  name: string;
+  description: string | null;
+  permissions: Permission[];
+  usersCount: number;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface DashboardOverview {
@@ -445,6 +483,44 @@ export const api = {
     return request<{ user: AuthUser }>("/auth/me", { method: "GET" }, token);
   },
 
+  async updateProfile(
+    token: string,
+    input: UpdateProfileInput | FormData,
+  ): Promise<UpdateProfileResponse> {
+    const formData =
+      input instanceof FormData
+        ? input
+        : (() => {
+            const payload = new FormData();
+            if (input.name !== undefined) payload.set("name", input.name);
+            if (input.email !== undefined) payload.set("email", input.email);
+            if (input.currentPassword !== undefined) {
+              payload.set("currentPassword", input.currentPassword);
+            }
+            if (input.newPassword !== undefined) {
+              payload.set("newPassword", input.newPassword);
+            }
+            if (input.avatar) payload.set("avatar", input.avatar);
+            return payload;
+          })();
+
+    const response = await fetch(`${API_BASE}/auth/profile`, {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${token}` },
+      body: formData,
+    });
+
+    const payload = await parseResponsePayload(response);
+    if (!response.ok) {
+      throw new ApiError(
+        getApiErrorMessage(payload, "Erro ao atualizar perfil"),
+        response.status,
+      );
+    }
+
+    return payload as UpdateProfileResponse;
+  },
+
   async whatsappProfile(token: string): Promise<WhatsAppProfileSummary> {
     return request<WhatsAppProfileSummary>(
       "/whatsapp/profile",
@@ -494,6 +570,69 @@ export const api = {
       },
       token,
     );
+  },
+
+  async users(token: string): Promise<ManagedUser[]> {
+    const response = await request<{ items: ManagedUser[] }>(
+      "/users",
+      { method: "GET" },
+      token,
+    );
+    return response.items;
+  },
+
+  async deleteUser(token: string, userId: string): Promise<void> {
+    await request(`/users/${encodeURIComponent(userId)}`, { method: "DELETE" }, token);
+  },
+
+  async customRoles(token: string): Promise<CustomRoleSummary[]> {
+    const response = await request<{ items: CustomRoleSummary[] }>(
+      "/roles",
+      { method: "GET" },
+      token,
+    );
+    return response.items;
+  },
+
+  async createCustomRole(
+    token: string,
+    input: {
+      name: string;
+      description?: string;
+      permissions: Permission[];
+    },
+  ): Promise<CustomRoleSummary> {
+    return request<CustomRoleSummary>(
+      "/roles",
+      {
+        method: "POST",
+        body: JSON.stringify(input),
+      },
+      token,
+    );
+  },
+
+  async updateCustomRole(
+    token: string,
+    roleId: string,
+    input: {
+      name: string;
+      description?: string;
+      permissions: Permission[];
+    },
+  ): Promise<CustomRoleSummary> {
+    return request<CustomRoleSummary>(
+      `/roles/${encodeURIComponent(roleId)}`,
+      {
+        method: "PUT",
+        body: JSON.stringify(input),
+      },
+      token,
+    );
+  },
+
+  async deleteCustomRole(token: string, roleId: string): Promise<void> {
+    await request(`/roles/${encodeURIComponent(roleId)}`, { method: "DELETE" }, token);
   },
 
   async overview(token: string): Promise<DashboardOverview> {

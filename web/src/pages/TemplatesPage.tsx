@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Edit2, Plus, Save, Trash2, X } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { api, type MessageTemplate } from "@/lib/api";
+import { PERMISSIONS, hasPermission } from "@/lib/rbac";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -15,7 +16,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 
 export default function TemplatesPage() {
-  const { token } = useAuth();
+  const { token, user } = useAuth();
   const [templates, setTemplates] = useState<MessageTemplate[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
@@ -28,6 +29,7 @@ export default function TemplatesPage() {
   const [categoryFilter, setCategoryFilter] = useState("");
   const [page, setPage] = useState(1);
   const limit = 10;
+  const canManageTemplates = hasPermission(user, PERMISSIONS.TEMPLATES_MANAGE);
 
   const load = useCallback(async () => {
     if (!token) return;
@@ -73,7 +75,7 @@ export default function TemplatesPage() {
   };
 
   const save = async () => {
-    if (!token || !title.trim() || !body.trim()) return;
+    if (!token || !title.trim() || !body.trim() || !canManageTemplates) return;
     try {
       if (editingId) {
         await api.updateTemplate(token, editingId, { title, body, category });
@@ -88,7 +90,7 @@ export default function TemplatesPage() {
   };
 
   const remove = async (id: number) => {
-    if (!token) return;
+    if (!token || !canManageTemplates) return;
     try {
       await api.deleteTemplate(token, id);
       await load();
@@ -101,10 +103,16 @@ export default function TemplatesPage() {
     <div className="stagger space-y-5">
       <div className="flex items-center justify-between">
         <h2 className="text-xl font-bold">Templates</h2>
-        <Button size="sm" onClick={() => setShowForm(true)}>
+        <Button size="sm" onClick={() => setShowForm(true)} disabled={!canManageTemplates}>
           <Plus className="h-4 w-4 mr-1" /> Novo Template
         </Button>
       </div>
+
+      {!canManageTemplates && (
+        <p className="text-sm text-muted-foreground">
+          Seu cargo pode consultar templates, mas nao criar, editar ou excluir.
+        </p>
+      )}
 
       {showForm && (
         <Card className="anim-pop">
@@ -137,7 +145,7 @@ export default function TemplatesPage() {
               />
             </div>
             <div className="flex gap-2">
-              <Button size="sm" onClick={() => void save()}>
+              <Button size="sm" onClick={() => void save()} disabled={!canManageTemplates}>
                 <Save className="h-4 w-4 mr-1" /> Salvar
               </Button>
               <Button size="sm" variant="outline" onClick={resetForm}>
@@ -199,6 +207,7 @@ export default function TemplatesPage() {
                   size="sm"
                   className="h-8 w-8 p-0"
                   onClick={() => startEdit(t)}
+                  disabled={!canManageTemplates}
                 >
                   <Edit2 className="h-4 w-4" />
                 </Button>
@@ -207,6 +216,7 @@ export default function TemplatesPage() {
                   size="sm"
                   className="h-8 w-8 p-0"
                   onClick={() => void remove(t.id)}
+                  disabled={!canManageTemplates}
                 >
                   <Trash2 className="h-4 w-4 text-destructive" />
                 </Button>

@@ -72,6 +72,41 @@ export async function uploadToR2(
   return `https://${config.cloudflareAccountId}.r2.cloudflarestorage.com/${bucket}/${normalizedKey}`;
 }
 
+export async function uploadFileToR2(
+  key: string,
+  body: Buffer | Uint8Array,
+  contentType: string,
+): Promise<string> {
+  const bucket = config.cloudflareBucketName;
+  if (!bucket) throw new Error("CLOUDFLARE_BUCKET_NAME not configured");
+
+  try {
+    await getClient().send(
+      new PutObjectCommand({
+        Bucket: bucket,
+        Key: key,
+        Body: body,
+        ContentType: contentType,
+      }),
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const lowered = message.toLowerCase();
+    if (lowered.includes("access denied") || lowered.includes("accessdenied")) {
+      throw new Error(
+        "Access Denied no R2: valide CLOUDFLARE_ACCESS_KEY_ID/CLOUDFLARE_SECRET_ACCESS_KEY, permissao Object Write no bucket e CLOUDFLARE_BUCKET_NAME.",
+      );
+    }
+    throw error;
+  }
+
+  const publicUrl = config.cloudflarePublicUrl;
+  if (publicUrl) {
+    return `${publicUrl.replace(/\/+$/, "")}/${key}`;
+  }
+  return `https://${config.cloudflareAccountId}.r2.cloudflarestorage.com/${bucket}/${key}`;
+}
+
 export interface R2StreamResult {
   body: ReadableStream;
   contentType: string;

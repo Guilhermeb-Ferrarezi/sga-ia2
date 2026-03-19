@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Edit2, Plus, Save, Trash2, Upload, X } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { api, type Audio } from "@/lib/api";
+import { PERMISSIONS, hasPermission } from "@/lib/rbac";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -22,7 +23,7 @@ const formatBytes = (bytes: number): string => {
 };
 
 export default function AudiosPage() {
-  const { token } = useAuth();
+  const { token, user } = useAuth();
   const [audios, setAudios] = useState<Audio[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
@@ -37,11 +38,12 @@ export default function AudiosPage() {
   const [page, setPage] = useState(1);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const limit = 10;
+  const canManageAudios = hasPermission(user, PERMISSIONS.AUDIOS_MANAGE);
 
   const { playingId, duration, currentTime, isPlaying, togglePlay, stopAudio, seek } = useAudioPlayer({ token });
 
   const load = useCallback(async () => {
-    if (!token) return;
+    if (!token || !canManageAudios) return;
     setLoading(true);
     try {
       const data = await api.audios(token, {
@@ -85,7 +87,7 @@ export default function AudiosPage() {
   };
 
   const save = async () => {
-    if (!token) return;
+    if (!token || !canManageAudios) return;
     try {
       if (editingId) {
         await api.updateAudio(token, editingId, { title, category });
@@ -122,10 +124,16 @@ export default function AudiosPage() {
     <div className="stagger space-y-5">
       <div className="flex items-center justify-between">
         <h2 className="text-xl font-bold">Audios</h2>
-        <Button size="sm" onClick={() => { resetForm(); setShowForm(true); }}>
+        <Button size="sm" onClick={() => { resetForm(); setShowForm(true); }} disabled={!canManageAudios}>
           <Plus className="h-4 w-4 mr-1" /> Novo Audio
         </Button>
       </div>
+
+      {!canManageAudios && (
+        <p className="text-sm text-muted-foreground">
+          Seu cargo pode ouvir os audios cadastrados, mas nao enviar, editar ou excluir.
+        </p>
+      )}
 
       {showForm && (
         <Card className="anim-pop">
@@ -145,6 +153,7 @@ export default function AudiosPage() {
                     setFile(f);
                     if (f && !title) setTitle(f.name.replace(/\.[^.]+$/, ""));
                   }}
+                  disabled={!canManageAudios}
                 />
               </div>
             )}
@@ -154,6 +163,7 @@ export default function AudiosPage() {
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
                 placeholder="Ex: Boas-vindas torneio"
+                disabled={!canManageAudios}
               />
             </div>
             <div className="space-y-1">
@@ -162,13 +172,14 @@ export default function AudiosPage() {
                 value={category}
                 onChange={(e) => setCategory(e.target.value)}
                 placeholder="geral"
+                disabled={!canManageAudios}
               />
             </div>
             <div className="flex gap-2">
               <Button
                 size="sm"
                 onClick={() => void save()}
-                disabled={uploading || (!editingId && !file)}
+                disabled={uploading || (!editingId && !file) || !canManageAudios}
               >
                 {uploading ? (
                   <>
@@ -180,7 +191,7 @@ export default function AudiosPage() {
                   </>
                 )}
               </Button>
-              <Button size="sm" variant="outline" onClick={resetForm}>
+              <Button size="sm" variant="outline" onClick={resetForm} disabled={!canManageAudios}>
                 <X className="h-4 w-4 mr-1" /> Cancelar
               </Button>
             </div>
@@ -241,6 +252,7 @@ export default function AudiosPage() {
                     size="sm"
                     className="h-8 w-8 p-0"
                     onClick={() => startEdit(a)}
+                    disabled={!canManageAudios}
                   >
                     <Edit2 className="h-4 w-4" />
                   </Button>
@@ -249,6 +261,7 @@ export default function AudiosPage() {
                     size="sm"
                     className="h-8 w-8 p-0"
                     onClick={() => void remove(a.id)}
+                    disabled={!canManageAudios}
                   >
                     <Trash2 className="h-4 w-4 text-destructive" />
                   </Button>
