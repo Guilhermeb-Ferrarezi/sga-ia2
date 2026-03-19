@@ -28,6 +28,26 @@ type StoredHistoryMessage = {
   body: string;
 };
 
+const trimTrailingMergedUserMessages = (
+  messages: StoredHistoryMessage[],
+  mergedUserMessagesCount: number,
+): StoredHistoryMessage[] => {
+  if (mergedUserMessagesCount <= 0 || messages.length === 0) return messages;
+
+  const trimmed = [...messages];
+  let remaining = mergedUserMessagesCount;
+
+  while (trimmed.length > 0 && remaining > 0) {
+    const lastMessage = trimmed[trimmed.length - 1];
+    if (!lastMessage) break;
+    if (lastMessage.direction !== "in") break;
+    trimmed.pop();
+    remaining -= 1;
+  }
+
+  return trimmed;
+};
+
 export interface LeadExtraction {
   name?: string;
   email?: string;
@@ -70,6 +90,8 @@ const FAQ_MAX_CONTEXT_CHARS = 4000;
 type FaqCandidate = {
   question: string;
   answer: string;
+  content?: string | null;
+  subject?: string | null;
 };
 
 const FAQ_STOP_WORDS = new Set([
@@ -175,7 +197,13 @@ const buildRelevantFaqContext = (
   const chunks: string[] = [];
 
   for (const faq of selectedFaqs) {
-    const section = `P: ${faq.question}\nR: ${faq.answer}`;
+    const sectionParts = [
+      faq.subject ? `Assunto: ${faq.subject}` : null,
+      `P: ${faq.question}`,
+      `R: ${faq.answer}`,
+      faq.content ? `Detalhes:\n${faq.content}` : null,
+    ].filter(Boolean);
+    const section = sectionParts.join("\n");
     if (totalChars > 0 && totalChars + section.length > FAQ_MAX_CONTEXT_CHARS) break;
     chunks.push(section);
     totalChars += section.length;
@@ -459,9 +487,12 @@ export class OpenAIService {
         select: { question: true, answer: true, content: true, subject: true },
       });
       if (faqs.length) {
-        extras.faqs = faqs
-          .map((f) => `P: ${f.question}\nR: ${f.answer}`)
-          .join("\n\n");
+        extras.faqs = buildRelevantFaqContext(
+          faqs,
+          userMessage,
+          historyMessages,
+          extras.contactInfo,
+        );
       }
 
       // Load available audios for the AI to choose from
@@ -491,7 +522,7 @@ export class OpenAIService {
         );
 
         historyMessages = dedupedMessages
-          .map((m: any) => ({
+          .map((m) => ({
             role: (m.direction === "in" ? "user" : "assistant") as "user" | "assistant",
             content: [
               { type: m.direction === "in" ? "input_text" : "output_text", text: m.body },
