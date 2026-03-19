@@ -326,9 +326,22 @@ const MAX_RESUME_PENDING_MESSAGES = 10;
 const MAX_RESUME_PENDING_CONTEXT_CHARS = 4000;
 const HUMAN_HANDOFF_REGEX =
   /\b(atendente|humano|pessoa real|suporte humano|falar com alguem|falar com pessoa|time de atendimento)\b/i;
+const GREETING_ONLY_REGEX =
+  /^(oi+|ola+|olaa+|opa+|opaa+|e ai+|eae+|iae+|fala+|salve+|bom dia|boa tarde|boa noite|hey+|hello+)[!.?, ]*$/i;
 
 const hasExplicitHumanHandoffRequest = (text: string): boolean =>
   HUMAN_HANDOFF_REGEX.test(text);
+
+const isGreetingOnlyMessage = (text: string): boolean => {
+  const normalized = text
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim();
+  return GREETING_ONLY_REGEX.test(normalized);
+};
+
+const buildGreetingReply = (): string => "Fala! Como posso ajudar?";
 
 const shouldTriggerHumanHandoff = (
   userText: string,
@@ -1600,6 +1613,29 @@ const replyPendingContactAfterBotResume = async (
     if (!resumeBacklog) {
       return;
     }
+    if (resumeBacklog.mergedCount === 1 && isGreetingOnlyMessage(resumeBacklog.latestMessage)) {
+      const greetingReply = buildGreetingReply();
+      if (await hasOutboundAfter(prisma, contact.id, resumeBacklog.latestCreatedAt)) {
+        broadcast("ai:done", { phone: waId });
+        return;
+      }
+      if (resumeBacklog.latestMessageId) {
+        await whatsapp.sendTypingIndicator(resumeBacklog.latestMessageId, "text");
+      }
+      await sleep(computeReplyDelayMs(greetingReply));
+      await whatsapp.sendTextMessage(waId, greetingReply);
+      await persistTurn(waId, "assistant", greetingReply, {
+        source: "AI",
+      });
+      broadcast("message:new", {
+        phone: waId,
+        role: "assistant",
+        source: "AI",
+        content: greetingReply,
+      });
+      broadcast("ai:done", { phone: waId });
+      return;
+    }
     const pendingMessageId = resumeBacklog.latestMessageId;
     const resumeMergedText = resumeBacklog.mergedPlainText;
     console.log(
@@ -2654,6 +2690,33 @@ const webhookEvent = async (req: Request): Promise<Response> => {
           preview: userText.slice(0, 120),
         });
 
+        if (isGreetingOnlyMessage(userText)) {
+          const greetingReply = buildGreetingReply();
+          const prismaForGreeting = await getPrismaClient();
+          if (prismaForGreeting) {
+            const latestContact = await prismaForGreeting.contact.findUnique({
+              where: { waId: message.from },
+              select: { botEnabled: true },
+            });
+            if (latestContact && !latestContact.botEnabled) {
+              broadcast("ai:done", { phone: message.from });
+              continue;
+            }
+          }
+
+          await sleep(computeReplyDelayMs(greetingReply));
+          await whatsapp.sendTextMessage(message.from, greetingReply);
+          await persistTurn(message.from, "assistant", greetingReply, { source: "AI" });
+          broadcast("message:new", {
+            phone: message.from,
+            role: "assistant",
+            source: "AI",
+            content: greetingReply,
+          });
+          broadcast("ai:done", { phone: message.from });
+          continue;
+        }
+
         const prisma = await getPrismaClient();
         let aiReply: string;
 
@@ -2914,8 +2977,10 @@ const webhookEvent = async (req: Request): Promise<Response> => {
           // Fire-and-forget: auto-add FAQ if this question was asked by multiple contacts
           void tryAutoFaq(prisma, message.from, userText, aiReply);
           // Cache the reply for the FAQ feedback loop (24h) + semantic cache (12h)
-          void saveFaqFeedbackCache(userText, aiReply);
-          void saveSemanticReplyCache(userText, aiReply);
+          if (!isGreetingOnlyMessage(userText)) {
+            void saveFaqFeedbackCache(userText, aiReply);
+            void saveSemanticReplyCache(userText, aiReply);
+          }
         }
       } catch (error) {
         logWhatsAppPermissionHint(error);
