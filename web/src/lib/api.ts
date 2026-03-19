@@ -149,6 +149,14 @@ export interface DashboardTurn {
   sentBy: { email: string; name: string | null } | null;
 }
 
+export interface DashboardTurnsPage {
+  items: DashboardTurn[];
+  total: number;
+  limit: number;
+  offset: number;
+  hasMore: boolean;
+}
+
 // ── Phase 2 types ──────────────────────────────────────────────────
 
 export interface PipelineStage {
@@ -762,10 +770,12 @@ export const api = {
   async conversationTurns(
     token: string,
     phone: string,
-    limit = 300,
-  ): Promise<DashboardTurn[]> {
-    return request<DashboardTurn[]>(
-      `/dashboard/conversations/${encodeURIComponent(phone)}/turns?limit=${limit}`,
+    options?: { limit?: number; offset?: number },
+  ): Promise<DashboardTurnsPage> {
+    const limit = options?.limit ?? 40;
+    const offset = options?.offset ?? 0;
+    return request<DashboardTurnsPage>(
+      `/dashboard/conversations/${encodeURIComponent(phone)}/turns?limit=${limit}&offset=${offset}`,
       { method: "GET" },
       token,
     );

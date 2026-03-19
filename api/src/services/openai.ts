@@ -272,6 +272,9 @@ export class OpenAIService {
     options?: { triageMissing?: string[] },
   ): Promise<string> {
     const settings = await this.getRuntimeSettings(prisma);
+    console.log(
+      `[openai:webhook] generateReply model=${settings.model}${phone ? ` phone=${phone}` : ""}`,
+    );
     let historyMessages: ChatMessage[] = [];
     let extras: {
       faqs?: string;

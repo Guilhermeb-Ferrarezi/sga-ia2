@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   BookOpen,
+  Check,
   Edit2,
   Filter,
   Plus,
@@ -69,6 +70,8 @@ export default function FaqsPage() {
   const [subjectFilter, setSubjectFilter] = useState("");
   const [faqTypeFilter, setFaqTypeFilter] = useState("");
   const [page, setPage] = useState(1);
+  const [selectedFaqIds, setSelectedFaqIds] = useState<Set<number>>(new Set());
+  const [batchBusy, setBatchBusy] = useState(false);
   const limit = 10;
   const canManageFaqs = hasPermission(user, PERMISSIONS.FAQS_MANAGE);
 
@@ -167,11 +170,91 @@ export default function FaqsPage() {
     if (!token || !canManageFaqs) return;
     try {
       await api.deleteFaq(token, id);
+      setSelectedFaqIds((current) => {
+        const next = new Set(current);
+        next.delete(id);
+        return next;
+      });
       await load();
     } catch {
       /* ignore */
     }
   };
+
+  const toggleFaqSelection = (id: number) => {
+    if (!canManageFaqs) return;
+    setSelectedFaqIds((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const clearSelectedFaqs = () => setSelectedFaqIds(new Set());
+
+  const allVisibleSelected =
+    faqs.length > 0 && faqs.every((faq) => selectedFaqIds.has(faq.id));
+
+  const toggleSelectVisibleFaqs = () => {
+    if (!canManageFaqs) return;
+    setSelectedFaqIds((current) => {
+      const next = new Set(current);
+      if (allVisibleSelected) {
+        faqs.forEach((faq) => next.delete(faq.id));
+      } else {
+        faqs.forEach((faq) => next.add(faq.id));
+      }
+      return next;
+    });
+  };
+
+  const applyBatchActiveState = async (isActive: boolean) => {
+    if (!token || !canManageFaqs || selectedFaqIds.size === 0) return;
+    setBatchBusy(true);
+    try {
+      await Promise.all(
+        [...selectedFaqIds].map((id) =>
+          api.updateFaq(token, id, { isActive }),
+        ),
+      );
+      clearSelectedFaqs();
+      await load();
+    } catch {
+      /* ignore */
+    } finally {
+      setBatchBusy(false);
+    }
+  };
+
+  const removeSelectedFaqs = async () => {
+    if (!token || !canManageFaqs || selectedFaqIds.size === 0) return;
+    const confirmed = window.confirm(
+      `Excluir ${selectedFaqIds.size} FAQ(s) selecionada(s)?`,
+    );
+    if (!confirmed) return;
+
+    setBatchBusy(true);
+    try {
+      await Promise.all([...selectedFaqIds].map((id) => api.deleteFaq(token, id)));
+      clearSelectedFaqs();
+      await load();
+    } catch {
+      /* ignore */
+    } finally {
+      setBatchBusy(false);
+    }
+  };
+
+  const totalPages = Math.max(1, Math.ceil(total / limit));
+  const firstVisibleItem = total === 0 ? 0 : (page - 1) * limit + 1;
+  const lastVisibleItem = total === 0 ? 0 : Math.min(total, page * limit);
+  const pageStart = Math.max(1, page - 2);
+  const pageEnd = Math.min(totalPages, pageStart + 4);
+  const visiblePages = Array.from(
+    { length: Math.max(0, pageEnd - pageStart + 1) },
+    (_, index) => pageStart + index,
+  );
 
   return (
     <motion.div
@@ -377,6 +460,70 @@ export default function FaqsPage() {
         </Card>
       </motion.div>
 
+      {canManageFaqs && (
+        <motion.div
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.2 }}
+        >
+          <Card className="border-border/70">
+            <CardContent className="flex flex-wrap items-center justify-between gap-2 p-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={toggleSelectVisibleFaqs}
+                  disabled={!faqs.length || batchBusy}
+                >
+                  {allVisibleSelected ? "Limpar pagina" : "Selecionar pagina"}
+                </Button>
+                <span className="text-sm text-muted-foreground">
+                  {selectedFaqIds.size > 0
+                    ? `${selectedFaqIds.size} FAQ(s) selecionada(s)`
+                    : "Use o botao redondo em cada card para selecionar varias FAQs"}
+                </span>
+              </div>
+              {selectedFaqIds.size > 0 && (
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => void applyBatchActiveState(true)}
+                    disabled={batchBusy}
+                  >
+                    Ativar
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => void applyBatchActiveState(false)}
+                    disabled={batchBusy}
+                  >
+                    Desativar
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="destructive"
+                    onClick={() => void removeSelectedFaqs()}
+                    disabled={batchBusy}
+                  >
+                    Excluir
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={clearSelectedFaqs}
+                    disabled={batchBusy}
+                  >
+                    Limpar
+                  </Button>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </motion.div>
+      )}
+
       <motion.div
         className="space-y-2"
         initial="hidden"
@@ -401,6 +548,9 @@ export default function FaqsPage() {
         )}
         <AnimatePresence mode="popLayout">
           {faqs.map((faq) => (
+            (() => {
+              const isSelected = selectedFaqIds.has(faq.id);
+              return (
             <motion.div
               key={faq.id}
               variants={listItem}
@@ -408,8 +558,33 @@ export default function FaqsPage() {
               layout
               transition={{ type: "spring", stiffness: 350, damping: 25 }}
             >
-              <Card className="group hover:border-primary/30 transition-colors duration-200">
+              <Card
+                className={`group transition-colors duration-200 ${
+                  isSelected
+                    ? "border-primary/45 bg-primary/5"
+                    : "hover:border-primary/30"
+                }`}
+              >
                 <CardContent className="flex items-start gap-3 p-4">
+                  {canManageFaqs && (
+                    <button
+                      type="button"
+                      onClick={() => toggleFaqSelection(faq.id)}
+                      aria-pressed={isSelected}
+                      className={`mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-full border transition ${
+                        isSelected
+                          ? "border-primary bg-primary text-primary-foreground shadow-[0_0_0_4px_hsl(var(--primary)/0.12)]"
+                          : "border-border/70 bg-background/70 text-muted-foreground hover:border-primary/45 hover:text-primary"
+                      }`}
+                      title={isSelected ? "Remover selecao" : "Selecionar FAQ"}
+                    >
+                      {isSelected ? (
+                        <Check className="h-4 w-4" />
+                      ) : (
+                        <span className="h-2.5 w-2.5 rounded-full bg-current/45" />
+                      )}
+                    </button>
+                  )}
                   <div className="flex-1 min-w-0 space-y-1.5">
                     <div className="flex items-center gap-2 flex-wrap">
                       <p className="font-medium text-base">{faq.question}</p>
@@ -482,6 +657,8 @@ export default function FaqsPage() {
                 </CardContent>
               </Card>
             </motion.div>
+              );
+            })()
           ))}
         </AnimatePresence>
         {!loading && !faqs.length && (
@@ -497,15 +674,28 @@ export default function FaqsPage() {
       </motion.div>
 
       <motion.div
-        className="flex items-center justify-between rounded-lg border border-border/70 bg-card/40 px-3 py-2 text-sm"
+        className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border/70 bg-card/40 px-3 py-3 text-sm"
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         transition={{ delay: 0.3 }}
       >
-        <span className="text-muted-foreground">
-          Pagina {page} de {Math.max(1, Math.ceil(total / limit))}
-        </span>
-        <div className="flex gap-2">
+        <div className="space-y-1">
+          <p className="text-muted-foreground">
+            Pagina {page} de {totalPages}
+          </p>
+          <p className="text-xs text-muted-foreground/80">
+            Mostrando {firstVisibleItem}-{lastVisibleItem} de {total} FAQ(s)
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={page <= 1}
+            onClick={() => setPage(1)}
+          >
+            Primeira
+          </Button>
           <Button
             variant="outline"
             size="sm"
@@ -514,17 +704,38 @@ export default function FaqsPage() {
           >
             Anterior
           </Button>
+          <div className="flex items-center gap-1">
+            {visiblePages.map((pageNumber) => (
+              <Button
+                key={pageNumber}
+                variant={pageNumber === page ? "default" : "ghost"}
+                size="sm"
+                className="min-w-9"
+                onClick={() => setPage(pageNumber)}
+              >
+                {pageNumber}
+              </Button>
+            ))}
+          </div>
           <Button
             variant="outline"
             size="sm"
-            disabled={page >= Math.max(1, Math.ceil(total / limit))}
+            disabled={page >= totalPages}
             onClick={() =>
               setPage((current) =>
-                Math.min(Math.max(1, Math.ceil(total / limit)), current + 1),
+                Math.min(totalPages, current + 1),
               )
             }
           >
             Proxima
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={page >= totalPages}
+            onClick={() => setPage(totalPages)}
+          >
+            Ultima
           </Button>
         </div>
       </motion.div>
