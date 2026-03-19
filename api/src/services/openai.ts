@@ -352,7 +352,12 @@ export class OpenAIService {
     const sections: string[] = [];
 
     if (settings.systemPrompt) {
-      sections.push(settings.systemPrompt);
+      sections.push(
+        [
+          "--- Instrucao principal configurada no painel ---",
+          settings.systemPrompt,
+        ].join("\n"),
+      );
     } else {
       sections.push(
         [
@@ -373,6 +378,38 @@ export class OpenAIService {
         ].join("\n"),
       );
     }
+
+    sections.push(
+      [
+        "\n--- Regras obrigatorias do sistema ---",
+        "- Seja clara, rapida e util.",
+        "- Responda primeiro a duvida principal do usuario e pare assim que isso estiver claro.",
+        "- Por padrao, responda em 1 ou 2 frases curtas.",
+        "- So detalhe mais se o usuario pedir mais informacoes.",
+        "- Use no maximo 1 pergunta curta no final, e apenas se isso ajudar a avancar o atendimento.",
+        "- Faca perguntas objetivas quando faltar contexto.",
+        "- Evite texto longo, enrolacao e respostas sem proximo passo.",
+        "- Nao invente informacoes, valores, datas, regras, links ou edicoes.",
+        "- Priorize triagem de lead para campeonato: nome, campeonato, data, categoria, cidade e time ou quantidade de jogadores.",
+        "- E-mail e opcional: so solicite se fizer sentido, sem travar o atendimento.",
+        "- Se o usuario pedir humano, confirme o encaminhamento e nao insista na automacao.",
+      ].join("\n"),
+    );
+
+    sections.push(
+      [
+        "\n--- Protocolo de uso das FAQs recuperadas ---",
+        "- A secao de FAQs recuperadas abaixo e sua fonte principal para responder sobre campeonatos.",
+        "- Considere que a recuperacao ja trouxe os itens mais relevantes para a mensagem atual.",
+        "- Busque a resposta usando em conjunto: pergunta, resposta, assunto, edicao e detalhes da FAQ.",
+        "- Para perguntas curtas como 'quanto custa?', 'qual o horario?', 'qual a edicao?', 'como funciona?', 'onde e?' e 'como faz para se inscrever?', relacione a pergunta atual com a FAQ recuperada mais proxima, mesmo que o texto nao seja identico.",
+        "- Se duas FAQs forem complementares, combine as informacoes sem contradizer nenhuma.",
+        "- Se a FAQ recuperada trouxer valor, data, horario, regra, local, edicao ou passo a passo, responda diretamente com essa informacao.",
+        "- Se a informacao nao estiver claramente presente nas FAQs recuperadas, diga isso explicitamente e faca uma pergunta objetiva ou ofereca encaminhamento humano.",
+        "- Nunca diga que nao sabe antes de verificar a secao de FAQs recuperadas.",
+        "- Nunca encaminhe para humano so porque a pergunta e sobre preco, funcionamento, regras, data, local, edicao, inscricao ou formato.",
+      ].join("\n"),
+    );
 
     if (extras?.contactInfo) {
       sections.push(`\n--- Informacoes do contato ---\n${extras.contactInfo}`);
@@ -592,7 +629,7 @@ export class OpenAIService {
       body: JSON.stringify({
         model: settings.model,
         input,
-        max_output_tokens: 600,
+        max_output_tokens: 220,
       }),
     });
 

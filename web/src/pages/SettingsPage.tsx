@@ -588,9 +588,12 @@ export default function SettingsPage() {
                       </div>
                       <div className="space-y-2">
                         <Label htmlFor="ai-system-prompt">Prompt base opcional</Label>
-                        <Textarea id="ai-system-prompt" className="min-h-[180px]" value={aiForm.systemPrompt} onChange={(event) => setAiForm((current) => ({ ...current, systemPrompt: event.target.value }))} placeholder="Se preencher, esse texto vira a instrucao principal do assistente." disabled={savingAi} />
+                        <Textarea id="ai-system-prompt" className="min-h-[180px]" value={aiForm.systemPrompt} onChange={(event) => setAiForm((current) => ({ ...current, systemPrompt: event.target.value }))} placeholder="Ex.: Priorize responder com base nas FAQs do campeonato recuperadas no contexto. Use assunto, edicao, pergunta, resposta e detalhes para localizar a melhor resposta. Se a base nao trouxer a informacao, diga isso claramente sem inventar." disabled={savingAi} />
+                        <p className="text-xs text-muted-foreground mt-2">
+                          O texto salvo aqui e complementar: o backend ainda aplica regras fixas para priorizar FAQs recuperadas e evitar respostas inventadas.
+                        </p>
                         <p className="text-xs text-muted-foreground">
-                          Se o prompt base estiver preenchido, ele passa a mandar na construcao do contexto da IA.
+                          Se o prompt base estiver preenchido, ele orienta o comportamento da IA, mas continua combinado com regras fixas de recuperacao e seguranca.
                         </p>
                       </div>
                       <div className="flex items-center justify-between gap-3 rounded-lg border border-border/60 bg-background/50 px-3 py-2 text-sm text-muted-foreground">
