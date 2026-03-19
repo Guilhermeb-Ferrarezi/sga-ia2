@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type UIEvent } from "react";
+import { motion } from "framer-motion";
 import { createPortal } from "react-dom";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
@@ -149,12 +150,12 @@ export default function ContactsPage() {
     setLoading(true);
     try {
       const [board, tagData] = await Promise.all([
-        api.pipelineBoard(token),
+        api.pipelineBoard(token, { limit: 100 }),
         api.tags(token, { limit: 200, offset: 0 }),
       ]);
       const allContacts = [
-        ...board.unassigned,
-        ...board.stages.flatMap((stage) => stage.contacts),
+        ...board.unassigned.items,
+        ...board.stages.flatMap((stage) => stage.items),
       ].sort((a, b) => {
         const aTime = a.lastInteractionAt ? new Date(a.lastInteractionAt).getTime() : 0;
         const bTime = b.lastInteractionAt ? new Date(b.lastInteractionAt).getTime() : 0;
@@ -320,10 +321,10 @@ export default function ContactsPage() {
 
   const refreshAndKeepDetails = async (waId: string) => {
     if (!token) return;
-    const board = await api.pipelineBoard(token);
+    const board = await api.pipelineBoard(token, { limit: 100 });
     const allContacts = [
-      ...board.unassigned,
-      ...board.stages.flatMap((stage) => stage.contacts),
+      ...board.unassigned.items,
+      ...board.stages.flatMap((stage) => stage.items),
     ].sort((a, b) => {
       const aTime = a.lastInteractionAt ? new Date(a.lastInteractionAt).getTime() : 0;
       const bTime = b.lastInteractionAt ? new Date(b.lastInteractionAt).getTime() : 0;
@@ -439,7 +440,7 @@ export default function ContactsPage() {
   };
 
   return (
-    <div className="stagger space-y-5">
+    <motion.div className="space-y-5" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.5, ease: "easeOut" }}>
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h2 className="text-xl font-bold">Contatos</h2>
         <Button variant="secondary" size="sm" onClick={() => void load()} disabled={loading}>
@@ -1055,6 +1056,6 @@ export default function ContactsPage() {
         </div>,
         document.body,
       )}
-    </div>
+    </motion.div>
   );
 }

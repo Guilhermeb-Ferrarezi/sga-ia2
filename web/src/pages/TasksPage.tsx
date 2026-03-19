@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { motion } from "framer-motion";
 import { Edit2, Plus, RefreshCcw, Save, Trash2, X } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { useToast } from "@/contexts/ToastContext";
@@ -102,14 +103,14 @@ const emptyTaskForm = (): TaskFormState => ({
 
 const extractContactsFromBoard = (board: PipelineBoard): ContactOption[] => {
   const map = new Map<string, ContactOption>();
-  for (const contact of board.unassigned) {
+  for (const contact of board.unassigned.items) {
     map.set(contact.waId, {
       waId: contact.waId,
       label: contact.name ? `${contact.name} (${contact.waId})` : contact.waId,
     });
   }
   for (const stage of board.stages) {
-    for (const contact of stage.contacts) {
+    for (const contact of stage.items) {
       map.set(contact.waId, {
         waId: contact.waId,
         label: contact.name ? `${contact.name} (${contact.waId})` : contact.waId,
@@ -144,7 +145,7 @@ export default function TasksPage() {
           status: statusFilter,
           priority: priorityFilter,
         }),
-        api.pipelineBoard(token),
+        api.pipelineBoard(token, { limit: 100 }),
       ]);
       setTasks(taskData);
       setContacts(extractContactsFromBoard(boardData));
@@ -274,7 +275,7 @@ export default function TasksPage() {
   };
 
   return (
-    <div className="stagger space-y-5">
+    <motion.div className="space-y-5" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.5, ease: "easeOut" }}>
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h2 className="text-xl font-bold">Tarefas</h2>
         <Button
@@ -665,6 +666,6 @@ export default function TasksPage() {
           );
         })}
       </div>
-    </div>
+    </motion.div>
   );
 }

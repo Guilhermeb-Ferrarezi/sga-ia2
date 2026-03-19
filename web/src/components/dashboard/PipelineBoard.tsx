@@ -43,6 +43,15 @@ import { Switch } from "@/components/ui/switch";
 import TagBadge from "@/components/dashboard/TagBadge";
 
 type LeadStatus = "open" | "won" | "lost";
+type ColumnKey = "unassigned" | `stage:${number}`;
+type ColumnPaginationState = {
+  page: number;
+  limit: number;
+  offset: number;
+  total: number;
+};
+
+const PIPELINE_PAGE_SIZE = 20;
 
 const leadStatusMeta: Record<LeadStatus, { label: string; badgeClass: string }> = {
   open: {
@@ -108,15 +117,35 @@ const formatDate = (value: string | null): string => {
   }).format(new Date(value));
 };
 
+const getColumnKey = (stageId: number | null): ColumnKey =>
+  stageId === null ? "unassigned" : `stage:${stageId}`;
+
+const getColumnPageNumber = (offset: number, limit: number): number =>
+  Math.floor(offset / Math.max(1, limit)) + 1;
+
+const buildColumnPaginationState = (
+  column: Pick<PipelineBoard["unassigned"], "total" | "limit" | "offset">,
+): ColumnPaginationState => ({
+  page: getColumnPageNumber(column.offset, column.limit),
+  limit: column.limit,
+  offset: column.offset,
+  total: column.total,
+});
+
+const clonePipelineColumn = (column: PipelineBoard["unassigned"]): PipelineBoard["unassigned"] => ({
+  ...column,
+  items: [...column.items],
+});
+
 const findContactInBoard = (
   board: PipelineBoard,
   waId: string,
 ): PipelineContact | null => {
-  const inUnassigned = board.unassigned.find((contact) => contact.waId === waId);
+  const inUnassigned = board.unassigned.items.find((contact) => contact.waId === waId);
   if (inUnassigned) return inUnassigned;
 
   for (const stage of board.stages) {
-    const found = stage.contacts.find((contact) => contact.waId === waId);
+    const found = stage.items.find((contact) => contact.waId === waId);
     if (found) return found;
   }
 
@@ -130,22 +159,24 @@ const moveContactInBoard = (
 ): PipelineBoard => {
   const nextStages = board.stages.map((stage) => ({
     ...stage,
-    contacts: [...stage.contacts],
+    items: [...stage.items],
   }));
-  let nextUnassigned = [...board.unassigned];
+  let nextUnassigned = clonePipelineColumn(board.unassigned);
   let sourceStageId: number | null = null;
   let contactToMove: PipelineContact | null = null;
 
-  const unassignedIndex = nextUnassigned.findIndex((contact) => contact.waId === waId);
+  const unassignedIndex = nextUnassigned.items.findIndex((contact) => contact.waId === waId);
   if (unassignedIndex >= 0) {
     sourceStageId = null;
-    [contactToMove] = nextUnassigned.splice(unassignedIndex, 1);
+    [contactToMove] = nextUnassigned.items.splice(unassignedIndex, 1);
+    nextUnassigned.total = Math.max(0, nextUnassigned.total - 1);
   } else {
     for (const stage of nextStages) {
-      const contactIndex = stage.contacts.findIndex((contact) => contact.waId === waId);
+      const contactIndex = stage.items.findIndex((contact) => contact.waId === waId);
       if (contactIndex < 0) continue;
       sourceStageId = stage.id;
-      [contactToMove] = stage.contacts.splice(contactIndex, 1);
+      [contactToMove] = stage.items.splice(contactIndex, 1);
+      stage.total = Math.max(0, stage.total - 1);
       break;
     }
   }
@@ -160,7 +191,10 @@ const moveContactInBoard = (
   };
 
   if (targetStageId === null) {
-    nextUnassigned = [movedContact, ...nextUnassigned];
+    nextUnassigned.total += 1;
+    if (nextUnassigned.offset === 0) {
+      nextUnassigned.items = [movedContact, ...nextUnassigned.items].slice(0, nextUnassigned.limit);
+    }
     return {
       ...board,
       unassigned: nextUnassigned,
@@ -171,7 +205,10 @@ const moveContactInBoard = (
   const targetStage = nextStages.find((stage) => stage.id === targetStageId);
   if (!targetStage) return board;
 
-  targetStage.contacts = [movedContact, ...targetStage.contacts];
+  targetStage.total += 1;
+  if (targetStage.offset === 0) {
+    targetStage.items = [movedContact, ...targetStage.items].slice(0, targetStage.limit);
+  }
 
   return {
     ...board,
@@ -261,10 +298,16 @@ const buildDetailsForm = (contact: PipelineContact): DetailsFormState => ({
 type VirtualizedContactListProps = {
   contacts: PipelineContact[];
   stageId: number | null;
+  scrollKey: string;
   renderContactCard: (contact: PipelineContact, stageId: number | null) => JSX.Element;
 };
 
-function VirtualizedContactList({ contacts, stageId, renderContactCard }: VirtualizedContactListProps) {
+function VirtualizedContactList({
+  contacts,
+  stageId,
+  scrollKey,
+  renderContactCard,
+}: VirtualizedContactListProps) {
   const parentRef = useRef<HTMLDivElement | null>(null);
   const rowVirtualizer = useVirtualizer({
     count: contacts.length,
@@ -272,6 +315,10 @@ function VirtualizedContactList({ contacts, stageId, renderContactCard }: Virtua
     estimateSize: () => 132,
     overscan: 8,
   });
+
+  useEffect(() => {
+    parentRef.current?.scrollTo({ top: 0 });
+  }, [scrollKey]);
 
   if (!contacts.length) {
     return (
@@ -282,7 +329,7 @@ function VirtualizedContactList({ contacts, stageId, renderContactCard }: Virtua
   }
 
   return (
-    <div ref={parentRef} className="h-full overflow-y-auto p-2">
+    <div ref={parentRef} className="h-full min-h-0 overflow-y-auto p-2">
       <div className="relative" style={{ height: `${rowVirtualizer.getTotalSize()}px` }}>
         {rowVirtualizer.getVirtualItems().map((virtualRow) => {
           const contact = contacts[virtualRow.index];
@@ -1148,7 +1195,7 @@ export default function PipelineBoardView() {
     <div
         key={stageId ?? "unassigned"}
         className={cn(
-          "flex w-72 shrink-0 flex-col self-start overflow-hidden rounded-xl border border-border/60 bg-card/50 transition",
+          "flex min-h-0 w-72 shrink-0 flex-col self-start overflow-hidden rounded-xl border border-border/60 bg-card/50 transition",
           leadDropTargetKey === stageKey && "border-primary shadow-[0_0_0_2px_hsl(var(--primary)/0.35)]",
           stageId !== null && deletingStageId === stageId && "anim-remove pointer-events-none opacity-70",
         )}
@@ -1161,7 +1208,7 @@ export default function PipelineBoardView() {
         }}
       >
         <div
-          className="flex items-center gap-2 rounded-t-xl px-3 py-2.5"
+          className="flex shrink-0 items-center gap-2 rounded-t-xl px-3 py-2.5"
           style={{ borderBottom: `3px solid ${color}` }}
         >
           <span
@@ -1233,14 +1280,15 @@ export default function PipelineBoardView() {
             {filteredContacts.length}
           </span>
         </div>
-      <div className="flex-1">
+      <div className="min-h-0 flex-1">
         <VirtualizedContactList
           contacts={filteredContacts}
           stageId={stageId}
+          scrollKey={`${stageKey}:${filteredContacts.length}`}
           renderContactCard={renderContactCard}
         />
       </div>
-      <div className="border-t border-border/60 px-2 py-1.5 text-[11px] text-muted-foreground">
+      <div className="shrink-0 border-t border-border/60 px-2 py-1.5 text-[11px] text-muted-foreground">
         <div className="flex items-center justify-between">
           <span>{filteredContacts.length} lead(s)</span>
           <span>Rolagem otimizada</span>
@@ -1706,8 +1754,8 @@ export default function PipelineBoardView() {
       </Card>
 
       <div className="flex items-start gap-4 overflow-x-auto pb-4">
-        {renderColumn(null, board.unassigned)}
-        {board.stages.map((stage) => renderColumn(stage, stage.contacts))}
+        {renderColumn(null, board.unassigned.items)}
+        {board.stages.map((stage) => renderColumn(stage, stage.items))}
       </div>
 
       {contextMenu && contextMenuPosition && (

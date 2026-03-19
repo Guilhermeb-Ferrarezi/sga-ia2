@@ -11,6 +11,12 @@ import { AuthService } from "./services/auth";
 import { toPublicUser, type PublicUser } from "./services/auth";
 import { DashboardService } from "./services/dashboard";
 import { OpenAIService } from "./services/openai";
+import { buildOpenApiDocument, renderSwaggerUiHtml } from "./services/swagger";
+import {
+  resolveAiSettings,
+  saveAiSettings,
+  type AiSettingsInput,
+} from "./services/aiSettings";
 import {
   extractInboundMessages,
   isWhatsAppPermissionError,
@@ -50,13 +56,8 @@ import {
 
 const openAI = new OpenAIService(
   config.openaiApiKey,
-  config.openaiModel,
   config.appName,
   config.openaiTranscriptionModel,
-  config.assistantLanguage,
-  config.assistantPersonality,
-  config.assistantStyle,
-  config.assistantSystemPrompt,
 );
 const auth = new AuthService({
   jwtSecret: config.jwtSecret,
@@ -171,6 +172,14 @@ const authMePaths = new Set<string>([
   `${config.apiBasePath}/auth/me`,
   "/auth/me",
 ]);
+const openApiJsonPaths = new Set<string>([
+  `${config.apiBasePath}/openapi.json`,
+  "/openapi.json",
+]);
+const swaggerUiPaths = new Set<string>([
+  `${config.apiBasePath}/swagger`,
+  "/swagger",
+]);
 const authProfilePaths = new Set<string>([
   `${config.apiBasePath}/auth/profile`,
   "/auth/profile",
@@ -216,6 +225,10 @@ const pipelineStagesPrefix = [
 const pipelineBoardPaths = new Set<string>([
   `${config.apiBasePath}/pipeline/board`,
   "/pipeline/board",
+]);
+const pipelineBoardColumnPaths = new Set<string>([
+  `${config.apiBasePath}/pipeline/board/column`,
+  "/pipeline/board/column",
 ]);
 const contactsPaths = new Set<string>([
   `${config.apiBasePath}/contacts`,
@@ -297,13 +310,20 @@ const whatsappProfilePaths = new Set<string>([
   `${config.apiBasePath}/whatsapp/profile`,
   "/whatsapp/profile",
 ]);
+const aiSettingsPaths = new Set<string>([
+  `${config.apiBasePath}/settings/ai`,
+  "/settings/ai",
+]);
 const wsUpgradePaths = new Set<string>([
   `${config.apiBasePath}/ws`,
   "/ws",
 ]);
 
 const processedMessageIds = new Map<string, number>();
+const resumedBotReplyLocks = new Set<string>();
 const MESSAGE_ID_TTL_MS = 10 * 60 * 1000;
+const MAX_RESUME_PENDING_MESSAGES = 10;
+const MAX_RESUME_PENDING_CONTEXT_CHARS = 4000;
 const HUMAN_HANDOFF_REGEX =
   /\b(atendente|humano|pessoa real|suporte humano|falar com alguem|falar com pessoa|time de atendimento)\b/i;
 
@@ -324,6 +344,339 @@ type OperationalAlertsSummary = {
   criticalHandoffs: number;
   updatedAt: string;
 };
+
+type HandoffStatusValue =
+  | "NONE"
+  | "QUEUED"
+  | "ASSIGNED"
+  | "IN_PROGRESS"
+  | "RESOLVED";
+
+type MessageSourceValue = "USER" | "AI" | "AGENT" | "SYSTEM";
+
+type PipelineStatusFilterValue = "all" | "open" | "won" | "lost";
+type PipelineHandoffFilterValue = "all" | "yes" | "no";
+type PipelineBotFilterValue = "all" | "on" | "off";
+type PipelineTriageFilterValue = "all" | "done" | "pending";
+
+type PipelineQueryFilters = {
+  searchTerm: string;
+  statusFilter: PipelineStatusFilterValue;
+  handoffFilter: PipelineHandoffFilterValue;
+  botFilter: PipelineBotFilterValue;
+  triageFilter: PipelineTriageFilterValue;
+};
+
+type HandoffStateSnapshot = {
+  handoffRequested?: boolean | null;
+  handoffStatus?: string | null;
+  handoffAssignedToUserId?: string | null;
+  handoffAssignedAt?: Date | null;
+  handoffFirstHumanReplyAt?: Date | null;
+};
+
+type ResumePendingMessage = {
+  body: string;
+  waMessageId: string | null;
+  createdAt: Date;
+};
+
+const ACTIVE_HANDOFF_STATUSES: HandoffStatusValue[] = [
+  "QUEUED",
+  "ASSIGNED",
+  "IN_PROGRESS",
+];
+
+const resumedReplyContactSelect = {
+  id: true,
+  waId: true,
+  name: true,
+  email: true,
+  tournament: true,
+  eventDate: true,
+  category: true,
+  city: true,
+  teamName: true,
+  playersCount: true,
+  age: true,
+  level: true,
+  stageId: true,
+  triageCompleted: true,
+  botEnabled: true,
+  handoffRequested: true,
+} satisfies Prisma.ContactSelect;
+
+const PIPELINE_PAGE_SIZE_DEFAULT = 20;
+const PIPELINE_PAGE_SIZE_MIN = 5;
+const PIPELINE_PAGE_SIZE_MAX = 100;
+const VALID_PIPELINE_STATUS_FILTERS = new Set<PipelineStatusFilterValue>([
+  "all",
+  "open",
+  "won",
+  "lost",
+]);
+const VALID_PIPELINE_HANDOFF_FILTERS = new Set<PipelineHandoffFilterValue>([
+  "all",
+  "yes",
+  "no",
+]);
+const VALID_PIPELINE_BOT_FILTERS = new Set<PipelineBotFilterValue>([
+  "all",
+  "on",
+  "off",
+]);
+const VALID_PIPELINE_TRIAGE_FILTERS = new Set<PipelineTriageFilterValue>([
+  "all",
+  "done",
+  "pending",
+]);
+
+const PIPELINE_CONTACT_INCLUDE = {
+  tags: { include: { tag: true } },
+  messages: {
+    orderBy: { createdAt: "desc" },
+    take: 1,
+    select: { body: true, createdAt: true },
+  },
+} satisfies Prisma.ContactInclude;
+
+const activeHandoffWhere = (): Prisma.ContactWhereInput => ({
+  OR: [
+    { handoffRequested: true },
+    { handoffStatus: { in: ACTIVE_HANDOFF_STATUSES } },
+  ],
+});
+
+const parseBoundedInteger = (
+  raw: string | null,
+  defaultValue: number,
+  min: number,
+  max: number,
+): number => {
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed)) return defaultValue;
+  return Math.min(max, Math.max(min, parsed));
+};
+
+const parsePipelineStageId = (raw: string | null): number | null | "invalid" => {
+  if (raw === null || raw === "" || raw === "null" || raw === "unassigned") {
+    return null;
+  }
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed <= 0) return "invalid";
+  return parsed;
+};
+
+const parsePipelineFilters = (url: URL): PipelineQueryFilters => {
+  const statusRaw = url.searchParams.get("statusFilter")?.trim().toLowerCase() ?? "all";
+  const handoffRaw = url.searchParams.get("handoffFilter")?.trim().toLowerCase() ?? "all";
+  const botRaw = url.searchParams.get("botFilter")?.trim().toLowerCase() ?? "all";
+  const triageRaw = url.searchParams.get("triageFilter")?.trim().toLowerCase() ?? "all";
+
+  return {
+    searchTerm: url.searchParams.get("searchTerm")?.trim() ?? "",
+    statusFilter: VALID_PIPELINE_STATUS_FILTERS.has(statusRaw as PipelineStatusFilterValue)
+      ? (statusRaw as PipelineStatusFilterValue)
+      : "all",
+    handoffFilter: VALID_PIPELINE_HANDOFF_FILTERS.has(handoffRaw as PipelineHandoffFilterValue)
+      ? (handoffRaw as PipelineHandoffFilterValue)
+      : "all",
+    botFilter: VALID_PIPELINE_BOT_FILTERS.has(botRaw as PipelineBotFilterValue)
+      ? (botRaw as PipelineBotFilterValue)
+      : "all",
+    triageFilter: VALID_PIPELINE_TRIAGE_FILTERS.has(triageRaw as PipelineTriageFilterValue)
+      ? (triageRaw as PipelineTriageFilterValue)
+      : "all",
+  };
+};
+
+const buildPipelineContactsWhere = (
+  stageId: number | null,
+  filters: PipelineQueryFilters,
+): Prisma.ContactWhereInput => {
+  const where: Prisma.ContactWhereInput = { stageId };
+
+  if (filters.statusFilter !== "all") {
+    where.leadStatus = filters.statusFilter;
+  }
+
+  if (filters.handoffFilter === "yes") {
+    where.handoffRequested = true;
+  } else if (filters.handoffFilter === "no") {
+    where.handoffRequested = false;
+  }
+
+  if (filters.botFilter === "on") {
+    where.botEnabled = true;
+  } else if (filters.botFilter === "off") {
+    where.botEnabled = false;
+  }
+
+  if (filters.triageFilter === "done") {
+    where.triageCompleted = true;
+  } else if (filters.triageFilter === "pending") {
+    where.triageCompleted = false;
+  }
+
+  if (filters.searchTerm) {
+    const contains = { contains: filters.searchTerm, mode: "insensitive" as const };
+    where.OR = [
+      { name: contains },
+      { waId: contains },
+      { email: contains },
+      { tournament: contains },
+      { city: contains },
+      { category: contains },
+      { teamName: contains },
+      { messages: { some: { body: contains } } },
+    ];
+  }
+
+  return where;
+};
+
+const buildPipelineCacheKey = (scope: string, url: URL): string => {
+  const sortedParams = new URLSearchParams(
+    [...url.searchParams.entries()].sort(([left], [right]) => left.localeCompare(right)),
+  );
+  const suffix = sortedParams.toString() || "default";
+  return `${DASHBOARD_CACHE_PREFIX}pipeline:${scope}:${suffix}`;
+};
+
+const loadPipelineColumnPage = async (
+  prisma: PrismaClient,
+  stageId: number | null,
+  filters: PipelineQueryFilters,
+  limit: number,
+  requestedOffset: number,
+) => {
+  const where = buildPipelineContactsWhere(stageId, filters);
+  const total = await prisma.contact.count({ where });
+  const maxOffset = total > 0 ? Math.floor((total - 1) / limit) * limit : 0;
+  const offset = Math.min(Math.max(0, requestedOffset), maxOffset);
+  const items = await prisma.contact.findMany({
+    where,
+    include: PIPELINE_CONTACT_INCLUDE,
+    orderBy: { lastInteractionAt: "desc" },
+    skip: offset,
+    take: limit,
+  });
+
+  return {
+    items,
+    total,
+    limit,
+    offset,
+  };
+};
+
+const deriveHandoffStatus = (contact: HandoffStateSnapshot): HandoffStatusValue => {
+  const currentStatus = contact.handoffStatus?.trim().toUpperCase() ?? "";
+  if (
+    currentStatus === "QUEUED" ||
+    currentStatus === "ASSIGNED" ||
+    currentStatus === "IN_PROGRESS" ||
+    currentStatus === "RESOLVED"
+  ) {
+    return currentStatus;
+  }
+
+  if (contact.handoffRequested) {
+    if (contact.handoffFirstHumanReplyAt) return "IN_PROGRESS";
+    if (contact.handoffAssignedToUserId) return "ASSIGNED";
+    return "QUEUED";
+  }
+
+  return "NONE";
+};
+
+const buildQueuedHandoffState = (
+  reason: string,
+  handoffAt: Date = new Date(),
+): Prisma.ContactUncheckedUpdateInput => ({
+  botEnabled: false,
+  handoffRequested: true,
+  handoffStatus: "QUEUED",
+  handoffReason: reason,
+  handoffAt,
+  handoffAssignedAt: null,
+  handoffAssignedToUserId: null,
+  handoffFirstHumanReplyAt: null,
+  handoffResolvedAt: null,
+  handoffResolvedByUserId: null,
+});
+
+const buildAssignedHandoffState = (
+  contact: HandoffStateSnapshot,
+  userId: string,
+  assignedAt: Date = new Date(),
+): Prisma.ContactUncheckedUpdateInput => ({
+  botEnabled: false,
+  handoffRequested: true,
+  handoffStatus: contact.handoffFirstHumanReplyAt ? "IN_PROGRESS" : "ASSIGNED",
+  handoffAssignedToUserId: userId,
+  handoffAssignedAt: contact.handoffAssignedAt ?? assignedAt,
+  handoffResolvedAt: null,
+  handoffResolvedByUserId: null,
+});
+
+const buildReleasedHandoffState = (): Prisma.ContactUncheckedUpdateInput => ({
+  botEnabled: false,
+  handoffRequested: true,
+  handoffStatus: "QUEUED",
+  handoffAssignedToUserId: null,
+  handoffAssignedAt: null,
+  handoffFirstHumanReplyAt: null,
+  handoffResolvedAt: null,
+  handoffResolvedByUserId: null,
+});
+
+const buildInProgressHandoffState = (
+  contact: HandoffStateSnapshot,
+  userId: string,
+  respondedAt: Date = new Date(),
+): Prisma.ContactUncheckedUpdateInput => ({
+  botEnabled: false,
+  handoffRequested: true,
+  handoffStatus: "IN_PROGRESS",
+  handoffAssignedToUserId: contact.handoffAssignedToUserId ?? userId,
+  handoffAssignedAt: contact.handoffAssignedAt ?? respondedAt,
+  handoffFirstHumanReplyAt: contact.handoffFirstHumanReplyAt ?? respondedAt,
+  handoffResolvedAt: null,
+  handoffResolvedByUserId: null,
+});
+
+const buildResolvedHandoffState = (
+  userId: string,
+  resolvedAt: Date = new Date(),
+): Prisma.ContactUncheckedUpdateInput => ({
+  botEnabled: true,
+  handoffRequested: false,
+  handoffStatus: "RESOLVED",
+  handoffReason: null,
+  handoffAt: null,
+  handoffAssignedAt: null,
+  handoffAssignedToUserId: null,
+  handoffFirstHumanReplyAt: null,
+  handoffResolvedAt: resolvedAt,
+  handoffResolvedByUserId: userId,
+});
+
+const buildNoHandoffState = (): Partial<Prisma.ContactUncheckedCreateInput> => ({
+  handoffRequested: false,
+  handoffStatus: "NONE",
+  handoffReason: null,
+  handoffAt: null,
+  handoffAssignedAt: null,
+  handoffAssignedToUserId: null,
+  handoffFirstHumanReplyAt: null,
+  handoffResolvedAt: null,
+  handoffResolvedByUserId: null,
+  botEnabled: true,
+});
+
+const buildHandoffAcknowledgement = (): string =>
+  "Perfeito. Um atendente do nosso time vai verificar essa informação e continuar seu atendimento em instantes.";
 
 const computeMissingLeadFields = (contact: ContactTriageSnapshot): string[] => {
   const missing: string[] = [];
@@ -506,7 +859,7 @@ const tryAutoTask = async (
   userMessage: string,
 ): Promise<void> => {
   try {
-    const taskIntent = await openAI.detectTaskIntent(userMessage);
+    const taskIntent = await openAI.detectTaskIntent(userMessage, prisma);
     if (!taskIntent) return;
 
     await prisma.task.create({
@@ -544,6 +897,7 @@ const tryAutoSummaryOnStageChange = async (
   if (newStageId === null) return;
 
   try {
+    const aiSettings = await openAI.getRuntimeSettings(prisma);
     const stage = await prisma.pipelineStage.findUnique({
       where: { id: newStageId },
       select: { name: true },
@@ -567,7 +921,7 @@ const tryAutoSummaryOnStageChange = async (
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: config.openaiModel,
+        model: aiSettings.model,
         input: [
           {
             role: "system",
@@ -654,7 +1008,9 @@ const runHandoffEscalation = async (): Promise<void> => {
     // Find contacts waiting for handoff > 15 min that still have no human response
     const staleHandoffs = await prisma.contact.findMany({
       where: {
-        handoffRequested: true,
+        AND: [
+          activeHandoffWhere(),
+        ],
         botEnabled: false,
         handoffAt: {
           not: null,
@@ -667,7 +1023,7 @@ const runHandoffEscalation = async (): Promise<void> => {
         name: true,
         handoffAt: true,
         messages: {
-          where: { direction: "out" },
+          where: { direction: "out", source: "SYSTEM" },
           orderBy: { createdAt: "desc" },
           take: 1,
           select: { createdAt: true, body: true },
@@ -675,27 +1031,44 @@ const runHandoffEscalation = async (): Promise<void> => {
       },
     });
 
+    const agentReplies = await prisma.message.findMany({
+      where: {
+        contactId: { in: staleHandoffs.map((contact) => contact.id) },
+        direction: "out",
+        source: "AGENT",
+      },
+      orderBy: { createdAt: "desc" },
+      select: { contactId: true, createdAt: true },
+    });
+
+    const latestAgentReplyByContact = new Map<number, Date>();
+    for (const message of agentReplies) {
+      if (!latestAgentReplyByContact.has(message.contactId)) {
+        latestAgentReplyByContact.set(message.contactId, message.createdAt);
+      }
+    }
+
     for (const contact of staleHandoffs) {
-      const lastOut = contact.messages[0];
-      // Only escalate if the last outbound message was BEFORE handleoff (= no human replied)
-      const lastOutTime = lastOut?.createdAt?.getTime() ?? 0;
+      const lastSystemOut = contact.messages[0];
+      const latestAgentReply = latestAgentReplyByContact.get(contact.id);
       const handoffTime = contact.handoffAt?.getTime() ?? 0;
 
-      // Skip if a human already replied after handoff
-      if (lastOutTime > handoffTime) continue;
+      // Skip if a human already replied after handoff.
+      if ((latestAgentReply?.getTime() ?? 0) > handoffTime) continue;
 
       // Skip if we already sent an escalation follow-up (check body pattern)
-      if (lastOut?.body?.includes("ainda estamos buscando")) continue;
+      if (lastSystemOut?.body?.includes("nosso time segue analisando")) continue;
 
       const waitMin = Math.floor((Date.now() - handoffTime) / 60_000);
-      const followUp = `Oi${contact.name ? ` ${contact.name}` : ""}, ainda estamos buscando um atendente para voce. Tempo de espera: ${waitMin} min. Obrigado pela paciencia!`;
+      const followUp = `Oi${contact.name ? ` ${contact.name}` : ""}, nosso time segue analisando sua solicitacao. Tempo de espera atual: ${waitMin} min. Obrigado pela paciencia!`;
 
       try {
         await whatsapp.sendTextMessage(contact.waId, followUp);
-        await persistTurn(contact.waId, "assistant", followUp);
+        await persistTurn(contact.waId, "assistant", followUp, { source: "SYSTEM" });
         broadcast("message:new", {
           phone: contact.waId,
           role: "assistant",
+          source: "SYSTEM",
           content: followUp,
         });
         broadcast("handoff:escalation", {
@@ -735,7 +1108,6 @@ const VALID_LEAD_STATUS = new Set(["open", "won", "lost"]);
 const VALID_TASK_STATUS = new Set(["open", "in_progress", "done", "cancelled"]);
 const VALID_TASK_PRIORITY = new Set(["low", "medium", "high", "urgent"]);
 const ALERTS_BROADCAST_INTERVAL_MS = 20_000;
-const handoffAssignments = new Map<string, { owner: string; assignedAt: number }>();
 let lastBroadcastedAlertsSignature = "";
 let alertsBroadcastInterval: ReturnType<typeof setInterval> | null = null;
 const DASHBOARD_CACHE_PREFIX = "esports:dashboard:";
@@ -801,11 +1173,13 @@ const getOperationalAlertsSummary = async (
       },
     }),
     prisma.contact.count({
-      where: { handoffRequested: true },
+      where: activeHandoffWhere(),
     }),
     prisma.contact.count({
       where: {
-        handoffRequested: true,
+        AND: [
+          activeHandoffWhere(),
+        ],
         handoffAt: {
           not: null,
           lte: criticalThreshold,
@@ -912,7 +1286,7 @@ const tryAutoFaq = async (
     const uniqueContacts = new Set(similarMessages.map((m) => m.contactId));
     if (uniqueContacts.size < 1) return;
 
-    const suggestion = await openAI.suggestFaqEntry(userMessage, aiReply);
+    const suggestion = await openAI.suggestFaqEntry(userMessage, aiReply, prisma);
     if (!suggestion) return;
 
     // Check if a similar FAQ already exists before creating
@@ -1009,8 +1383,12 @@ const persistTurn = async (
   phone: string,
   role: "user" | "assistant",
   content: string,
-  externalMessageId?: string,
-  contactName?: string,
+  options?: {
+    externalMessageId?: string;
+    contactName?: string;
+    source?: MessageSourceValue;
+    sentByUserId?: string | null;
+  },
 ): Promise<void> => {
   const prisma = await getPrismaClient();
   if (!prisma) return;
@@ -1023,24 +1401,25 @@ const persistTurn = async (
       },
       create: {
         waId: phone,
-        name: contactName || null,
+        name: options?.contactName || null,
         lastInteractionAt: new Date(),
       },
     });
 
     if (
-      contactName &&
-      contactName.trim() &&
-      (contact.name ?? "").trim().toLowerCase() !== contactName.trim().toLowerCase()
+      options?.contactName &&
+      options.contactName.trim() &&
+      (contact.name ?? "").trim().toLowerCase() !== options.contactName.trim().toLowerCase()
     ) {
       await prisma.contact.update({
         where: { id: contact.id },
-        data: { name: contactName.trim() },
+        data: { name: options.contactName.trim() },
       });
     }
 
     const direction = role === "user" ? "in" : "out";
-    const waMessageId = direction === "in" ? externalMessageId : undefined;
+    const source = options?.source ?? (role === "user" ? "USER" : "AI");
+    const waMessageId = direction === "in" ? options?.externalMessageId : undefined;
 
     if (waMessageId) {
       const existing = await prisma.message.findFirst({
@@ -1057,13 +1436,396 @@ const persistTurn = async (
       data: {
         contactId: contact.id,
         direction,
+        source,
         body: content,
+        sentByUserId: options?.sentByUserId ?? null,
         waMessageId,
       },
     });
     void invalidateDashboardCaches();
   } catch (error) {
     console.error(`[phone:${phone}] failed to persist ${role} turn`, error);
+  }
+};
+
+const buildResumePendingContext = (
+  pendingMessages: ResumePendingMessage[],
+): {
+  latestMessage: string;
+  latestMessageId: string | null;
+  latestCreatedAt: Date;
+  mergedCount: number;
+  mergedPlainText: string;
+  prompt: string;
+} | null => {
+  const normalized = pendingMessages
+    .map((message) => ({
+      ...message,
+      body: message.body.trim(),
+    }))
+    .filter((message) => message.body && message.body !== "[mensagem nao processada]")
+    .slice(-MAX_RESUME_PENDING_MESSAGES);
+
+  if (!normalized.length) return null;
+
+  let keptMessages = [...normalized];
+  const renderPrompt = (messages: ResumePendingMessage[]): string => {
+    const latest = messages[messages.length - 1];
+    const latestBody = latest?.body ?? "";
+    return [
+      "O bot foi retomado apos uma pausa ou handoff.",
+      "Estas foram as mensagens mais recentes do usuario que ficaram sem resposta. Considere TODO o bloco antes de responder.",
+      ...messages.map((message, index) => `${index + 1}. ${message.body}`),
+      `Pendencia mais recente e prioridade atual: ${latestBody}`,
+      "Responda com base no bloco inteiro acima e nao peca para o usuario repetir o que ja informou.",
+    ].join("\n");
+  };
+
+  while (keptMessages.length > 1 && renderPrompt(keptMessages).length > MAX_RESUME_PENDING_CONTEXT_CHARS) {
+    keptMessages = keptMessages.slice(1);
+  }
+
+  const latest = keptMessages[keptMessages.length - 1];
+  if (!latest) return null;
+  return {
+    latestMessage: latest.body,
+    latestMessageId: latest.waMessageId ?? null,
+    latestCreatedAt: latest.createdAt,
+    mergedCount: keptMessages.length,
+    mergedPlainText: keptMessages.map((message) => message.body).join("\n"),
+    prompt: renderPrompt(keptMessages),
+  };
+};
+
+const canBotAutoReply = async (
+  prisma: PrismaClient,
+  waId: string,
+): Promise<boolean> => {
+  const contact = await prisma.contact.findUnique({
+    where: { waId },
+    select: {
+      botEnabled: true,
+      handoffRequested: true,
+    },
+  });
+
+  return Boolean(contact?.botEnabled && !contact.handoffRequested);
+};
+
+const hasOutboundAfter = async (
+  prisma: PrismaClient,
+  contactId: number,
+  createdAt: Date,
+): Promise<boolean> => {
+  const newerOutbound = await prisma.message.findFirst({
+    where: {
+      contactId,
+      direction: "out",
+      createdAt: { gt: createdAt },
+    },
+    select: { id: true },
+  });
+
+  return Boolean(newerOutbound);
+};
+
+const canResumeAutoReply = async (
+  prisma: PrismaClient,
+  waId: string,
+  contactId: number,
+  latestPendingCreatedAt: Date,
+): Promise<boolean> => {
+  if (!await canBotAutoReply(prisma, waId)) {
+    return false;
+  }
+
+  return !await hasOutboundAfter(prisma, contactId, latestPendingCreatedAt);
+};
+
+const replyPendingContactAfterBotResume = async (
+  prisma: PrismaClient,
+  waId: string,
+): Promise<void> => {
+  if (resumedBotReplyLocks.has(waId)) return;
+  resumedBotReplyLocks.add(waId);
+
+  try {
+    let contact = await prisma.contact.findUnique({
+      where: { waId },
+      select: resumedReplyContactSelect,
+    });
+    if (!contact || !contact.botEnabled || contact.handoffRequested) {
+      return;
+    }
+
+    const lastOutbound = await prisma.message.findFirst({
+      where: {
+        contactId: contact.id,
+        direction: "out",
+      },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      select: {
+        createdAt: true,
+      },
+    });
+
+    const pendingInboundMessages = await prisma.message.findMany({
+      where: {
+        contactId: contact.id,
+        direction: "in",
+        ...(lastOutbound ? { createdAt: { gt: lastOutbound.createdAt } } : {}),
+      },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      take: MAX_RESUME_PENDING_MESSAGES,
+      select: {
+        body: true,
+        waMessageId: true,
+        createdAt: true,
+      },
+    });
+
+    const resumeBacklog = buildResumePendingContext(pendingInboundMessages.reverse());
+    if (!resumeBacklog) {
+      return;
+    }
+    const pendingMessageId = resumeBacklog.latestMessageId;
+    const resumeMergedText = resumeBacklog.mergedPlainText;
+    console.log(
+      `[resume-reply] backlog ready for ${waId} pending_messages=${resumeBacklog.mergedCount}`,
+    );
+
+    broadcast("ai:processing", { phone: waId });
+
+    let extraction: Awaited<ReturnType<OpenAIService["extractLeadData"]>> = {};
+    try {
+      extraction = await openAI.extractLeadData(resumeMergedText, prisma);
+    } catch (error) {
+      console.warn(`[resume-reply:${waId}] extraction failed`, error);
+    }
+
+    const wantsHuman =
+      extraction.wantsHuman === true ||
+      HUMAN_HANDOFF_REGEX.test(resumeBacklog.latestMessage);
+
+    const updateData = buildContactUpdateFromExtraction(extraction);
+    if (wantsHuman) {
+      Object.assign(
+        updateData,
+        buildQueuedHandoffState(
+          extraction.handoffReason ?? "Solicitacao de verificacao humana",
+          new Date(),
+        ),
+      );
+    }
+
+    const mergedSnapshot: ContactTriageSnapshot = {
+      name: (updateData.name as string | undefined) ?? contact.name,
+      email: (updateData.email as string | undefined) ?? contact.email,
+      tournament: (updateData.tournament as string | undefined) ?? contact.tournament,
+      eventDate: (updateData.eventDate as string | undefined) ?? contact.eventDate,
+      category: (updateData.category as string | undefined) ?? contact.category,
+      city: (updateData.city as string | undefined) ?? contact.city,
+      teamName: (updateData.teamName as string | undefined) ?? contact.teamName,
+      playersCount:
+        (updateData.playersCount as number | undefined) ??
+        contact.playersCount ??
+        null,
+    };
+
+    const missingFields = computeMissingLeadFields(mergedSnapshot);
+    updateData.triageCompleted = missingFields.length === 0;
+
+    if (Object.keys(updateData).length > 0) {
+      contact = await prisma.contact.update({
+        where: { waId },
+        data: updateData,
+        select: resumedReplyContactSelect,
+      });
+
+      broadcast("contact:updated", {
+        waId,
+        contact: contact as unknown as Record<string, unknown>,
+      });
+      void emitAlertsSummary(prisma);
+
+      if (wantsHuman) {
+        void openAI.refreshConversationSummary(prisma, contact.id, waId);
+      }
+
+      if (updateData.triageCompleted === true && !wantsHuman) {
+        void tryAutoQualify(
+          prisma,
+          contact.id,
+          contact.triageCompleted,
+          contact.stageId,
+        );
+      }
+
+      void tryAutoTag(prisma, contact.id, {
+        ...mergedSnapshot,
+        age: contact.age,
+        level: contact.level,
+      });
+      void tryAdvancedAutoTag(prisma, contact.id, resumeMergedText);
+      void updateLeadScore(prisma, contact.id);
+    }
+
+    if (wantsHuman) {
+      const handoffReply = buildHandoffAcknowledgement();
+      if (await hasOutboundAfter(prisma, contact.id, resumeBacklog.latestCreatedAt)) {
+        broadcast("ai:done", { phone: waId });
+        return;
+      }
+      if (pendingMessageId) {
+        await whatsapp.sendTypingIndicator(pendingMessageId, "text");
+      }
+      await sleep(computeReplyDelayMs(handoffReply));
+      await whatsapp.sendTextMessage(waId, handoffReply);
+      await persistTurn(waId, "assistant", handoffReply, {
+        source: "SYSTEM",
+      });
+      broadcast("message:new", {
+        phone: waId,
+        role: "assistant",
+        source: "SYSTEM",
+        content: handoffReply,
+      });
+      broadcast("ai:done", { phone: waId });
+      return;
+    }
+
+    const aiReply = await openAI.generateReply(resumeBacklog.latestMessage, prisma, waId, {
+      triageMissing: missingFields,
+      resumePendingContext: resumeBacklog.prompt,
+      resumeMergedUserMessagesCount: resumeBacklog.mergedCount,
+      mode: "resume",
+    });
+
+    void tryAutoTask(prisma, contact.id, resumeMergedText);
+
+    if (pendingMessageId) {
+      await whatsapp.sendTypingIndicator(pendingMessageId, "text");
+    }
+
+    const typingDelay = Math.min(3000, Math.max(800, aiReply.length * 12));
+    await sleep(typingDelay);
+
+    if (!await canResumeAutoReply(prisma, waId, contact.id, resumeBacklog.latestCreatedAt)) {
+      broadcast("ai:done", { phone: waId });
+      return;
+    }
+
+    const audioTag = parseAudioTag(aiReply);
+    if (audioTag) {
+      const audioRecord = await prisma.audio.findUnique({
+        where: { id: audioTag.audioId },
+        select: {
+          id: true,
+          url: true,
+          title: true,
+          r2Key: true,
+          mimeType: true,
+          filename: true,
+          sizeBytes: true,
+        },
+      });
+
+      if (audioRecord) {
+        if (audioTag.textWithoutTag) {
+          if (pendingMessageId) {
+            await whatsapp.sendTypingIndicator(pendingMessageId, "text");
+          }
+          const textDelay = Math.min(
+            3000,
+            Math.max(800, audioTag.textWithoutTag.length * 15),
+          );
+          await sleep(textDelay);
+          await whatsapp.sendTextMessage(waId, audioTag.textWithoutTag);
+          await persistTurn(waId, "assistant", audioTag.textWithoutTag, {
+            source: "AI",
+          });
+          broadcast("message:new", {
+            phone: waId,
+            role: "assistant",
+            source: "AI",
+            content: audioTag.textWithoutTag,
+          });
+        }
+
+        const estimatedDurationSec = audioRecord.sizeBytes > 0
+          ? audioRecord.sizeBytes / 2000
+          : 5;
+        const recordingDelay = Math.min(
+          20000,
+          Math.max(3000, estimatedDurationSec * 1000),
+        );
+        if (pendingMessageId) {
+          await whatsapp.sendTypingIndicator(pendingMessageId, "audio");
+        }
+        await sleep(recordingDelay);
+
+        try {
+          const audioFile = await getObjectFromR2(audioRecord.r2Key);
+          const mediaId = await whatsapp.uploadAudioMedia(
+            audioFile.body,
+            audioRecord.filename,
+            audioFile.contentType !== "application/octet-stream"
+              ? audioFile.contentType
+              : (audioRecord.mimeType ?? "audio/ogg"),
+          );
+          await whatsapp.sendAudioMessageById(waId, mediaId);
+          const persistBody = `[AUDIO:${audioRecord.url}|${audioRecord.title}]`;
+          await persistTurn(waId, "assistant", persistBody, { source: "AI" });
+          broadcast("message:new", {
+            phone: waId,
+            role: "assistant",
+            source: "AI",
+            content: persistBody,
+          });
+        } catch (audioError) {
+          console.error(`[resume-reply:${waId}] failed to send audio`, audioError);
+          logWhatsAppPermissionHint(audioError);
+          if (isWhatsAppPermissionError(audioError)) {
+            throw audioError;
+          }
+        }
+      } else {
+        const fallbackText =
+          audioTag.textWithoutTag || aiReply.replace(AUDIO_TAG_REGEX, "").trim();
+        await whatsapp.sendTextMessage(waId, fallbackText);
+        await persistTurn(waId, "assistant", fallbackText, { source: "AI" });
+        broadcast("message:new", {
+          phone: waId,
+          role: "assistant",
+          source: "AI",
+          content: fallbackText,
+        });
+      }
+    } else {
+      await whatsapp.sendTextMessage(waId, aiReply);
+      await persistTurn(waId, "assistant", aiReply, { source: "AI" });
+      broadcast("message:new", {
+        phone: waId,
+        role: "assistant",
+        source: "AI",
+        content: aiReply,
+      });
+    }
+
+    broadcast("ai:done", { phone: waId });
+
+    const overview = await dashboard.getOverview(prisma);
+    broadcast("overview:updated", overview as unknown as Record<string, unknown>);
+    void tryAutoFaq(prisma, waId, resumeMergedText, aiReply);
+    console.log(
+      `[resume-reply] answered pending message for ${waId} mode=resume pending_messages=${resumeBacklog.mergedCount}`,
+    );
+  } catch (error) {
+    logWhatsAppPermissionHint(error);
+    console.error(`[resume-reply] failed processing pending message for ${waId}`, error);
+    broadcast("ai:done", { phone: waId });
+  } finally {
+    resumedBotReplyLocks.delete(waId);
   }
 };
 
@@ -1514,6 +2276,104 @@ const handleProfileUpdate = async (req: Request): Promise<Response> => {
   }
 };
 
+const readTrimmedString = (
+  input: Record<string, unknown>,
+  field: string,
+): string | null => {
+  const value = input[field];
+  if (typeof value !== "string") return null;
+  return value.trim();
+};
+
+const parseAiSettingsInput = (
+  input: Record<string, unknown>,
+): { value: AiSettingsInput } | { error: string } => {
+  const model = readTrimmedString(input, "model");
+  const language = readTrimmedString(input, "language");
+  const personality = readTrimmedString(input, "personality");
+  const style = readTrimmedString(input, "style");
+  const rawSystemPrompt = input.systemPrompt;
+
+  if (!model || model.length < 2) {
+    return { error: "Modelo da IA invalido" };
+  }
+  if (!language || language.length < 2) {
+    return { error: "Idioma principal invalido" };
+  }
+  if (!personality || personality.length < 5) {
+    return { error: "Personalidade deve ter ao menos 5 caracteres" };
+  }
+  if (!style || style.length < 5) {
+    return { error: "Estilo de resposta deve ter ao menos 5 caracteres" };
+  }
+  if (
+    rawSystemPrompt !== undefined &&
+    rawSystemPrompt !== null &&
+    typeof rawSystemPrompt !== "string"
+  ) {
+    return { error: "Prompt base deve ser texto" };
+  }
+
+  const systemPrompt = typeof rawSystemPrompt === "string"
+    ? rawSystemPrompt.trim() || null
+    : null;
+
+  if (personality.length > 500) {
+    return { error: "Personalidade deve ter no maximo 500 caracteres" };
+  }
+  if (style.length > 500) {
+    return { error: "Estilo de resposta deve ter no maximo 500 caracteres" };
+  }
+  if (systemPrompt && systemPrompt.length > 8000) {
+    return { error: "Prompt base deve ter no maximo 8000 caracteres" };
+  }
+
+  return {
+    value: {
+      model,
+      language,
+      personality,
+      style,
+      systemPrompt,
+    },
+  };
+};
+
+const handleAiSettingsGet = async (req: Request): Promise<Response> => {
+  const current = await getAuthenticatedUser(req);
+  if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.USERS_MANAGE);
+  if (denied) return denied;
+
+  const settings = await resolveAiSettings(current.prisma);
+  return json(settings, 200, req);
+};
+
+const handleAiSettingsUpdate = async (req: Request): Promise<Response> => {
+  const current = await getAuthenticatedUser(req);
+  if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.USERS_MANAGE);
+  if (denied) return denied;
+
+  let body: unknown;
+  try {
+    body = await req.json();
+  } catch {
+    return json({ error: "Invalid JSON" }, 400, req);
+  }
+
+  const input = typeof body === "object" && body !== null
+    ? (body as Record<string, unknown>)
+    : {};
+  const parsed = parseAiSettingsInput(input);
+  if ("error" in parsed) {
+    return json({ error: parsed.error }, 400, req);
+  }
+
+  const saved = await saveAiSettings(current.prisma, parsed.value);
+  return json(saved, 200, req);
+};
+
 const dashboardOverview = async (req: Request): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
@@ -1605,11 +2465,16 @@ const dashboardConversationTurns = async (req: Request): Promise<Response> => {
 
   const limitParam = url.searchParams.get("limit");
   const limit = Math.min(
-    500,
-    Math.max(1, Number.isFinite(Number(limitParam)) ? Number(limitParam) : 200),
+    200,
+    Math.max(1, Number.isFinite(Number(limitParam)) ? Number(limitParam) : 40),
+  );
+  const offsetParam = url.searchParams.get("offset");
+  const offset = Math.max(
+    0,
+    Number.isFinite(Number(offsetParam)) ? Number(offsetParam) : 0,
   );
 
-  const turns = await dashboard.getConversationTurns(current.prisma, phone, limit);
+  const turns = await dashboard.getConversationTurns(current.prisma, phone, limit, offset);
   return json(turns, 200, req);
 };
 
@@ -1720,12 +2585,16 @@ const webhookEvent = async (req: Request): Promise<Response> => {
               message.from,
               "user",
               (await resolveInboundText(message)).trim() || "[mensagem nao processada]",
-              message.messageId,
-              message.contactName,
+              {
+                externalMessageId: message.messageId,
+                contactName: message.contactName,
+                source: "USER",
+              },
             );
             broadcast("message:new", {
               phone: message.from,
               role: "user",
+              source: "USER",
               content: (await resolveInboundText(message)).trim() || "[mensagem nao processada]",
             });
             continue;
@@ -1750,12 +2619,20 @@ const webhookEvent = async (req: Request): Promise<Response> => {
           message.from,
           "user",
           userText,
-          message.messageId,
-          message.contactName,
+          {
+            externalMessageId: message.messageId,
+            contactName: message.contactName,
+            source: "USER",
+          },
         );
 
         // Emit WS events: new user message + AI processing
-        broadcast("message:new", { phone: message.from, role: "user", content: userText });
+        broadcast("message:new", {
+          phone: message.from,
+          role: "user",
+          source: "USER",
+          content: userText,
+        });
         broadcast("ai:processing", { phone: message.from });
         broadcast("notification", {
           phone: message.from,
@@ -1780,8 +2657,13 @@ const webhookEvent = async (req: Request): Promise<Response> => {
             const typingDelay = Math.min(2000, Math.max(500, cachedReply.length * 15));
             await sleep(typingDelay);
             await whatsapp.sendTextMessage(message.from, cachedReply);
-            await persistTurn(message.from, "assistant", cachedReply);
-            broadcast("message:new", { phone: message.from, role: "assistant", content: cachedReply });
+            await persistTurn(message.from, "assistant", cachedReply, { source: "AI" });
+            broadcast("message:new", {
+              phone: message.from,
+              role: "assistant",
+              source: "AI",
+              content: cachedReply,
+            });
             broadcast("ai:done", { phone: message.from });
             console.log(`[cache-reply] served cached reply to ${message.from}`);
             continue;
@@ -1797,7 +2679,7 @@ const webhookEvent = async (req: Request): Promise<Response> => {
 
           let extraction: Awaited<ReturnType<OpenAIService["extractLeadData"]>> = {};
           try {
-            extraction = await openAI.extractLeadData(userText);
+            extraction = await openAI.extractLeadData(userText, prisma);
           } catch (error) {
             console.warn(`[phone:${message.from}] extraction failed`, error);
           }
@@ -1807,11 +2689,13 @@ const webhookEvent = async (req: Request): Promise<Response> => {
 
           const updateData = buildContactUpdateFromExtraction(extraction);
           if (wantsHuman) {
-            updateData.botEnabled = false;
-            updateData.handoffRequested = true;
-            updateData.handoffAt = new Date();
-            updateData.handoffReason =
-              extraction.handoffReason ?? "Pedido explicito de atendimento humano";
+            Object.assign(
+              updateData,
+              buildQueuedHandoffState(
+                extraction.handoffReason ?? "Solicitacao de verificacao humana",
+                new Date(),
+              ),
+            );
           }
 
           const mergedSnapshot: ContactTriageSnapshot = {
@@ -1844,6 +2728,9 @@ const webhookEvent = async (req: Request): Promise<Response> => {
               contact: contact as unknown as Record<string, unknown>,
             });
             void emitAlertsSummary(prisma);
+            if (wantsHuman) {
+              void openAI.refreshConversationSummary(prisma, contact.id, message.from);
+            }
 
             // Auto-qualify if triage just completed
             if (updateData.triageCompleted === true && !wantsHuman) {
@@ -1861,17 +2748,25 @@ const webhookEvent = async (req: Request): Promise<Response> => {
               age: contact.age,
               level: contact.level,
             });
+
+            // Phase 5: Advanced game/context auto-tagging
+            void tryAdvancedAutoTag(prisma, contact.id, userText);
+
+            // Phase 6: Recompute lead score
+            void updateLeadScore(prisma, contact.id);
           }
 
           if (wantsHuman) {
-            const handoffReply =
-              "Perfeito, vou encaminhar voce para o atendimento humano agora. Enquanto isso, se quiser, me diga campeonato e cidade para agilizar.";
+            const handoffReply = buildHandoffAcknowledgement();
             await sleep(computeReplyDelayMs(handoffReply));
             await whatsapp.sendTextMessage(message.from, handoffReply);
-            await persistTurn(message.from, "assistant", handoffReply);
+            await persistTurn(message.from, "assistant", handoffReply, {
+              source: "SYSTEM",
+            });
             broadcast("message:new", {
               phone: message.from,
               role: "assistant",
+              source: "SYSTEM",
               content: handoffReply,
             });
             broadcast("ai:done", { phone: message.from });
@@ -1927,10 +2822,13 @@ const webhookEvent = async (req: Request): Promise<Response> => {
               const textDelay = Math.min(3000, Math.max(800, audioTag.textWithoutTag.length * 15));
               await sleep(textDelay);
               await whatsapp.sendTextMessage(message.from, audioTag.textWithoutTag);
-              await persistTurn(message.from, "assistant", audioTag.textWithoutTag);
+              await persistTurn(message.from, "assistant", audioTag.textWithoutTag, {
+                source: "AI",
+              });
               broadcast("message:new", {
                 phone: message.from,
                 role: "assistant",
+                source: "AI",
                 content: audioTag.textWithoutTag,
               });
             }
@@ -1955,10 +2853,11 @@ const webhookEvent = async (req: Request): Promise<Response> => {
               );
               await whatsapp.sendAudioMessageById(message.from, mediaId);
               const persistBody = `[AUDIO:${audioRecord.url}|${audioRecord.title}]`;
-              await persistTurn(message.from, "assistant", persistBody);
+              await persistTurn(message.from, "assistant", persistBody, { source: "AI" });
               broadcast("message:new", {
                 phone: message.from,
                 role: "assistant",
+                source: "AI",
                 content: persistBody,
               });
               console.log(
@@ -1975,17 +2874,23 @@ const webhookEvent = async (req: Request): Promise<Response> => {
             // Audio not found, send the full text reply without the tag
             const fallbackText = audioTag.textWithoutTag || aiReply.replace(AUDIO_TAG_REGEX, "").trim();
             await whatsapp.sendTextMessage(message.from, fallbackText);
-            await persistTurn(message.from, "assistant", fallbackText);
+            await persistTurn(message.from, "assistant", fallbackText, { source: "AI" });
             broadcast("message:new", {
               phone: message.from,
               role: "assistant",
+              source: "AI",
               content: fallbackText,
             });
           }
         } else {
           await whatsapp.sendTextMessage(message.from, aiReply);
-          await persistTurn(message.from, "assistant", aiReply);
-          broadcast("message:new", { phone: message.from, role: "assistant", content: aiReply });
+          await persistTurn(message.from, "assistant", aiReply, { source: "AI" });
+          broadcast("message:new", {
+            phone: message.from,
+            role: "assistant",
+            source: "AI",
+            content: aiReply,
+          });
         }
 
         // Emit WS events: AI done + updated overview
@@ -2218,51 +3123,92 @@ const handlePipelineBoard = async (req: Request): Promise<Response> => {
   if (denied) return denied;
 
   const url = new URL(req.url);
-  const contactLimitParam = Number(url.searchParams.get("contactLimit"));
-  const contactLimit = Number.isInteger(contactLimitParam)
-    ? Math.min(100, Math.max(5, contactLimitParam))
-    : 50;
+  const limit = parseBoundedInteger(
+    url.searchParams.get("limit") ?? url.searchParams.get("contactLimit"),
+    PIPELINE_PAGE_SIZE_DEFAULT,
+    PIPELINE_PAGE_SIZE_MIN,
+    PIPELINE_PAGE_SIZE_MAX,
+  );
+  const filters = parsePipelineFilters(url);
 
-  const cacheKey = `${DASHBOARD_CACHE_PREFIX}pipeline:board:${contactLimit}`;
-  const cached = await cacheGetJson<{ stages: unknown[]; unassigned: unknown[] }>(cacheKey);
+  const cacheKey = buildPipelineCacheKey("board", url);
+  const cached = await cacheGetJson<{ stages: unknown[]; unassigned: unknown }>(cacheKey);
   if (cached) {
     return json(cached, 200, req);
   }
 
   const stages = await current.prisma.pipelineStage.findMany({
     orderBy: { position: "asc" },
-    include: {
-      contacts: {
-        include: {
-          tags: { include: { tag: true } },
-          messages: {
-            orderBy: { createdAt: "desc" },
-            take: 1,
-            select: { body: true, createdAt: true },
-          },
-        },
-        orderBy: { lastInteractionAt: "desc" },
-        take: contactLimit,
-      },
-    },
   });
+  const [unassigned, stagePages] = await Promise.all([
+    loadPipelineColumnPage(current.prisma, null, filters, limit, 0),
+    Promise.all(
+      stages.map((stage) =>
+        loadPipelineColumnPage(current.prisma, stage.id, filters, limit, 0),
+      ),
+    ),
+  ]);
 
-  // Include unassigned contacts (no stage)
-  const unassigned = await current.prisma.contact.findMany({
-    where: { stageId: null },
-    include: {
-      tags: { include: { tag: true } },
-      messages: {
-        orderBy: { createdAt: "desc" },
-        take: 1,
-        select: { body: true, createdAt: true },
-      },
-    },
-    orderBy: { lastInteractionAt: "desc" },
-    take: contactLimit,
-  });
+  const payload = {
+    stages: stages.map((stage, index) => ({
+      ...stage,
+      ...stagePages[index],
+    })),
+    unassigned,
+  };
+  void cacheSetJson(cacheKey, payload, PIPELINE_CACHE_TTL_SECONDS);
+  return json(payload, 200, req);
+};
 
-  const payload = { stages, unassigned };
+const handlePipelineBoardColumn = async (req: Request): Promise<Response> => {
+  const current = await getAuthenticatedUser(req);
+  if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.PIPELINE_VIEW);
+  if (denied) return denied;
+
+  const url = new URL(req.url);
+  const stageId = parsePipelineStageId(url.searchParams.get("stageId"));
+  if (stageId === "invalid") {
+    return json({ error: "stageId invalido" }, 400, req);
+  }
+
+  if (typeof stageId === "number") {
+    const stageExists = await current.prisma.pipelineStage.findUnique({
+      where: { id: stageId },
+      select: { id: true },
+    });
+    if (!stageExists) {
+      return json({ error: "Etapa nao encontrada" }, 404, req);
+    }
+  }
+
+  const limit = parseBoundedInteger(
+    url.searchParams.get("limit"),
+    PIPELINE_PAGE_SIZE_DEFAULT,
+    PIPELINE_PAGE_SIZE_MIN,
+    PIPELINE_PAGE_SIZE_MAX,
+  );
+  const offset = parseBoundedInteger(
+    url.searchParams.get("offset"),
+    0,
+    0,
+    Number.MAX_SAFE_INTEGER,
+  );
+  const filters = parsePipelineFilters(url);
+
+  const cacheKey = buildPipelineCacheKey("column", url);
+  const cached = await cacheGetJson<{ items: unknown[]; total: number; limit: number; offset: number }>(cacheKey);
+  if (cached) {
+    return json(cached, 200, req);
+  }
+
+  const payload = await loadPipelineColumnPage(
+    current.prisma,
+    stageId,
+    filters,
+    limit,
+    offset,
+  );
   void cacheSetJson(cacheKey, payload, PIPELINE_CACHE_TTL_SECONDS);
   return json(payload, 200, req);
 };
@@ -2294,10 +3240,7 @@ const handleContactCreate = async (req: Request): Promise<Response> => {
     waId,
     leadStatus: "open",
     triageCompleted: false,
-    handoffRequested: false,
-    handoffAt: null,
-    handoffReason: null,
-    botEnabled: true,
+    ...buildNoHandoffState(),
   };
 
   if (hasOwn(input, "name")) {
@@ -2461,17 +3404,20 @@ const handleContactCreate = async (req: Request): Promise<Response> => {
     triageCompleted ?? computeMissingLeadFields(computedTriageSnapshot).length === 0;
 
   const finalHandoffRequested = !botEnabled ? true : (handoffRequested ?? false);
-  data.handoffRequested = finalHandoffRequested;
   if (finalHandoffRequested) {
-    data.handoffAt = handoffAt ?? new Date();
-    if (handoffReason !== undefined) {
-      data.handoffReason = handoffReason;
-    } else if (!botEnabled) {
-      data.handoffReason = "Bot desativado manualmente no cadastro";
-    }
+    Object.assign(
+      data,
+      buildQueuedHandoffState(
+        handoffReason ??
+          (!botEnabled
+            ? "Bot desativado manualmente no cadastro"
+            : "Solicitacao manual de atendimento humano"),
+        handoffAt ?? new Date(),
+      ),
+    );
   } else {
-    data.handoffAt = null;
-    data.handoffReason = null;
+    Object.assign(data, buildNoHandoffState());
+    data.botEnabled = true;
   }
 
   let contact;
@@ -2666,6 +3612,12 @@ const handleContactUpdate = async (
       stageId: true,
       botEnabled: true,
       handoffRequested: true,
+      handoffStatus: true,
+      handoffReason: true,
+      handoffAt: true,
+      handoffAssignedAt: true,
+      handoffAssignedToUserId: true,
+      handoffFirstHumanReplyAt: true,
       triageCompleted: true,
       source: true,
       notes: true,
@@ -2772,35 +3724,30 @@ const handleContactUpdate = async (
     data.triageCompleted = computeMissingLeadFields(snapshot).length === 0;
   }
 
-  if (typeof input.handoffRequested === "boolean") {
-    data.handoffRequested = input.handoffRequested;
-    if (input.handoffRequested) {
-      if (!hasOwn(input, "handoffAt")) {
-        data.handoffAt = new Date();
-      }
-    } else {
-      if (!hasOwn(input, "handoffAt")) {
-        data.handoffAt = null;
-      }
-      if (!hasOwn(input, "handoffReason")) {
-        data.handoffReason = null;
-      }
-    }
-  }
+  const requestedHandoff =
+    typeof input.handoffRequested === "boolean" ? input.handoffRequested : undefined;
+  let handoffReason: string | null | undefined;
   if (hasOwn(input, "handoffReason")) {
     const value = normalizeNullableText(input.handoffReason);
-    if (value !== undefined) data.handoffReason = value;
+    if (value !== undefined) {
+      handoffReason = value;
+      data.handoffReason = value;
+    }
   }
+  let handoffAt: Date | null | undefined;
   if (hasOwn(input, "handoffAt")) {
     const parsed = parseDateInput(input.handoffAt);
     if (parsed === undefined) {
       return json({ error: "handoffAt must be a valid date string or null" }, 400, req);
     }
+    handoffAt = parsed;
     data.handoffAt = parsed;
   }
 
-  if (typeof input.botEnabled === "boolean") {
-    data.botEnabled = input.botEnabled;
+  const requestedBotEnabled =
+    typeof input.botEnabled === "boolean" ? input.botEnabled : undefined;
+  if (requestedBotEnabled !== undefined) {
+    data.botEnabled = requestedBotEnabled;
   }
 
   if (hasOwn(input, "leadStatus")) {
@@ -2820,6 +3767,35 @@ const handleContactUpdate = async (
     data.stageId = stageId;
   }
 
+  const currentHandoffStatus = deriveHandoffStatus(existing);
+  const currentlyActiveHandoff =
+    currentHandoffStatus !== "NONE" && currentHandoffStatus !== "RESOLVED";
+  const desiredBotEnabled = requestedBotEnabled ?? existing.botEnabled;
+  const desiredHandoffRequested = requestedHandoff ?? existing.handoffRequested;
+  const shouldHaveActiveHandoff = !desiredBotEnabled || desiredHandoffRequested;
+
+  if (shouldHaveActiveHandoff) {
+    if (!currentlyActiveHandoff) {
+      Object.assign(
+        data,
+        buildQueuedHandoffState(
+          handoffReason ??
+            existing.handoffReason ??
+            (desiredBotEnabled === false
+              ? "Bot desativado manualmente no painel"
+              : "Solicitacao manual de atendimento humano"),
+          handoffAt ?? existing.handoffAt ?? new Date(),
+        ),
+      );
+    } else {
+      data.botEnabled = false;
+      data.handoffRequested = true;
+      data.handoffStatus = currentHandoffStatus;
+    }
+  } else if (currentlyActiveHandoff) {
+    Object.assign(data, buildResolvedHandoffState(current.user.id));
+  }
+
   if (!Object.keys(data).length) {
     return json({ error: "No valid fields provided" }, 400, req);
   }
@@ -2836,9 +3812,6 @@ const handleContactUpdate = async (
       },
     },
   });
-  if (!contact.handoffRequested) {
-    handoffAssignments.delete(contact.waId);
-  }
 
   // Audit log
   void logContactChanges(
@@ -2857,6 +3830,14 @@ const handleContactUpdate = async (
   });
   void invalidateDashboardCaches();
   void emitAlertsSummary(current.prisma);
+
+  const shouldReplyAfterResume =
+    contact.botEnabled &&
+    !contact.handoffRequested &&
+    (!existing.botEnabled || currentlyActiveHandoff);
+  if (shouldReplyAfterResume) {
+    void replyPendingContactAfterBotResume(current.prisma, waId);
+  }
 
   // Auto-summary when stage changes
   if (hasOwn(input, "stageId") && existing.stageId !== (data.stageId ?? null)) {
@@ -2923,8 +3904,6 @@ const handleContactDelete = async (
   } catch {
     return json({ error: "Contact not found" }, 404, req);
   }
-  handoffAssignments.delete(waId);
-
   broadcast("contact:deleted", { waId });
   void invalidateDashboardCaches();
   return json({ ok: true }, 200, req);
@@ -3227,20 +4206,22 @@ const handleContactsBatch = async (req: Request): Promise<Response> => {
     const botEnabled = input.botEnabled === true;
     const result = await current.prisma.contact.updateMany({
       where: { waId: { in: waIds } },
-      data: { botEnabled },
+      data: botEnabled
+        ? buildResolvedHandoffState(current.user.id)
+        : buildQueuedHandoffState("Bot desativado em lote no painel"),
     });
     updated = result.count;
+    if (botEnabled) {
+      for (const contactWaId of waIds) {
+        void replyPendingContactAfterBotResume(current.prisma, contactWaId);
+      }
+    }
   } else if (action === "requestHandoff") {
     const denied = requirePermission(current, req, PERMISSIONS.CONTACTS_MANAGE_HANDOFF);
     if (denied) return denied;
     const result = await current.prisma.contact.updateMany({
       where: { waId: { in: waIds } },
-      data: {
-        handoffRequested: true,
-        handoffAt: new Date(),
-        handoffReason: "Solicitação em lote via painel",
-        botEnabled: false,
-      },
+      data: buildQueuedHandoffState("Solicitacao em lote via painel"),
     });
     updated = result.count;
   } else {
@@ -3274,12 +4255,24 @@ const handleContactBotToggle = async (
   }
   const botEnabled = input.botEnabled;
 
-  const data: Prisma.ContactUncheckedUpdateInput = { botEnabled };
-  if (!botEnabled) {
-    data.handoffRequested = true;
-    data.handoffAt = new Date();
-    data.handoffReason = "Bot desativado manualmente no painel";
+  const existing = await current.prisma.contact.findUnique({
+    where: { waId },
+    select: {
+      waId: true,
+      handoffRequested: true,
+      handoffStatus: true,
+      handoffAssignedAt: true,
+      handoffAssignedToUserId: true,
+      handoffFirstHumanReplyAt: true,
+    },
+  });
+  if (!existing) {
+    return json({ error: "Contact not found" }, 404, req);
   }
+
+  const data = botEnabled
+    ? buildResolvedHandoffState(current.user.id)
+    : buildQueuedHandoffState("Bot desativado manualmente no painel");
 
   let contact;
   try {
@@ -3291,8 +4284,17 @@ const handleContactBotToggle = async (
     return json({ error: "Contact not found" }, 404, req);
   }
 
-  broadcast("contact:updated", { waId, botEnabled });
+  broadcast("contact:updated", {
+    waId,
+    botEnabled: contact.botEnabled,
+    handoffRequested: contact.handoffRequested,
+    handoffStatus: contact.handoffStatus,
+  });
   void invalidateDashboardCaches();
+  void emitAlertsSummary(current.prisma);
+  if (contact.botEnabled && !contact.handoffRequested) {
+    void replyPendingContactAfterBotResume(current.prisma, waId);
+  }
   return json(contact, 200, req);
 };
 
@@ -3318,11 +4320,79 @@ const handleContactSend = async (
     return json({ error: "message is required" }, 400, req);
   }
 
-  await whatsapp.sendTextMessage(waId, message);
-  await persistTurn(waId, "assistant", message);
+  const existing = await current.prisma.contact.findUnique({
+    where: { waId },
+    select: {
+      id: true,
+      handoffRequested: true,
+      handoffStatus: true,
+      handoffAssignedAt: true,
+      handoffAssignedToUserId: true,
+      handoffFirstHumanReplyAt: true,
+    },
+  });
+  if (!existing) {
+    return json({ error: "Contact not found" }, 404, req);
+  }
 
-  broadcast("message:sent", { phone: waId, role: "assistant", content: message, sentBy: current.user.email });
-  broadcast("message:new", { phone: waId, role: "assistant", content: message });
+  const existingHandoffStatus = deriveHandoffStatus(existing);
+  const shouldAdvanceHandoff =
+    existingHandoffStatus !== "NONE" && existingHandoffStatus !== "RESOLVED";
+
+  await whatsapp.sendTextMessage(waId, message);
+  await persistTurn(waId, "assistant", message, {
+    source: "AGENT",
+    sentByUserId: current.user.id,
+  });
+
+  let handoffProgress:
+    | {
+        handoffStatus: HandoffStatusValue;
+        assignedAt: string | null;
+        firstHumanReplyAt: string | null;
+      }
+    | null = null;
+  if (shouldAdvanceHandoff) {
+    const updatedContact = await current.prisma.contact.update({
+      where: { waId },
+      data: buildInProgressHandoffState(existing, current.user.id),
+      select: {
+        handoffStatus: true,
+        handoffAssignedAt: true,
+        handoffFirstHumanReplyAt: true,
+      },
+    });
+    handoffProgress = {
+      handoffStatus: deriveHandoffStatus(updatedContact),
+      assignedAt: updatedContact.handoffAssignedAt?.toISOString() ?? null,
+      firstHumanReplyAt: updatedContact.handoffFirstHumanReplyAt?.toISOString() ?? null,
+    };
+  }
+
+  broadcast("message:sent", {
+    phone: waId,
+    role: "assistant",
+    source: "AGENT",
+    content: message,
+    sentBy: current.user.email,
+  });
+  broadcast("message:new", {
+    phone: waId,
+    role: "assistant",
+    source: "AGENT",
+    content: message,
+    sentBy: current.user.email,
+  });
+  if (handoffProgress) {
+    broadcast("handoff:updated", {
+      waId,
+      assignedTo: current.user.email,
+      assignedAt: handoffProgress.assignedAt,
+      handoffStatus: handoffProgress.handoffStatus,
+      firstHumanReplyAt: handoffProgress.firstHumanReplyAt,
+    });
+  }
+  void emitAlertsSummary(current.prisma);
 
   return json({ ok: true }, 200, req);
 };
@@ -3343,24 +4413,53 @@ const handleFaqList = async (req: Request): Promise<Response> => {
   const offset = Math.max(0, Number(url.searchParams.get("offset") ?? "0") || 0);
   const search = url.searchParams.get("search")?.trim();
   const isActiveParam = url.searchParams.get("isActive");
+  const subject = url.searchParams.get("subject")?.trim();
+  const faqType = url.searchParams.get("faqType")?.trim();
+  const edition = url.searchParams.get("edition")?.trim();
 
   const where: Prisma.FaqWhereInput = {};
   if (search) {
     where.OR = [
       { question: { contains: search, mode: "insensitive" } },
       { answer: { contains: search, mode: "insensitive" } },
+      { content: { contains: search, mode: "insensitive" } },
+      { subject: { contains: search, mode: "insensitive" } },
     ];
   }
   if (isActiveParam === "true") where.isActive = true;
   if (isActiveParam === "false") where.isActive = false;
+  if (subject) where.subject = { equals: subject, mode: "insensitive" };
+  if (faqType) where.faqType = faqType;
+  if (edition) where.edition = { equals: edition, mode: "insensitive" };
 
   const [items, total] = await Promise.all([
     current.prisma.faq.findMany({ where, orderBy: { createdAt: "desc" }, skip: offset, take: limit }),
     current.prisma.faq.count({ where }),
   ]);
 
-  return json({ items, total, limit, offset }, 200, req);
+  // Gather unique subjects and editions for filter dropdowns
+  const [subjects, editions] = await Promise.all([
+    current.prisma.faq.findMany({ distinct: ["subject"], select: { subject: true }, where: { subject: { not: null } } }),
+    current.prisma.faq.findMany({ distinct: ["edition"], select: { edition: true }, where: { edition: { not: null } } }),
+  ]);
+
+  return json({
+    items,
+    total,
+    limit,
+    offset,
+    subjects: subjects.map((s) => s.subject).filter(Boolean),
+    editions: editions.map((e) => e.edition).filter(Boolean),
+  }, 200, req);
 };
+
+const FAQ_CONTENT_ONLY_PREFIX = "__content__:";
+
+const isGeneratedFaqQuestion = (question: string | null | undefined): boolean =>
+  typeof question === "string" && question.startsWith(FAQ_CONTENT_ONLY_PREFIX);
+
+const buildGeneratedFaqQuestion = (): string =>
+  `${FAQ_CONTENT_ONLY_PREFIX}${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
 const handleFaqCreate = async (req: Request): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
@@ -3378,14 +4477,19 @@ const handleFaqCreate = async (req: Request): Promise<Response> => {
   const input = body as Record<string, unknown>;
   const question = typeof input.question === "string" ? input.question.trim() : "";
   const answer = typeof input.answer === "string" ? input.answer.trim() : "";
-  if (!question || !answer) {
-    return json({ error: "question and answer are required" }, 400, req);
+  const content = typeof input.content === "string" ? input.content.trim() : "";
+  if ((!question || !answer) && !content) {
+    return json({ error: "content is required" }, 400, req);
   }
 
   const faq = await current.prisma.faq.create({
     data: {
-      question,
-      answer,
+      question: question || buildGeneratedFaqQuestion(),
+      answer: answer || content,
+      subject: typeof input.subject === "string" ? input.subject.trim() || "geral" : "geral",
+      edition: typeof input.edition === "string" ? input.edition.trim() || null : null,
+      faqType: typeof input.faqType === "string" ? input.faqType.trim() || "qa" : "qa",
+      content: content || null,
       isActive: input.isActive !== false,
     },
   });
@@ -3407,10 +4511,44 @@ const handleFaqUpdate = async (req: Request, id: number): Promise<Response> => {
   }
 
   const input = body as Record<string, unknown>;
+  const existing = await current.prisma.faq.findUnique({
+    where: { id },
+    select: { question: true, answer: true, content: true },
+  });
+  if (!existing) {
+    return json({ error: "FAQ not found" }, 404, req);
+  }
+
   const data: Record<string, unknown> = {};
   if (typeof input.question === "string") data.question = input.question.trim();
   if (typeof input.answer === "string") data.answer = input.answer.trim();
   if (typeof input.isActive === "boolean") data.isActive = input.isActive;
+  if (typeof input.subject === "string") data.subject = input.subject.trim() || "geral";
+  if (typeof input.edition === "string") data.edition = input.edition.trim() || null;
+  if (input.edition === null) data.edition = null;
+  if (typeof input.faqType === "string") data.faqType = input.faqType.trim() || "qa";
+  if (typeof input.content === "string") data.content = input.content.trim() || null;
+  if (input.content === null) data.content = null;
+
+  if (typeof data.question === "string" && !data.question.trim()) {
+    delete data.question;
+  }
+  if (typeof data.answer === "string" && !data.answer.trim()) {
+    delete data.answer;
+  }
+
+  const nextContent =
+    typeof data.content === "string"
+      ? data.content
+      : data.content === null
+        ? null
+        : existing.content;
+
+  if (isGeneratedFaqQuestion(existing.question) && typeof nextContent === "string" && nextContent.trim()) {
+    if (!("answer" in data)) {
+      data.answer = nextContent.trim();
+    }
+  }
 
   const faq = await current.prisma.faq.update({ where: { id }, data });
   void invalidateReplyCaches();
@@ -3742,7 +4880,7 @@ const handleHandoffQueueList = async (req: Request): Promise<Response> => {
   const now = new Date();
 
   const contacts = await current.prisma.contact.findMany({
-    where: { handoffRequested: true },
+    where: activeHandoffWhere(),
     include: {
       stage: {
         select: {
@@ -3751,10 +4889,25 @@ const handleHandoffQueueList = async (req: Request): Promise<Response> => {
           color: true,
         },
       },
+      handoffAssignedToUser: {
+        select: {
+          id: true,
+          email: true,
+          name: true,
+        },
+      },
       messages: {
         orderBy: { createdAt: "desc" },
         take: 1,
-        select: { body: true, createdAt: true },
+        select: {
+          body: true,
+          createdAt: true,
+          direction: true,
+          source: true,
+          sentByUser: {
+            select: { email: true, name: true },
+          },
+        },
       },
       tasks: {
         where: {
@@ -3777,20 +4930,33 @@ const handleHandoffQueueList = async (req: Request): Promise<Response> => {
 
   const queue = contacts
     .map((contact) => {
+      const handoffStatus = deriveHandoffStatus(contact);
       const startedAt = contact.handoffAt ?? contact.lastInteractionAt ?? contact.createdAt;
       const waitMinutes = computeHandoffWaitMinutes(startedAt, now);
       const slaLevel = classifyHandoffSla(waitMinutes);
-      const assignment = handoffAssignments.get(contact.waId);
       return {
         waId: contact.waId,
         name: contact.name,
         stage: contact.stage,
+        handoffStatus,
         handoffReason: contact.handoffReason,
         handoffAt: contact.handoffAt,
         waitMinutes,
         slaLevel,
-        assignedTo: assignment?.owner ?? null,
-        assignedAt: assignment ? new Date(assignment.assignedAt).toISOString() : null,
+        assignedTo: contact.handoffAssignedToUser?.email ?? null,
+        assignedAt: contact.handoffAssignedAt?.toISOString() ?? null,
+        firstHumanReplyAt: contact.handoffFirstHumanReplyAt?.toISOString() ?? null,
+        aiSummary: contact.aiSummary ?? null,
+        triageMissing: computeMissingLeadFields(contact),
+        triageSnapshot: {
+          email: contact.email,
+          tournament: contact.tournament,
+          eventDate: contact.eventDate,
+          category: contact.category,
+          city: contact.city,
+          teamName: contact.teamName,
+          playersCount: contact.playersCount,
+        },
         openTasks: contact.tasks,
         latestMessage: contact.messages[0] ?? null,
       };
@@ -3806,14 +4972,6 @@ const handleHandoffQueueList = async (req: Request): Promise<Response> => {
       if (rankDiff !== 0) return rankDiff;
       return b.waitMinutes - a.waitMinutes;
     });
-
-  // Cleanup assignments for contacts no longer in queue
-  const queueWaIds = new Set(queue.map((item) => item.waId));
-  for (const waId of handoffAssignments.keys()) {
-    if (!queueWaIds.has(waId)) {
-      handoffAssignments.delete(waId);
-    }
-  }
 
   return json(queue, 200, req);
 };
@@ -3850,29 +5008,69 @@ const handleHandoffAssign = async (
 
   const contact = await current.prisma.contact.findUnique({
     where: { waId },
-    select: { waId: true, handoffRequested: true },
+    select: {
+      waId: true,
+      handoffRequested: true,
+      handoffStatus: true,
+      handoffAssignedAt: true,
+      handoffAssignedToUserId: true,
+      handoffFirstHumanReplyAt: true,
+    },
   });
   if (!contact) return json({ error: "Contact not found" }, 404, req);
-  if (!contact.handoffRequested) {
+  if (deriveHandoffStatus(contact) === "NONE" || deriveHandoffStatus(contact) === "RESOLVED") {
     return json({ error: "Contact is not in human handoff queue" }, 400, req);
   }
 
+  let assignee:
+    | {
+        id: string;
+        email: string;
+      }
+    | null = null;
+
+  let data: Prisma.ContactUncheckedUpdateInput;
   if (ownerRaw === null) {
-    handoffAssignments.delete(waId);
+    data = buildReleasedHandoffState();
   } else {
     const owner = ownerRaw && ownerRaw.length > 0 ? ownerRaw : current.user.email;
-    handoffAssignments.set(waId, { owner, assignedAt: Date.now() });
+    assignee = await current.prisma.user.findUnique({
+      where: { email: owner },
+      select: { id: true, email: true },
+    });
+    if (!assignee) {
+      return json({ error: "Owner not found" }, 404, req);
+    }
+    data = buildAssignedHandoffState(contact, assignee.id);
   }
 
-  const assignment = handoffAssignments.get(waId);
+  const updatedContact = await current.prisma.contact.update({
+    where: { waId },
+    data,
+    select: {
+      waId: true,
+      handoffStatus: true,
+      handoffAssignedAt: true,
+      handoffFirstHumanReplyAt: true,
+      handoffAssignedToUser: {
+        select: {
+          email: true,
+        },
+      },
+    },
+  });
+
   const payload = {
     waId,
-    assignedTo: assignment?.owner ?? null,
-    assignedAt: assignment ? new Date(assignment.assignedAt).toISOString() : null,
+    assignedTo: updatedContact.handoffAssignedToUser?.email ?? null,
+    assignedAt: updatedContact.handoffAssignedAt?.toISOString() ?? null,
+    handoffStatus: deriveHandoffStatus(updatedContact),
+    firstHumanReplyAt: updatedContact.handoffFirstHumanReplyAt?.toISOString() ?? null,
   };
 
   broadcast("handoff:updated", payload as unknown as Record<string, unknown>);
   void invalidateDashboardCaches();
+  void emitAlertsSummary(current.prisma);
   return json(payload, 200, req);
 };
 
@@ -4440,6 +5638,266 @@ const handleAudioDelete = async (req: Request, id: number): Promise<Response> =>
   }
 };
 
+// ── Phase 5: Lead Score calculation ────────────────────────────────
+
+const computeLeadScore = (contact: {
+  name?: string | null;
+  email?: string | null;
+  tournament?: string | null;
+  eventDate?: string | null;
+  category?: string | null;
+  city?: string | null;
+  teamName?: string | null;
+  playersCount?: number | null;
+  triageCompleted?: boolean;
+  level?: string | null;
+  objective?: string | null;
+}, messageCount: number): number => {
+  let score = 0;
+  // Completude: 5 pts cada campo preenchido
+  if (contact.name) score += 5;
+  if (contact.email) score += 10;
+  if (contact.tournament) score += 10;
+  if (contact.eventDate) score += 5;
+  if (contact.category) score += 5;
+  if (contact.city) score += 5;
+  if (contact.teamName) score += 5;
+  if (typeof contact.playersCount === "number" && contact.playersCount > 0) score += 5;
+  if (contact.level) score += 3;
+  if (contact.objective) score += 3;
+  if (contact.triageCompleted) score += 10;
+  // Engajamento: pontos por mensagens
+  if (messageCount >= 3) score += 5;
+  if (messageCount >= 10) score += 10;
+  if (messageCount >= 20) score += 5;
+  return Math.min(100, score);
+};
+
+const updateLeadScore = async (
+  prisma: PrismaClient,
+  contactId: number,
+): Promise<void> => {
+  try {
+    const contact = await prisma.contact.findUnique({
+      where: { id: contactId },
+      select: {
+        name: true, email: true, tournament: true, eventDate: true,
+        category: true, city: true, teamName: true, playersCount: true,
+        triageCompleted: true, level: true, objective: true,
+      },
+    });
+    if (!contact) return;
+    const msgCount = await prisma.message.count({ where: { contactId, direction: "in" } });
+    const score = computeLeadScore(contact, msgCount);
+    await prisma.contact.update({ where: { id: contactId }, data: { leadScore: score } });
+  } catch (error) {
+    console.error("[lead-score] failed for contact", contactId, error);
+  }
+};
+
+// ── Phase 5: Advanced auto-tagging ─────────────────────────────────
+
+const ADVANCED_TAG_RULES: Array<{
+  name: string;
+  color: string;
+  match: (text: string) => boolean;
+}> = [
+  { name: "Valorant", color: "#ff4655", match: (t) => /\bvalorant\b/i.test(t) },
+  { name: "CS2", color: "#de9b35", match: (t) => /\b(cs2|counter[- ]?strike|csgo|cs:go)\b/i.test(t) },
+  { name: "League of Legends", color: "#c8aa6e", match: (t) => /\b(lol|league of legends)\b/i.test(t) },
+  { name: "Fortnite", color: "#00bfff", match: (t) => /\bfortnite\b/i.test(t) },
+  { name: "Free Fire", color: "#ff6a00", match: (t) => /\b(free ?fire|freefire|ff)\b/i.test(t) },
+  { name: "Tem Time", color: "#10b981", match: (t) => /\b(tenho time|meu time|nosso time|tenho equipe|ja tenho)\b/i.test(t) },
+  { name: "Procura Time", color: "#f59e0b", match: (t) => /\b(procur\w+ time|sem time|sozinho|preciso de time|nao tenho time)\b/i.test(t) },
+  { name: "Interesse Mix", color: "#8b5cf6", match: (t) => /\b(mix|avulso|solo|individual)\b/i.test(t) },
+];
+
+const tryAdvancedAutoTag = async (
+  prisma: PrismaClient,
+  contactId: number,
+  userMessage: string,
+): Promise<void> => {
+  try {
+    const lowerMsg = userMessage.toLowerCase();
+    const matchedRules = ADVANCED_TAG_RULES.filter((rule) => rule.match(lowerMsg));
+    if (matchedRules.length === 0) return;
+
+    for (const rule of matchedRules) {
+      const tag = await prisma.tag.upsert({
+        where: { name: rule.name },
+        update: {},
+        create: { name: rule.name, color: rule.color },
+      });
+      const existing = await prisma.contactTag.findUnique({
+        where: { contactId_tagId: { contactId, tagId: tag.id } },
+        select: { id: true },
+      });
+      if (!existing) {
+        await prisma.contactTag.create({ data: { contactId, tagId: tag.id } });
+        broadcast("contact:tagged", { contactId, tagName: rule.name, tagId: tag.id });
+      }
+    }
+  } catch (error) {
+    console.error("[advanced-auto-tag] failed for contact", contactId, error);
+  }
+};
+
+// ── Phase 8: Reports / Analytics endpoints ─────────────────────────
+
+const reportsPaths = new Set<string>([
+  `${config.apiBasePath}/reports/leads`,
+  "/reports/leads",
+]);
+const reportsPerformancePaths = new Set<string>([
+  `${config.apiBasePath}/reports/performance`,
+  "/reports/performance",
+]);
+const reportsExportPaths = new Set<string>([
+  `${config.apiBasePath}/reports/export`,
+  "/reports/export",
+]);
+
+const handleReportsLeads = async (req: Request): Promise<Response> => {
+  const current = await getAuthenticatedUser(req);
+  if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.DASHBOARD_VIEW);
+  if (denied) return denied;
+
+  const url = new URL(req.url);
+  const days = Math.min(365, Math.max(1, Number(url.searchParams.get("days") ?? "30") || 30));
+  const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+
+  const [totalLeads, qualifiedLeads, wonLeads, lostLeads, totalMessages, avgResponseTime] = await Promise.all([
+    current.prisma.contact.count({ where: { createdAt: { gte: since } } }),
+    current.prisma.contact.count({ where: { createdAt: { gte: since }, triageCompleted: true } }),
+    current.prisma.contact.count({ where: { createdAt: { gte: since }, leadStatus: "won" } }),
+    current.prisma.contact.count({ where: { createdAt: { gte: since }, leadStatus: "lost" } }),
+    current.prisma.message.count({ where: { createdAt: { gte: since } } }),
+    current.prisma.$queryRawUnsafe<Array<{ avg_minutes: number | null }>>(
+      `SELECT AVG(EXTRACT(EPOCH FROM (m2."createdAt" - m1."createdAt")) / 60) as avg_minutes
+       FROM "Message" m1
+       JOIN "Message" m2 ON m1."contactId" = m2."contactId"
+       WHERE m1.direction = 'in' AND m2.direction = 'out'
+       AND m2."createdAt" > m1."createdAt"
+       AND m1."createdAt" >= $1
+       AND m2."createdAt" = (
+         SELECT MIN(sub."createdAt") FROM "Message" sub
+         WHERE sub."contactId" = m1."contactId" AND sub.direction = 'out'
+         AND sub."createdAt" > m1."createdAt"
+       )`,
+      since,
+    ),
+  ]);
+
+  // Daily trend
+  const dailyTrend = await current.prisma.$queryRawUnsafe<Array<{ day: string; count: bigint }>>(
+    `SELECT TO_CHAR(DATE("createdAt"), 'YYYY-MM-DD') as day, COUNT(*)::bigint as count
+     FROM "Contact" WHERE "createdAt" >= $1
+     GROUP BY DATE("createdAt") ORDER BY DATE("createdAt")`,
+    since,
+  );
+
+  return json({
+    period: { days, since: since.toISOString() },
+    totalLeads,
+    qualifiedLeads,
+    wonLeads,
+    lostLeads,
+    conversionRate: totalLeads > 0 ? Math.round((wonLeads / totalLeads) * 100) : 0,
+    qualificationRate: totalLeads > 0 ? Math.round((qualifiedLeads / totalLeads) * 100) : 0,
+    totalMessages,
+    avgResponseMinutes: avgResponseTime[0]?.avg_minutes ? Math.round(avgResponseTime[0].avg_minutes * 10) / 10 : null,
+    dailyTrend: dailyTrend.map((d) => ({ day: String(d.day), count: Number(d.count) })),
+  }, 200, req);
+};
+
+const handleReportsPerformance = async (req: Request): Promise<Response> => {
+  const current = await getAuthenticatedUser(req);
+  if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.DASHBOARD_VIEW);
+  if (denied) return denied;
+
+  const url = new URL(req.url);
+  const days = Math.min(365, Math.max(1, Number(url.searchParams.get("days") ?? "30") || 30));
+  const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+
+  const agents = await current.prisma.user.findMany({
+    where: { role: { in: ["ADMIN", "AGENT", "MANAGER"] } },
+    select: { id: true, name: true, email: true },
+  });
+
+  const results = await Promise.all(
+    agents.map(async (agent) => {
+      const [messagesSent, handoffsResolved] = await Promise.all([
+        current.prisma.message.count({
+          where: { sentByUserId: agent.id, createdAt: { gte: since } },
+        }),
+        current.prisma.contact.count({
+          where: { handoffResolvedByUserId: agent.id, handoffResolvedAt: { gte: since } },
+        }),
+      ]);
+      return {
+        agentId: agent.id,
+        name: agent.name ?? agent.email,
+        email: agent.email,
+        messagesSent,
+        handoffsResolved,
+      };
+    }),
+  );
+
+  return json({ period: { days, since: since.toISOString() }, agents: results }, 200, req);
+};
+
+const handleReportsExport = async (req: Request): Promise<Response> => {
+  const current = await getAuthenticatedUser(req);
+  if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.CONTACTS_VIEW);
+  if (denied) return denied;
+
+  const contacts = await current.prisma.contact.findMany({
+    include: { tags: { include: { tag: true } }, stage: true },
+    orderBy: { createdAt: "desc" },
+    take: 5000,
+  });
+
+  const headers = ["waId", "name", "email", "tournament", "eventDate", "category", "city", "teamName", "playersCount", "leadStatus", "leadScore", "triageCompleted", "stage", "tags", "createdAt"];
+  const csvRows = [headers.join(",")];
+
+  for (const c of contacts) {
+    const row = [
+      c.waId,
+      (c.name ?? "").replace(/,/g, ";"),
+      c.email ?? "",
+      (c.tournament ?? "").replace(/,/g, ";"),
+      c.eventDate ?? "",
+      c.category ?? "",
+      (c.city ?? "").replace(/,/g, ";"),
+      (c.teamName ?? "").replace(/,/g, ";"),
+      c.playersCount ?? "",
+      c.leadStatus,
+      c.leadScore,
+      c.triageCompleted ? "sim" : "nao",
+      c.stage?.name ?? "",
+      c.tags.map((ct) => ct.tag.name).join(";"),
+      c.createdAt.toISOString().slice(0, 10),
+    ];
+    csvRows.push(row.join(","));
+  }
+
+  const csv = csvRows.join("\n");
+  return new Response(csv, {
+    status: 200,
+    headers: {
+      "Content-Type": "text/csv; charset=utf-8",
+      "Content-Disposition": "attachment; filename=contacts-export.csv",
+      "Access-Control-Allow-Origin": resolveAllowOrigin(req),
+      "Access-Control-Allow-Headers": "Authorization, Content-Type",
+      Vary: "Origin",
+    },
+  });
+};
+
 // ── Helper: parse suffix from a matching prefix list ───────────────
 
 const extractPathSuffix = (pathname: string, prefixes: string[]): string | null => {
@@ -4507,11 +5965,27 @@ const server = Bun.serve<WsUserData>({
       );
     }
 
+    if (openApiJsonPaths.has(url.pathname) && req.method === "GET") {
+      return json(buildOpenApiDocument(req), 200, req);
+    }
+    if (swaggerUiPaths.has(url.pathname) && req.method === "GET") {
+      return textResponse(
+        renderSwaggerUiHtml("./openapi.json", `${config.appName} Swagger`),
+        200,
+        req,
+        "text/html; charset=utf-8",
+      );
+    }
+
     if (authLoginPaths.has(url.pathname) && req.method === "POST") {
       return authLogin(req);
     }
     if (authMePaths.has(url.pathname) && req.method === "GET") {
       return authMe(req);
+    }
+    if (aiSettingsPaths.has(url.pathname)) {
+      if (req.method === "GET") return handleAiSettingsGet(req);
+      if (req.method === "PUT") return handleAiSettingsUpdate(req);
     }
     if (whatsappProfilePaths.has(url.pathname)) {
       if (req.method === "GET") return handleWhatsAppProfileGet(req);
@@ -4559,6 +6033,9 @@ const server = Bun.serve<WsUserData>({
     }
     if (pipelineBoardPaths.has(url.pathname) && req.method === "GET") {
       return handlePipelineBoard(req);
+    }
+    if (pipelineBoardColumnPaths.has(url.pathname) && req.method === "GET") {
+      return handlePipelineBoardColumn(req);
     }
     if (contactsPaths.has(url.pathname) && req.method === "POST") {
       return handleContactCreate(req);
@@ -4744,6 +6221,18 @@ const server = Bun.serve<WsUserData>({
     if (handoffQueuePaths.has(url.pathname) && req.method === "GET") {
       return handleHandoffQueueList(req);
     }
+
+    // ── Reports routes ───────────────────────────────────────
+    if (reportsPaths.has(url.pathname) && req.method === "GET") {
+      return handleReportsLeads(req);
+    }
+    if (reportsPerformancePaths.has(url.pathname) && req.method === "GET") {
+      return handleReportsPerformance(req);
+    }
+    if (reportsExportPaths.has(url.pathname) && req.method === "GET") {
+      return handleReportsExport(req);
+    }
+
     const handoffSuffix = extractPathSuffix(url.pathname, handoffQueuePrefix);
     if (handoffSuffix) {
       const parts = handoffSuffix.split("/");

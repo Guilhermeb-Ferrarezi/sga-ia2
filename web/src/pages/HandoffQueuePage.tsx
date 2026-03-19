@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { motion } from "framer-motion";
 import {
   ArrowRightCircle,
   Info,
@@ -44,6 +45,14 @@ const slaLabel: Record<string, string> = {
   ok: "SLA ok",
   warning: "SLA atencao",
   critical: "SLA critico",
+};
+
+const handoffStatusLabel: Record<string, string> = {
+  QUEUED: "Na fila",
+  ASSIGNED: "Atribuido",
+  IN_PROGRESS: "Em atendimento",
+  RESOLVED: "Resolvido",
+  NONE: "Sem handoff",
 };
 
 export default function HandoffQueuePage() {
@@ -157,7 +166,7 @@ export default function HandoffQueuePage() {
   );
 
   return (
-    <div className="stagger space-y-5">
+    <motion.div className="space-y-5" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.5, ease: "easeOut" }}>
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h2 className="text-xl font-bold">Fila de Handoff Humano</h2>
         <div className="flex items-center gap-2">
@@ -270,8 +279,63 @@ export default function HandoffQueuePage() {
                 <p className="text-xs text-muted-foreground">
                   Atribuido para: {item.assignedTo || "Nao atribuido"}
                 </p>
+                <p className="text-xs text-muted-foreground">
+                  Status: {handoffStatusLabel[item.handoffStatus] || item.handoffStatus}
+                </p>
+                {item.firstHumanReplyAt && (
+                  <p className="text-xs text-muted-foreground">
+                    Primeiro retorno humano: {formatDate(item.firstHumanReplyAt)}
+                  </p>
+                )}
+                {item.aiSummary && (
+                  <div className="rounded-md border border-border/60 bg-background/50 px-2 py-2">
+                    <p className="text-[11px] uppercase tracking-[0.12em] text-muted-foreground">
+                      Resumo para o atendente
+                    </p>
+                    <p className="mt-1 text-sm text-foreground/90">{item.aiSummary}</p>
+                  </div>
+                )}
+                {item.triageMissing.length > 0 && (
+                  <div className="space-y-1">
+                    <p className="text-[11px] uppercase tracking-[0.12em] text-muted-foreground">
+                      Triagem pendente
+                    </p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {item.triageMissing.map((field) => (
+                        <Badge key={field} variant="outline" className="h-5 px-2 text-[10px]">
+                          {field}
+                        </Badge>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {(item.triageSnapshot.tournament ||
+                  item.triageSnapshot.eventDate ||
+                  item.triageSnapshot.category ||
+                  item.triageSnapshot.city ||
+                  item.triageSnapshot.teamName ||
+                  item.triageSnapshot.playersCount ||
+                  item.triageSnapshot.email) && (
+                  <div className="rounded-md border border-border/60 bg-background/50 px-2 py-2 text-xs text-muted-foreground">
+                    {[item.triageSnapshot.tournament, item.triageSnapshot.eventDate, item.triageSnapshot.category, item.triageSnapshot.city, item.triageSnapshot.teamName, item.triageSnapshot.playersCount ? `${item.triageSnapshot.playersCount} jogadores` : null, item.triageSnapshot.email]
+                      .filter(Boolean)
+                      .join(" • ")}
+                  </div>
+                )}
                 {item.latestMessage && (
                   <p className="rounded-md border border-border/60 bg-background/50 px-2 py-1 text-sm text-foreground/90">
+                    <span className="text-xs text-muted-foreground">
+                      {item.latestMessage.source === "AGENT"
+                        ? item.latestMessage.sentByUser?.name || item.latestMessage.sentByUser?.email || "Equipe"
+                        : item.latestMessage.source === "SYSTEM"
+                          ? "Equipe"
+                          : item.latestMessage.source === "AI"
+                            ? "Assistente"
+                            : item.latestMessage.direction === "out"
+                              ? "Equipe"
+                              : "Cliente"}
+                      :{" "}
+                    </span>
                     "{item.latestMessage.body}"
                   </p>
                 )}
@@ -337,6 +401,6 @@ export default function HandoffQueuePage() {
           );
         })}
       </div>
-    </div>
+    </motion.div>
   );
 }

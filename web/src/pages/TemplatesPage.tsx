@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { motion } from "framer-motion";
 import { Edit2, Plus, Save, Trash2, X } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { api, type MessageTemplate } from "@/lib/api";
@@ -100,7 +101,7 @@ export default function TemplatesPage() {
   };
 
   return (
-    <div className="stagger space-y-5">
+    <motion.div className="space-y-5" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.5, ease: "easeOut" }}>
       <div className="flex items-center justify-between">
         <h2 className="text-xl font-bold">Templates</h2>
         <Button size="sm" onClick={() => setShowForm(true)} disabled={!canManageTemplates}>
@@ -258,6 +259,6 @@ export default function TemplatesPage() {
           </Button>
         </div>
       </div>
-    </div>
+    </motion.div>
   );
 }

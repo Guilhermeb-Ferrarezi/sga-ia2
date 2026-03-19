@@ -9,10 +9,25 @@ datasource db {
 
 enum UserRole {
   ADMIN
-  MANAGER
   AGENT
+  MANAGER
   VIEWER
   CUSTOM
+}
+
+enum HandoffStatus {
+  NONE
+  QUEUED
+  ASSIGNED
+  IN_PROGRESS
+  RESOLVED
+}
+
+enum MessageSource {
+  USER
+  AI
+  AGENT
+  SYSTEM
 }
 
 model User {
@@ -27,6 +42,9 @@ model User {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
   auditLogs    ContactAuditLog[]
+  assignedHandoffs Contact[] @relation("HandoffAssignedUser")
+  resolvedHandoffs Contact[] @relation("HandoffResolvedUser")
+  sentMessages Message[] @relation("UserSentMessages")
 
   @@index([customRoleId])
 }
@@ -35,7 +53,7 @@ model CustomRole {
   id          String   @id @default(cuid())
   name        String   @unique
   description String?
-  permissions Json
+  permissions Json     @default("[]")
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
   users       User[]
@@ -57,13 +75,23 @@ model Contact {
   leadStatus        String         @default("open")
   triageCompleted   Boolean        @default(false)
   handoffRequested  Boolean        @default(false)
+  handoffStatus     HandoffStatus  @default(NONE)
   handoffReason     String?
   handoffAt         DateTime?
+  handoffAssignedAt DateTime?
+  handoffFirstHumanReplyAt DateTime?
+  handoffResolvedAt DateTime?
+  handoffAssignedToUserId String?
+  handoffAssignedToUser User? @relation("HandoffAssignedUser", fields: [handoffAssignedToUserId], references: [id], onDelete: SetNull)
+  handoffResolvedByUserId String?
+  handoffResolvedByUser User? @relation("HandoffResolvedUser", fields: [handoffResolvedByUserId], references: [id], onDelete: SetNull)
   source            String?
   notes             String?
   botEnabled        Boolean        @default(true)
   customBotPersona  String?
   aiSummary         String?
+  leadScore         Int            @default(0)
+  qualificationData Json?
   age               String?
   level             String?
   objective         String?
@@ -77,6 +105,9 @@ model Contact {
   @@index([stageId])
   @@index([leadStatus])
   @@index([lastInteractionAt])
+  @@index([handoffRequested])
+  @@index([handoffStatus])
+  @@index([handoffAssignedToUserId])
 }
 
 model Message {
@@ -84,11 +115,16 @@ model Message {
   contactId   Int
   contact     Contact  @relation(fields: [contactId], references: [id], onDelete: Cascade)
   direction   String
+  source      MessageSource?
   body        String
+  sentByUserId String?
+  sentByUser  User?    @relation("UserSentMessages", fields: [sentByUserId], references: [id], onDelete: SetNull)
   waMessageId String?
   createdAt   DateTime @default(now())
 
   @@index([contactId, createdAt])
+  @@index([source])
+  @@index([sentByUserId])
   @@unique([contactId, waMessageId])
 }
 
@@ -96,11 +132,17 @@ model Faq {
   id        Int      @id @default(autoincrement())
   question  String   @unique
   answer    String
+  subject   String?  @default("geral")
+  edition   String?
+  faqType   String   @default("qa")
+  content   String?
   isActive  Boolean  @default(true)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([isActive])
+  @@index([subject])
+  @@index([faqType])
 }
 
 model PipelineStage {
@@ -191,4 +233,15 @@ model Audio {
   updatedAt DateTime @updatedAt
 
   @@index([category])
+}
+
+model AiSettings {
+  id           Int      @id @default(1)
+  model        String
+  language     String
+  personality  String
+  style        String
+  systemPrompt String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 }

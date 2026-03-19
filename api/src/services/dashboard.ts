@@ -18,8 +18,18 @@ export interface DashboardConversation {
 export interface ConversationTurnView {
   id: string;
   role: string;
+  source: string | null;
   content: string;
   createdAt: string;
+  sentBy: { email: string; name: string | null } | null;
+}
+
+export interface ConversationTurnsPage {
+  items: ConversationTurnView[];
+  total: number;
+  limit: number;
+  offset: number;
+  hasMore: boolean;
 }
 
 const toPreview = (text: string): string => {
@@ -110,32 +120,57 @@ export class DashboardService {
     prisma: PrismaClient,
     phone: string,
     limit: number,
-  ): Promise<ConversationTurnView[]> {
+    offset: number,
+  ): Promise<ConversationTurnsPage> {
     const contact = await prisma.contact.findUnique({
       where: { waId: phone },
       select: { id: true },
     });
-    if (!contact) return [];
+    if (!contact) {
+      return { items: [], total: 0, limit, offset: 0, hasMore: false };
+    }
+
+    const total = await prisma.message.count({
+      where: { contactId: contact.id },
+    });
+    const maxOffset = total > 0 ? Math.floor((total - 1) / limit) * limit : 0;
+    const safeOffset = Math.max(0, Math.min(offset, maxOffset));
 
     const latestTurns = await prisma.message.findMany({
       where: { contactId: contact.id },
       orderBy: { createdAt: "desc" },
+      skip: safeOffset,
       take: limit,
       select: {
         id: true,
         direction: true,
+        source: true,
         body: true,
         createdAt: true,
+        sentByUser: {
+          select: {
+            email: true,
+            name: true,
+          },
+        },
       },
     });
 
     const turns = [...latestTurns].reverse();
 
-    return turns.map((turn) => ({
-      id: String(turn.id),
-      role: turn.direction === "in" ? "user" : "assistant",
-      content: turn.body,
-      createdAt: turn.createdAt.toISOString(),
-    }));
+    return {
+      items: turns.map((turn) => ({
+        id: String(turn.id),
+        role: turn.direction === "in" ? "user" : "assistant",
+        source: turn.source,
+        content: turn.body,
+        createdAt: turn.createdAt.toISOString(),
+        sentBy: turn.sentByUser,
+      })),
+      total,
+      limit,
+      offset: safeOffset,
+      hasMore: safeOffset + latestTurns.length < total,
+    };
   }
 }

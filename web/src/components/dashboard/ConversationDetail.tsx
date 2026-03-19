@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type UIEvent } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Bot, BotOff, Loader2, Send } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { useWebSocket, type WsEventPayload } from "@/contexts/WebSocketContext";
@@ -18,7 +18,7 @@ import LoadingScreen from "@/components/ui/loading-screen";
 import { AudioPlayer } from "@/components/ui/audio-player";
 import { useAudioPlayer } from "@/hooks/useAudioPlayer";
 
-const TURNS_PAGE_SIZE = 120;
+const TURNS_PAGE_SIZE = 40;
 
 const AUDIO_TAG_RE = /\[AUDIO:(.+?)\|(.+?)\]/;
 
@@ -35,6 +35,26 @@ const formatDateTime = (value: string): string =>
     dateStyle: "short",
     timeStyle: "short",
   }).format(new Date(value));
+
+const getTurnLabel = (turn: DashboardTurn): string => {
+  if (turn.source === "AGENT") return turn.sentBy?.name || turn.sentBy?.email || "Equipe";
+  if (turn.source === "SYSTEM") return "Equipe";
+  if (turn.source === "AI") return "Assistente";
+  return turn.role === "assistant" ? "Assistente" : "Cliente";
+};
+
+const mergeTurns = (...groups: DashboardTurn[][]): DashboardTurn[] => {
+  const byId = new Map<string, DashboardTurn>();
+  for (const group of groups) {
+    for (const turn of group) {
+      byId.set(turn.id, turn);
+    }
+  }
+  return [...byId.values()].sort(
+    (left, right) =>
+      new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime(),
+  );
+};
 
 interface ConversationDetailProps {
   phone: string;
@@ -56,11 +76,14 @@ export default function ConversationDetail({
   const [botEnabled, setBotEnabled] = useState(initialBotEnabled ?? true);
   const [messageText, setMessageText] = useState("");
   const [sending, setSending] = useState(false);
-  const [turnsLimit, setTurnsLimit] = useState(TURNS_PAGE_SIZE);
+  const [totalTurns, setTotalTurns] = useState(0);
   const [hasMoreTurns, setHasMoreTurns] = useState(true);
+  const [loadedTurnsCount, setLoadedTurnsCount] = useState(0);
   const listRef = useRef<HTMLDivElement | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const turnsRef = useRef<DashboardTurn[]>([]);
+  const loadedTurnsCountRef = useRef(0);
   
   const { playingId: playingTurnId, duration, currentTime, isPlaying, togglePlay, stopAudio, seek } = useAudioPlayer({ token });
 
@@ -70,35 +93,33 @@ export default function ConversationDetail({
     }, 50);
   };
 
-  const loadTurns = useCallback(async (
-    limit: number,
-    opts?: { showLoading?: boolean; preserveOffset?: boolean; scrollToEnd?: boolean },
+  useEffect(() => {
+    turnsRef.current = turns;
+  }, [turns]);
+
+  useEffect(() => {
+    loadedTurnsCountRef.current = loadedTurnsCount;
+  }, [loadedTurnsCount]);
+
+  const loadInitialTurns = useCallback(async (
+    opts?: { showLoading?: boolean; scrollToEnd?: boolean },
   ) => {
     if (!token || !phone) return;
     const showLoading = opts?.showLoading ?? false;
-    const preserveOffset = opts?.preserveOffset ?? false;
     const scrollToEndAfterLoad = opts?.scrollToEnd ?? false;
-
-    const container = listRef.current;
-    const previousScrollHeight = preserveOffset ? container?.scrollHeight ?? 0 : 0;
-    const previousScrollTop = preserveOffset ? container?.scrollTop ?? 0 : 0;
 
     if (showLoading) setLoading(true);
     try {
-      const data = await api.conversationTurns(token, phone, limit);
-      setTurns(data);
-      setHasMoreTurns(data.length >= limit);
+      const data = await api.conversationTurns(token, phone, { limit: TURNS_PAGE_SIZE, offset: 0 });
+      turnsRef.current = data.items;
+      loadedTurnsCountRef.current = data.items.length;
+      setTurns(data.items);
+      setLoadedTurnsCount(data.items.length);
+      setTotalTurns(data.total);
+      setHasMoreTurns(data.hasMore);
 
       if (scrollToEndAfterLoad) {
         scrollToBottom();
-      } else if (preserveOffset) {
-        setTimeout(() => {
-          const current = listRef.current;
-          if (!current) return;
-          const currentScrollHeight = current.scrollHeight;
-          const delta = currentScrollHeight - previousScrollHeight;
-          current.scrollTop = Math.max(0, previousScrollTop + delta);
-        }, 0);
       }
     } catch (err: unknown) {
       if (err && typeof err === "object" && "status" in err && (err as { status: number }).status === 401) {
@@ -109,20 +130,84 @@ export default function ConversationDetail({
     }
   }, [token, phone, logout]);
 
-  useEffect(() => {
-    setTurnsLimit(TURNS_PAGE_SIZE);
-    setHasMoreTurns(true);
-    void loadTurns(TURNS_PAGE_SIZE, { showLoading: true, scrollToEnd: true });
-  }, [phone, loadTurns]);
+  const refreshLatestTurns = useCallback(async (opts?: { scrollToEnd?: boolean }) => {
+    if (!token || !phone) return;
+    try {
+      const data = await api.conversationTurns(token, phone, {
+        limit: TURNS_PAGE_SIZE,
+        offset: 0,
+      });
+      const nextTurns = mergeTurns(turnsRef.current, data.items);
+      turnsRef.current = nextTurns;
+      loadedTurnsCountRef.current = nextTurns.length;
+      setTurns(nextTurns);
+      setLoadedTurnsCount(nextTurns.length);
+      setTotalTurns(data.total);
+      setHasMoreTurns(nextTurns.length < data.total);
+      if (opts?.scrollToEnd) {
+        scrollToBottom();
+      }
+    } catch (err: unknown) {
+      if (err && typeof err === "object" && "status" in err && (err as { status: number }).status === 401) {
+        logout();
+      }
+    }
+  }, [token, phone, logout]);
 
-  const scheduleTurnsRefresh = useCallback(() => {
+  const loadOlderTurns = useCallback(async () => {
+    if (!token || !phone || loadingMore || !hasMoreTurns) return;
+
+    const container = listRef.current;
+    const previousScrollHeight = container?.scrollHeight ?? 0;
+    const previousScrollTop = container?.scrollTop ?? 0;
+
+    setLoadingMore(true);
+    try {
+      const data = await api.conversationTurns(token, phone, {
+        limit: TURNS_PAGE_SIZE,
+        offset: loadedTurnsCountRef.current,
+      });
+      const nextTurns = mergeTurns(data.items, turnsRef.current);
+      turnsRef.current = nextTurns;
+      loadedTurnsCountRef.current = nextTurns.length;
+      setTurns(nextTurns);
+      setLoadedTurnsCount(nextTurns.length);
+      setTotalTurns(data.total);
+      setHasMoreTurns(nextTurns.length < data.total);
+      setTimeout(() => {
+        const current = listRef.current;
+        if (!current) return;
+        const currentScrollHeight = current.scrollHeight;
+        const delta = currentScrollHeight - previousScrollHeight;
+        current.scrollTop = Math.max(0, previousScrollTop + delta);
+      }, 0);
+    } catch (err: unknown) {
+      if (err && typeof err === "object" && "status" in err && (err as { status: number }).status === 401) {
+        logout();
+      }
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [token, phone, loadingMore, hasMoreTurns, logout]);
+
+  useEffect(() => {
+    turnsRef.current = [];
+    loadedTurnsCountRef.current = 0;
+    setTurns([]);
+    setLoadedTurnsCount(0);
+    setTotalTurns(0);
+    setHasMoreTurns(true);
+    void loadInitialTurns({ showLoading: true, scrollToEnd: true });
+  }, [phone, loadInitialTurns]);
+
+  const scheduleTurnsRefresh = useCallback((opts?: { scrollToEnd?: boolean }) => {
     if (refreshTimerRef.current) {
       clearTimeout(refreshTimerRef.current);
     }
     refreshTimerRef.current = setTimeout(() => {
-      void loadTurns(turnsLimit);
+      void refreshLatestTurns(opts);
     }, 220);
-  }, [loadTurns, turnsLimit]);
+  }, [refreshLatestTurns]);
 
   useEffect(() => {
     return () => {
@@ -138,48 +223,19 @@ export default function ConversationDetail({
     return subscribeFiltered(
       (event: WsEventPayload) => {
         if (event.type === "message:new" || event.type === "message:sent") {
-          const content =
-            typeof event.payload.content === "string" ? event.payload.content : "";
-          const role = typeof event.payload.role === "string" ? event.payload.role : "user";
-
-          if (content) {
-            const newTurn: DashboardTurn = {
-              id: `ws-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-              role,
-              content,
-              createdAt: new Date().toISOString(),
-            };
-            setTurns((prev) => [...prev, newTurn]);
-          }
-          scrollToBottom();
-          scheduleTurnsRefresh();
+          scheduleTurnsRefresh({ scrollToEnd: true });
         }
         if (event.type === "ai:processing") {
           setAiProcessing(true);
         }
         if (event.type === "ai:done") {
           setAiProcessing(false);
-          scheduleTurnsRefresh();
+          scheduleTurnsRefresh({ scrollToEnd: true });
         }
       },
       { types: ["message:new", "message:sent", "ai:processing", "ai:done"], waId: phone },
     );
-  }, [subscribeFiltered, phone, scheduleTurnsRefresh]);
-
-  const handleTurnsScroll = async (event: UIEvent<HTMLDivElement>) => {
-    const target = event.currentTarget;
-    if (loading || loadingMore || !hasMoreTurns) return;
-    if (target.scrollTop > 24) return;
-
-    const nextLimit = turnsLimit + TURNS_PAGE_SIZE;
-    setLoadingMore(true);
-    setTurnsLimit(nextLimit);
-    try {
-      await loadTurns(nextLimit, { preserveOffset: true });
-    } finally {
-      setLoadingMore(false);
-    }
-  };
+  }, [subscribeFiltered, phone, refreshLatestTurns, scheduleTurnsRefresh]);
 
   const toggleBot = async () => {
     if (!token) return;
@@ -217,7 +273,7 @@ export default function ConversationDetail({
               )}
             </CardTitle>
             <CardDescription>
-              {turns.length} mensagem(ns)
+              {loadedTurnsCount} de {totalTurns} mensagem(ns) carregada(s)
             </CardDescription>
           </div>
           <Button
@@ -243,9 +299,6 @@ export default function ConversationDetail({
         <div
           ref={listRef}
           className="h-full overflow-y-scroll pr-1"
-          onScroll={(event) => {
-            void handleTurnsScroll(event);
-          }}
         >
           <div className="space-y-3 p-4">
             {loading ? (
@@ -256,11 +309,29 @@ export default function ConversationDetail({
                 description="Buscando mensagens desta conversa."
               />
             ) : null}
-            {!loading && loadingMore && (
-              <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                Carregando mensagens antigas...
+            {!loading && hasMoreTurns && (
+              <div className="flex justify-center">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void loadOlderTurns()}
+                  disabled={loadingMore}
+                >
+                  {loadingMore ? (
+                    <>
+                      <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
+                      Carregando...
+                    </>
+                  ) : (
+                    `Carregar ${TURNS_PAGE_SIZE} mensagens anteriores`
+                  )}
+                </Button>
               </div>
+            )}
+            {!loading && !hasMoreTurns && totalTurns > TURNS_PAGE_SIZE && (
+              <p className="text-center text-xs text-muted-foreground">
+                Historico completo carregado.
+              </p>
             )}
             {!loading && !turns.length && (
               <p className="text-sm text-muted-foreground">
@@ -299,16 +370,16 @@ export default function ConversationDetail({
                   ) : (
                     <p className="whitespace-pre-wrap text-sm">{turn.content}</p>
                   )}
-                  <p
-                    className={cn(
-                      "mt-2 text-[11px]",
-                      turn.role === "assistant"
-                        ? "text-primary-foreground/80"
-                        : "text-secondary-foreground/70",
-                    )}
-                  >
-                    {turn.role} • {formatDateTime(turn.createdAt)}
-                  </p>
+                    <p
+                      className={cn(
+                        "mt-2 text-[11px]",
+                        turn.role === "assistant"
+                          ? "text-primary-foreground/80"
+                          : "text-secondary-foreground/70",
+                      )}
+                    >
+                      {getTurnLabel(turn)} • {formatDateTime(turn.createdAt)}
+                    </p>
                 </div>
               );
             })}

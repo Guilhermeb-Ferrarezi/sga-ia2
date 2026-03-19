@@ -97,6 +97,17 @@ export interface UpdateProfileInput {
   avatar?: File | null;
 }
 
+export interface AiSettingsSummary {
+  model: string;
+  language: string;
+  personality: string;
+  style: string;
+  systemPrompt: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+  source: "environment" | "database";
+}
+
 export interface AuthCustomRole {
   id: string;
   name: string;
@@ -132,8 +143,18 @@ export interface DashboardConversation {
 export interface DashboardTurn {
   id: string;
   role: string;
+  source: string | null;
   content: string;
   createdAt: string;
+  sentBy: { email: string; name: string | null } | null;
+}
+
+export interface DashboardTurnsPage {
+  items: DashboardTurn[];
+  total: number;
+  limit: number;
+  offset: number;
+  hasMore: boolean;
 }
 
 // ── Phase 2 types ──────────────────────────────────────────────────
@@ -144,6 +165,21 @@ export interface PipelineStage {
   position: number;
   color: string;
   isActive: boolean;
+}
+
+export type LeadStatus = "open" | "won" | "lost";
+export type PipelineStatusFilter = "all" | LeadStatus;
+export type PipelineHandoffFilter = "all" | "yes" | "no";
+export type PipelineBotFilter = "all" | "on" | "off";
+export type PipelineTriageFilter = "all" | "done" | "pending";
+
+export interface PipelineFilters {
+  limit?: number;
+  searchTerm?: string;
+  statusFilter?: PipelineStatusFilter;
+  handoffFilter?: PipelineHandoffFilter;
+  botFilter?: PipelineBotFilter;
+  triageFilter?: PipelineTriageFilter;
 }
 
 export interface ContactTag {
@@ -171,35 +207,76 @@ export interface PipelineContact {
   teamName?: string | null;
   playersCount?: number | null;
   stageId: number | null;
-  leadStatus: "open" | "won" | "lost" | string;
+  leadStatus: LeadStatus | string;
+  leadScore?: number;
   triageCompleted?: boolean;
   handoffRequested?: boolean;
+  handoffStatus?: string;
   handoffReason?: string | null;
   handoffAt?: string | null;
+  handoffAssignedAt?: string | null;
+  handoffFirstHumanReplyAt?: string | null;
   source: string | null;
   notes: string | null;
   age: string | null;
   level: string | null;
   objective: string | null;
   botEnabled: boolean;
+  aiSummary?: string | null;
   lastInteractionAt: string | null;
   createdAt: string;
   tags: ContactTag[];
   messages: Array<{ body: string; createdAt: string }>;
 }
 
+export interface PipelineColumnPage extends PaginatedResult<PipelineContact> {}
+
+export interface PipelineBoardStage extends PipelineStage, PipelineColumnPage {}
+
 export interface PipelineBoard {
-  stages: Array<PipelineStage & { contacts: PipelineContact[] }>;
-  unassigned: PipelineContact[];
+  stages: PipelineBoardStage[];
+  unassigned: PipelineColumnPage;
 }
+
+export type FaqType = "general" | "tournament" | "registration" | "rules" | "pricing" | "other";
 
 export interface Faq {
   id: number;
   question: string;
   answer: string;
+  subject: string | null;
+  edition: string | null;
+  faqType: FaqType | string;
+  content: string | null;
   isActive: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface LeadsReport {
+  period: { days: number; since: string };
+  totalLeads: number;
+  qualifiedLeads: number;
+  wonLeads: number;
+  lostLeads: number;
+  conversionRate: number;
+  qualificationRate: number;
+  totalMessages: number;
+  avgResponseMinutes: number | null;
+  dailyTrend: Array<{ day: string; count: number }>;
+}
+
+export interface AgentPerformance {
+  agentId: string;
+  name: string;
+  email: string;
+  messagesSent: number;
+  handoffsResolved: number;
+}
+
+export interface PerformanceReport {
+  period: { days: number; since: string };
+  agents: AgentPerformance[];
 }
 
 export interface MessageTemplate {
@@ -316,15 +393,31 @@ export interface HandoffQueueItem {
     name: string;
     color: string;
   } | null;
+  handoffStatus: string;
   handoffReason: string | null;
   handoffAt: string | null;
   waitMinutes: number;
   slaLevel: HandoffSlaLevel;
   assignedTo: string | null;
   assignedAt: string | null;
+  firstHumanReplyAt: string | null;
+  aiSummary: string | null;
+  triageMissing: string[];
+  triageSnapshot: {
+    email: string | null;
+    tournament: string | null;
+    eventDate: string | null;
+    category: string | null;
+    city: string | null;
+    teamName: string | null;
+    playersCount: number | null;
+  };
   latestMessage: {
     body: string;
     createdAt: string;
+    direction: string;
+    source: string | null;
+    sentByUser: { email: string; name: string | null } | null;
   } | null;
   openTasks: Array<{
     id: number;
@@ -389,6 +482,30 @@ const getApiErrorMessage = (payload: unknown, fallback: string): string =>
   typeof (payload as { error?: unknown }).error === "string"
     ? (payload as { error: string }).error
     : fallback;
+
+const buildPipelineQuerySuffix = (
+  filters?: PipelineFilters & { offset?: number; stageId?: number | null },
+): string => {
+  const params = new URLSearchParams();
+  if (typeof filters?.limit === "number") params.set("limit", String(filters.limit));
+  if (typeof filters?.offset === "number") params.set("offset", String(filters.offset));
+  if (typeof filters?.stageId === "number") params.set("stageId", String(filters.stageId));
+  if (filters?.stageId === null) params.set("stageId", "null");
+  if (filters?.searchTerm) params.set("searchTerm", filters.searchTerm);
+  if (filters?.statusFilter && filters.statusFilter !== "all") {
+    params.set("statusFilter", filters.statusFilter);
+  }
+  if (filters?.handoffFilter && filters.handoffFilter !== "all") {
+    params.set("handoffFilter", filters.handoffFilter);
+  }
+  if (filters?.botFilter && filters.botFilter !== "all") {
+    params.set("botFilter", filters.botFilter);
+  }
+  if (filters?.triageFilter && filters.triageFilter !== "all") {
+    params.set("triageFilter", filters.triageFilter);
+  }
+  return params.toString() ? `?${params.toString()}` : "";
+};
 
 const request = async <T>(
   path: string,
@@ -497,6 +614,24 @@ export const api = {
     }
 
     return payload as UpdateProfileResponse;
+  },
+
+  async aiSettings(token: string): Promise<AiSettingsSummary> {
+    return request<AiSettingsSummary>("/settings/ai", { method: "GET" }, token);
+  },
+
+  async updateAiSettings(
+    token: string,
+    input: Pick<AiSettingsSummary, "model" | "language" | "personality" | "style" | "systemPrompt">,
+  ): Promise<AiSettingsSummary> {
+    return request<AiSettingsSummary>(
+      "/settings/ai",
+      {
+        method: "PUT",
+        body: JSON.stringify(input),
+      },
+      token,
+    );
   },
 
   async whatsappProfile(token: string): Promise<WhatsAppProfileSummary> {
@@ -635,10 +770,12 @@ export const api = {
   async conversationTurns(
     token: string,
     phone: string,
-    limit = 300,
-  ): Promise<DashboardTurn[]> {
-    return request<DashboardTurn[]>(
-      `/dashboard/conversations/${encodeURIComponent(phone)}/turns?limit=${limit}`,
+    options?: { limit?: number; offset?: number },
+  ): Promise<DashboardTurnsPage> {
+    const limit = options?.limit ?? 40;
+    const offset = options?.offset ?? 0;
+    return request<DashboardTurnsPage>(
+      `/dashboard/conversations/${encodeURIComponent(phone)}/turns?limit=${limit}&offset=${offset}`,
       { method: "GET" },
       token,
     );
@@ -685,8 +822,24 @@ export const api = {
     );
   },
 
-  async pipelineBoard(token: string): Promise<PipelineBoard> {
-    return request<PipelineBoard>("/pipeline/board", { method: "GET" }, token);
+  async pipelineBoard(
+    token: string,
+    filters?: PipelineFilters,
+  ): Promise<PipelineBoard> {
+    const suffix = buildPipelineQuerySuffix(filters);
+    return request<PipelineBoard>(`/pipeline/board${suffix}`, { method: "GET" }, token);
+  },
+
+  async pipelineBoardColumn(
+    token: string,
+    filters?: PipelineFilters & { offset?: number; stageId?: number | null },
+  ): Promise<PipelineColumnPage> {
+    const suffix = buildPipelineQuerySuffix(filters);
+    return request<PipelineColumnPage>(
+      `/pipeline/board/column${suffix}`,
+      { method: "GET" },
+      token,
+    );
   },
 
   async funnelMetrics(token: string): Promise<FunnelStageMetric[]> {
@@ -801,21 +954,44 @@ export const api = {
 
   async faqs(
     token: string,
-    filters?: { limit?: number; offset?: number; search?: string; isActive?: boolean | null },
-  ): Promise<PaginatedResult<Faq>> {
+    filters?: {
+      limit?: number;
+      offset?: number;
+      search?: string;
+      isActive?: boolean | null;
+      subject?: string;
+      edition?: string;
+      faqType?: string;
+    },
+  ): Promise<PaginatedResult<Faq> & { subjects?: string[]; editions?: string[] }> {
     const params = new URLSearchParams();
     if (typeof filters?.limit === "number") params.set("limit", String(filters.limit));
     if (typeof filters?.offset === "number") params.set("offset", String(filters.offset));
     if (filters?.search) params.set("search", filters.search);
     if (filters?.isActive === true) params.set("isActive", "true");
     if (filters?.isActive === false) params.set("isActive", "false");
+    if (filters?.subject) params.set("subject", filters.subject);
+    if (filters?.edition) params.set("edition", filters.edition);
+    if (filters?.faqType) params.set("faqType", filters.faqType);
     const suffix = params.toString() ? `?${params.toString()}` : "";
-    return request<PaginatedResult<Faq>>(`/faqs${suffix}`, { method: "GET" }, token);
+    return request<PaginatedResult<Faq> & { subjects?: string[]; editions?: string[] }>(
+      `/faqs${suffix}`,
+      { method: "GET" },
+      token,
+    );
   },
 
   async createFaq(
     token: string,
-    data: { question: string; answer: string; isActive?: boolean },
+    data: {
+      question?: string;
+      answer?: string;
+      isActive?: boolean;
+      subject?: string;
+      edition?: string;
+      faqType?: string;
+      content?: string;
+    },
   ): Promise<Faq> {
     return request<Faq>(
       "/faqs",
@@ -827,7 +1003,15 @@ export const api = {
   async updateFaq(
     token: string,
     id: number,
-    data: Partial<{ question: string; answer: string; isActive: boolean }>,
+    data: Partial<{
+      question: string;
+      answer: string;
+      isActive: boolean;
+      subject: string;
+      edition: string;
+      faqType: string;
+      content: string;
+    }>,
   ): Promise<Faq> {
     return request<Faq>(
       `/faqs/${id}`,
@@ -1086,6 +1270,35 @@ export const api = {
 
   async deleteTask(token: string, id: number): Promise<void> {
     await request(`/tasks/${id}`, { method: "DELETE" }, token);
+  },
+
+  // ── Reports ─────────────────────────────────────────────
+
+  async reportsLeads(token: string, days = 30): Promise<LeadsReport> {
+    return request<LeadsReport>(
+      `/reports/leads?days=${days}`,
+      { method: "GET" },
+      token,
+    );
+  },
+
+  async reportsPerformance(token: string, days = 30): Promise<PerformanceReport> {
+    return request<PerformanceReport>(
+      `/reports/performance?days=${days}`,
+      { method: "GET" },
+      token,
+    );
+  },
+
+  async reportsExportCsv(token: string): Promise<Blob> {
+    const res = await fetch(`${API_BASE}/reports/export`, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+    if (!res.ok) throw new Error("Erro ao exportar contatos");
+    return res.blob();
   },
 };
 

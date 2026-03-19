@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { motion } from "framer-motion";
 import { Link } from "react-router-dom";
 import { ShieldAlert, Trash2, UserPlus, Users } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
@@ -95,7 +96,7 @@ export default function UsersPage() {
   };
 
   return (
-    <div className="stagger space-y-5">
+    <motion.div className="space-y-5" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.5, ease: "easeOut" }}>
       <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
         <div className="space-y-1">
           <h2 className="text-xl font-bold">Usuarios</h2>
@@ -225,6 +226,6 @@ export default function UsersPage() {
           )}
         </CardContent>
       </Card>
-    </div>
+    </motion.div>
   );
 }

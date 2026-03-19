@@ -30,6 +30,7 @@ const TasksPage = lazy(() => import("@/pages/TasksPage"));
 const AudiosPage = lazy(() => import("@/pages/AudiosPage"));
 const WhatsAppProfilePage = lazy(() => import("@/pages/WhatsAppProfilePage"));
 const SettingsPage = lazy(() => import("@/pages/SettingsPage"));
+const ReportsPage = lazy(() => import("@/pages/ReportsPage"));
 
 function PermissionRoute({
   permission,
@@ -201,6 +202,14 @@ function AuthGate() {
               }
             />
             <Route path="settings" element={<SettingsPage />} />
+            <Route
+              path="reports"
+              element={
+                <PermissionRoute permission={PERMISSIONS.DASHBOARD_VIEW}>
+                  <ReportsPage />
+                </PermissionRoute>
+              }
+            />
           </Route>
           <Route path="*" element={<Navigate to="/dashboard" replace />} />
         </Routes>

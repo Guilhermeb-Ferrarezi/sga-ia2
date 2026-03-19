@@ -1,3 +1,6 @@
+import type { PrismaClient } from "@prisma/client";
+import { resolveAiSettings, type AiSettingsSnapshot } from "./aiSettings";
+
 interface OpenAIOutputItem {
   type?: string;
   content?: Array<{
@@ -20,6 +23,11 @@ interface ChatMessage {
   content: Array<{ type: string; text: string }>;
 }
 
+type StoredHistoryMessage = {
+  direction: "in" | "out";
+  body: string;
+};
+
 export interface LeadExtraction {
   name?: string;
   email?: string;
@@ -31,6 +39,13 @@ export interface LeadExtraction {
   playersCount?: number;
   wantsHuman?: boolean;
   handoffReason?: string;
+}
+
+export interface GenerateReplyOptions {
+  triageMissing?: string[];
+  resumePendingContext?: string;
+  resumeMergedUserMessagesCount?: number;
+  mode?: "webhook" | "resume";
 }
 
 const allowedExtractionKeys = new Set<keyof LeadExtraction>([
@@ -261,33 +276,35 @@ const safeParseText = (payload: OpenAIResponseBody): string => {
 export class OpenAIService {
   constructor(
     private readonly apiKey: string,
-    private readonly model: string,
     private readonly appName: string,
     private readonly transcriptionModel: string,
-    private readonly assistantLanguage: string,
-    private readonly assistantPersonality: string,
-    private readonly assistantStyle: string,
-    private readonly assistantSystemPrompt?: string,
   ) {}
 
-  private buildSystemPrompt(extras?: {
+  async getRuntimeSettings(prisma?: PrismaClient): Promise<AiSettingsSnapshot> {
+    return resolveAiSettings(prisma);
+  }
+
+  private buildSystemPrompt(
+    settings: AiSettingsSnapshot,
+    extras?: {
     faqs?: string;
     contactInfo?: string;
     aiSummary?: string;
     triageMissing?: string[];
     audioList?: string;
-  }): string {
+  },
+  ): string {
     const sections: string[] = [];
 
-    if (this.assistantSystemPrompt) {
-      sections.push(this.assistantSystemPrompt);
+    if (settings.systemPrompt) {
+      sections.push(settings.systemPrompt);
     } else {
       sections.push(
         [
           `Voce e ${this.appName}, uma assistente de WhatsApp para atendimento de campeonatos de esports.`,
-          `Idioma principal: ${this.assistantLanguage}.`,
-          `Personalidade: ${this.assistantPersonality}.`,
-          `Estilo de resposta: ${this.assistantStyle}.`,
+          `Idioma principal: ${settings.language}.`,
+          `Personalidade: ${settings.personality}.`,
+          `Estilo de resposta: ${settings.style}.`,
           "Regras de comportamento:",
           "- Seja clara, rapida e util.",
           "- Faca perguntas objetivas quando faltar contexto.",
@@ -296,7 +313,7 @@ export class OpenAIService {
           "- Quando houver FAQ recuperada para a pergunta atual, use essa informacao como fonte principal.",
           "- Se a informacao procurada nao estiver no contexto recuperado, diga isso claramente em vez de supor.",
           "- Priorize triagem de lead para campeonato: nome, campeonato, data, categoria, cidade e time ou quantidade de jogadores.",
-          "- E-mail e opcional: so solicite se fizer sentido, sem travar o atendimento.",
+          "- E-mail é opcional: so solicite se fizer sentido, sem travar o atendimento.",
           "- Se o usuario pedir humano, confirme o encaminhamento e nao insista na automacao.",
         ].join("\n"),
       );
@@ -383,10 +400,14 @@ export class OpenAIService {
    */
   async generateReply(
     userMessage: string,
-    prisma?: import("@prisma/client").PrismaClient,
+    prisma?: PrismaClient,
     phone?: string,
-    options?: { triageMissing?: string[] },
+    options?: GenerateReplyOptions,
   ): Promise<string> {
+    const settings = await this.getRuntimeSettings(prisma);
+    console.log(
+      `[openai:reply] mode=${options?.mode ?? "webhook"} model=${settings.model}${phone ? ` phone=${phone}` : ""}`,
+    );
     let historyMessages: ChatMessage[] = [];
     let extras: {
       faqs?: string;
@@ -435,15 +456,12 @@ export class OpenAIService {
       // Load active FAQs
       const faqs = await prisma.faq.findMany({
         where: { isActive: true },
-        select: { question: true, answer: true },
+        select: { question: true, answer: true, content: true, subject: true },
       });
       if (faqs.length) {
-        extras.faqs = buildRelevantFaqContext(
-          faqs,
-          userMessage,
-          historyMessages,
-          extras.contactInfo,
-        );
+        extras.faqs = faqs
+          .map((f) => `P: ${f.question}\nR: ${f.answer}`)
+          .join("\n\n");
       }
 
       // Load available audios for the AI to choose from
@@ -466,10 +484,13 @@ export class OpenAIService {
           select: { direction: true, body: true },
         });
 
-        // Reverse to chronological order, exclude last user message (we add it ourselves)
-        historyMessages = recentMessages
-          .reverse()
-          .slice(0, -1) // drop the latest (current user message already persisted)
+        const chronologicalMessages = recentMessages.reverse() as StoredHistoryMessage[];
+        const dedupedMessages = trimTrailingMergedUserMessages(
+          chronologicalMessages,
+          Math.max(0, options?.resumeMergedUserMessagesCount ?? 0),
+        );
+
+        historyMessages = dedupedMessages
           .map((m) => ({
             role: (m.direction === "in" ? "user" : "assistant") as "user" | "assistant",
             content: [
@@ -490,12 +511,17 @@ export class OpenAIService {
     const input: ChatMessage[] = [
       {
         role: "system",
-        content: [{ type: "input_text", text: this.buildSystemPrompt(extras) }],
+        content: [{ type: "input_text", text: this.buildSystemPrompt(settings, extras) }],
       },
       ...historyMessages,
       {
         role: "user",
-        content: [{ type: "input_text", text: userMessage }],
+        content: [
+          {
+            type: "input_text",
+            text: options?.resumePendingContext?.trim() || userMessage,
+          },
+        ],
       },
     ];
 
@@ -506,7 +532,7 @@ export class OpenAIService {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: this.model,
+        model: settings.model,
         input,
         max_output_tokens: 350,
       }),
@@ -528,7 +554,11 @@ export class OpenAIService {
     return trimForWhatsApp(text);
   }
 
-  async extractLeadData(userMessage: string): Promise<LeadExtraction> {
+  async extractLeadData(
+    userMessage: string,
+    prisma?: PrismaClient,
+  ): Promise<LeadExtraction> {
+    const settings = await this.getRuntimeSettings(prisma);
     const response = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: {
@@ -536,7 +566,7 @@ export class OpenAIService {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: this.model,
+        model: settings.model,
         input: [
           {
             role: "system",
@@ -583,7 +613,9 @@ export class OpenAIService {
    */
   async detectTaskIntent(
     userMessage: string,
+    prisma?: PrismaClient,
   ): Promise<{ title: string; dueAt: string } | null> {
+    const settings = await this.getRuntimeSettings(prisma);
     const response = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: {
@@ -591,7 +623,7 @@ export class OpenAIService {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: this.model,
+        model: settings.model,
         input: [
           {
             role: "system",
@@ -642,7 +674,9 @@ export class OpenAIService {
   async suggestFaqEntry(
     userMessage: string,
     assistantReply: string,
+    prisma?: PrismaClient,
   ): Promise<{ question: string; answer: string } | null> {
+    const settings = await this.getRuntimeSettings(prisma);
     const response = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: {
@@ -650,7 +684,7 @@ export class OpenAIService {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: this.model,
+        model: settings.model,
         input: [
           {
             role: "system",
@@ -699,12 +733,22 @@ export class OpenAIService {
   }
 
   /** Generate a summary of the conversation and save to Contact.aiSummary */
+  async refreshConversationSummary(
+    prisma: PrismaClient,
+    contactId: number,
+    phone: string,
+  ): Promise<void> {
+    await this.generateAndSaveSummary(prisma, contactId, phone);
+  }
+
+  /** Generate a summary of the conversation and save to Contact.aiSummary */
   private async generateAndSaveSummary(
-    prisma: import("@prisma/client").PrismaClient,
+    prisma: PrismaClient,
     contactId: number,
     phone: string,
   ): Promise<void> {
     try {
+      const settings = await this.getRuntimeSettings(prisma);
       const messages = await prisma.message.findMany({
         where: { contactId },
         orderBy: { createdAt: "asc" },
@@ -723,7 +767,7 @@ export class OpenAIService {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          model: this.model,
+          model: settings.model,
           input: [
             {
               role: "system",

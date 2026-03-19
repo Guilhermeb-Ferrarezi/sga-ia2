@@ -1,0 +1,12 @@
+CREATE TABLE IF NOT EXISTS "AiSettings" (
+  "id" INTEGER NOT NULL DEFAULT 1,
+  "model" TEXT NOT NULL,
+  "language" TEXT NOT NULL,
+  "personality" TEXT NOT NULL,
+  "style" TEXT NOT NULL,
+  "systemPrompt" TEXT,
+  "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+  CONSTRAINT "AiSettings_pkey" PRIMARY KEY ("id")
+);

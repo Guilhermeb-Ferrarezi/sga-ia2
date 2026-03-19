@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { motion } from "framer-motion";
 import { Edit2, Plus, Save, Trash2, X } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { api, type Tag } from "@/lib/api";
@@ -98,7 +99,7 @@ export default function TagsPage() {
   };
 
   return (
-    <div className="stagger space-y-5">
+    <motion.div className="space-y-5" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.5, ease: "easeOut" }}>
       <h2 className="text-xl font-bold">Tags</h2>
 
       {!canManageTags && (
@@ -255,6 +256,6 @@ export default function TagsPage() {
           </Button>
         </div>
       </div>
-    </div>
+    </motion.div>
   );
 }
