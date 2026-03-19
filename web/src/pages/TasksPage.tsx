@@ -103,14 +103,14 @@ const emptyTaskForm = (): TaskFormState => ({
 
 const extractContactsFromBoard = (board: PipelineBoard): ContactOption[] => {
   const map = new Map<string, ContactOption>();
-  for (const contact of board.unassigned) {
+  for (const contact of board.unassigned.items) {
     map.set(contact.waId, {
       waId: contact.waId,
       label: contact.name ? `${contact.name} (${contact.waId})` : contact.waId,
     });
   }
   for (const stage of board.stages) {
-    for (const contact of stage.contacts) {
+    for (const contact of stage.items) {
       map.set(contact.waId, {
         waId: contact.waId,
         label: contact.name ? `${contact.name} (${contact.waId})` : contact.waId,
@@ -145,7 +145,7 @@ export default function TasksPage() {
           status: statusFilter,
           priority: priorityFilter,
         }),
-        api.pipelineBoard(token),
+        api.pipelineBoard(token, { limit: 100 }),
       ]);
       setTasks(taskData);
       setContacts(extractContactsFromBoard(boardData));

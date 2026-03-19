@@ -159,6 +159,21 @@ export interface PipelineStage {
   isActive: boolean;
 }
 
+export type LeadStatus = "open" | "won" | "lost";
+export type PipelineStatusFilter = "all" | LeadStatus;
+export type PipelineHandoffFilter = "all" | "yes" | "no";
+export type PipelineBotFilter = "all" | "on" | "off";
+export type PipelineTriageFilter = "all" | "done" | "pending";
+
+export interface PipelineFilters {
+  limit?: number;
+  searchTerm?: string;
+  statusFilter?: PipelineStatusFilter;
+  handoffFilter?: PipelineHandoffFilter;
+  botFilter?: PipelineBotFilter;
+  triageFilter?: PipelineTriageFilter;
+}
+
 export interface ContactTag {
   id: number;
   contactId: number;
@@ -184,7 +199,7 @@ export interface PipelineContact {
   teamName?: string | null;
   playersCount?: number | null;
   stageId: number | null;
-  leadStatus: "open" | "won" | "lost" | string;
+  leadStatus: LeadStatus | string;
   leadScore?: number;
   triageCompleted?: boolean;
   handoffRequested?: boolean;
@@ -206,9 +221,13 @@ export interface PipelineContact {
   messages: Array<{ body: string; createdAt: string }>;
 }
 
+export interface PipelineColumnPage extends PaginatedResult<PipelineContact> {}
+
+export interface PipelineBoardStage extends PipelineStage, PipelineColumnPage {}
+
 export interface PipelineBoard {
-  stages: Array<PipelineStage & { contacts: PipelineContact[] }>;
-  unassigned: PipelineContact[];
+  stages: PipelineBoardStage[];
+  unassigned: PipelineColumnPage;
 }
 
 export type FaqType = "general" | "tournament" | "registration" | "rules" | "pricing" | "other";
@@ -455,6 +474,30 @@ const getApiErrorMessage = (payload: unknown, fallback: string): string =>
   typeof (payload as { error?: unknown }).error === "string"
     ? (payload as { error: string }).error
     : fallback;
+
+const buildPipelineQuerySuffix = (
+  filters?: PipelineFilters & { offset?: number; stageId?: number | null },
+): string => {
+  const params = new URLSearchParams();
+  if (typeof filters?.limit === "number") params.set("limit", String(filters.limit));
+  if (typeof filters?.offset === "number") params.set("offset", String(filters.offset));
+  if (typeof filters?.stageId === "number") params.set("stageId", String(filters.stageId));
+  if (filters?.stageId === null) params.set("stageId", "null");
+  if (filters?.searchTerm) params.set("searchTerm", filters.searchTerm);
+  if (filters?.statusFilter && filters.statusFilter !== "all") {
+    params.set("statusFilter", filters.statusFilter);
+  }
+  if (filters?.handoffFilter && filters.handoffFilter !== "all") {
+    params.set("handoffFilter", filters.handoffFilter);
+  }
+  if (filters?.botFilter && filters.botFilter !== "all") {
+    params.set("botFilter", filters.botFilter);
+  }
+  if (filters?.triageFilter && filters.triageFilter !== "all") {
+    params.set("triageFilter", filters.triageFilter);
+  }
+  return params.toString() ? `?${params.toString()}` : "";
+};
 
 const request = async <T>(
   path: string,
@@ -769,8 +812,24 @@ export const api = {
     );
   },
 
-  async pipelineBoard(token: string): Promise<PipelineBoard> {
-    return request<PipelineBoard>("/pipeline/board", { method: "GET" }, token);
+  async pipelineBoard(
+    token: string,
+    filters?: PipelineFilters,
+  ): Promise<PipelineBoard> {
+    const suffix = buildPipelineQuerySuffix(filters);
+    return request<PipelineBoard>(`/pipeline/board${suffix}`, { method: "GET" }, token);
+  },
+
+  async pipelineBoardColumn(
+    token: string,
+    filters?: PipelineFilters & { offset?: number; stageId?: number | null },
+  ): Promise<PipelineColumnPage> {
+    const suffix = buildPipelineQuerySuffix(filters);
+    return request<PipelineColumnPage>(
+      `/pipeline/board/column${suffix}`,
+      { method: "GET" },
+      token,
+    );
   },
 
   async funnelMetrics(token: string): Promise<FunnelStageMetric[]> {

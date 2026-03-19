@@ -21,6 +21,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 
@@ -43,6 +44,12 @@ type AiSettingsFormState = {
   systemPrompt: string;
 };
 
+type AiModelOption = {
+  value: string;
+  label: string;
+  hint: string;
+};
+
 const emptyRoleForm: RoleFormState = { id: null, name: "", description: "", permissions: [] };
 const emptyAiSettingsForm: AiSettingsFormState = {
   model: "",
@@ -51,6 +58,44 @@ const emptyAiSettingsForm: AiSettingsFormState = {
   style: "",
   systemPrompt: "",
 };
+
+const AI_MODEL_OPTIONS: AiModelOption[] = [
+  {
+    value: "gpt-5.4",
+    label: "GPT-5.4",
+    hint: "Maior capacidade para triagem complexa, contexto longo e respostas mais consistentes.",
+  },
+  {
+    value: "gpt-5.4-mini",
+    label: "GPT-5.4 mini",
+    hint: "Equilibrio forte entre qualidade, custo e velocidade para atendimento recorrente.",
+  },
+  {
+    value: "gpt-5.4-nano",
+    label: "GPT-5.4 nano",
+    hint: "Opcao mais barata para alto volume e fluxos simples de triagem.",
+  },
+  {
+    value: "gpt-4.1",
+    label: "GPT-4.1",
+    hint: "Boa escolha para respostas detalhadas e uso intensivo de instrucoes.",
+  },
+  {
+    value: "gpt-4.1-mini",
+    label: "GPT-4.1 mini",
+    hint: "Versao mais economica do GPT-4.1 para operacao continua.",
+  },
+  {
+    value: "gpt-4o",
+    label: "GPT-4o",
+    hint: "Modelo versatil para respostas naturais e bom equilibrio geral.",
+  },
+  {
+    value: "gpt-4o-mini",
+    label: "GPT-4o mini",
+    hint: "Opcao leve para manter latencia baixa no WhatsApp.",
+  },
+];
 
 const toAiForm = (settings: AiSettingsSummary): AiSettingsFormState => ({
   model: settings.model,
@@ -168,6 +213,24 @@ export default function SettingsPage() {
       })).filter((group) => group.items.length > 0),
     [user],
   );
+
+  const aiModelOptions = useMemo(() => {
+    const currentModel = aiForm.model.trim();
+    if (!currentModel || AI_MODEL_OPTIONS.some((option) => option.value === currentModel)) {
+      return AI_MODEL_OPTIONS;
+    }
+
+    return [
+      {
+        value: currentModel,
+        label: `${currentModel} (atual)`,
+        hint: "Modelo carregado das configuracoes atuais e mantido por compatibilidade.",
+      },
+      ...AI_MODEL_OPTIONS,
+    ];
+  }, [aiForm.model]);
+
+  const selectedAiModel = aiModelOptions.find((option) => option.value === aiForm.model.trim()) ?? null;
 
   if (!user || !token) return null;
 
@@ -490,7 +553,25 @@ export default function SettingsPage() {
                       <div className="grid gap-4 md:grid-cols-2">
                         <div className="space-y-2">
                           <Label htmlFor="ai-model">Modelo</Label>
-                          <Input id="ai-model" value={aiForm.model} onChange={(event) => setAiForm((current) => ({ ...current, model: event.target.value }))} placeholder="gpt-4o-mini" disabled={savingAi} />
+                          <Select
+                            value={aiForm.model || undefined}
+                            onValueChange={(value) => setAiForm((current) => ({ ...current, model: value }))}
+                            disabled={savingAi}
+                          >
+                            <SelectTrigger id="ai-model">
+                              <SelectValue placeholder="Selecione o modelo da IA" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {aiModelOptions.map((option) => (
+                                <SelectItem key={option.value} value={option.value}>
+                                  {option.label}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                          <p className="text-xs text-muted-foreground">
+                            {selectedAiModel?.hint ?? "Escolha o modelo global usado em respostas, triagem e extracao."}
+                          </p>
                         </div>
                         <div className="space-y-2">
                           <Label htmlFor="ai-language">Idioma principal</Label>

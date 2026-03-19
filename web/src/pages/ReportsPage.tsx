@@ -9,7 +9,7 @@ import {
   Target,
   Award,
 } from "lucide-react";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion, AnimatePresence, type Variants } from "framer-motion";
 import { useAuth } from "@/contexts/AuthContext";
 import { api, type LeadsReport, type PerformanceReport } from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -54,9 +54,14 @@ const cardVariant = {
     opacity: 1,
     y: 0,
     scale: 1,
-    transition: { delay: i * 0.08, type: "spring", stiffness: 300, damping: 24 },
+    transition: {
+      delay: i * 0.08,
+      type: "spring" as const,
+      stiffness: 300,
+      damping: 24,
+    },
   }),
-};
+} satisfies Variants;
 
 export default function ReportsPage() {
   const { token } = useAuth();

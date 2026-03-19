@@ -150,12 +150,12 @@ export default function ContactsPage() {
     setLoading(true);
     try {
       const [board, tagData] = await Promise.all([
-        api.pipelineBoard(token),
+        api.pipelineBoard(token, { limit: 100 }),
         api.tags(token, { limit: 200, offset: 0 }),
       ]);
       const allContacts = [
-        ...board.unassigned,
-        ...board.stages.flatMap((stage) => stage.contacts),
+        ...board.unassigned.items,
+        ...board.stages.flatMap((stage) => stage.items),
       ].sort((a, b) => {
         const aTime = a.lastInteractionAt ? new Date(a.lastInteractionAt).getTime() : 0;
         const bTime = b.lastInteractionAt ? new Date(b.lastInteractionAt).getTime() : 0;
@@ -321,10 +321,10 @@ export default function ContactsPage() {
 
   const refreshAndKeepDetails = async (waId: string) => {
     if (!token) return;
-    const board = await api.pipelineBoard(token);
+    const board = await api.pipelineBoard(token, { limit: 100 });
     const allContacts = [
-      ...board.unassigned,
-      ...board.stages.flatMap((stage) => stage.contacts),
+      ...board.unassigned.items,
+      ...board.stages.flatMap((stage) => stage.items),
     ].sort((a, b) => {
       const aTime = a.lastInteractionAt ? new Date(a.lastInteractionAt).getTime() : 0;
       const bTime = b.lastInteractionAt ? new Date(b.lastInteractionAt).getTime() : 0;

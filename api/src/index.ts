@@ -217,6 +217,10 @@ const pipelineBoardPaths = new Set<string>([
   `${config.apiBasePath}/pipeline/board`,
   "/pipeline/board",
 ]);
+const pipelineBoardColumnPaths = new Set<string>([
+  `${config.apiBasePath}/pipeline/board/column`,
+  "/pipeline/board/column",
+]);
 const contactsPaths = new Set<string>([
   `${config.apiBasePath}/contacts`,
   "/contacts",
@@ -338,6 +342,19 @@ type HandoffStatusValue =
 
 type MessageSourceValue = "USER" | "AI" | "AGENT" | "SYSTEM";
 
+type PipelineStatusFilterValue = "all" | "open" | "won" | "lost";
+type PipelineHandoffFilterValue = "all" | "yes" | "no";
+type PipelineBotFilterValue = "all" | "on" | "off";
+type PipelineTriageFilterValue = "all" | "done" | "pending";
+
+type PipelineQueryFilters = {
+  searchTerm: string;
+  statusFilter: PipelineStatusFilterValue;
+  handoffFilter: PipelineHandoffFilterValue;
+  botFilter: PipelineBotFilterValue;
+  triageFilter: PipelineTriageFilterValue;
+};
+
 type HandoffStateSnapshot = {
   handoffRequested?: boolean | null;
   handoffStatus?: string | null;
@@ -352,12 +369,169 @@ const ACTIVE_HANDOFF_STATUSES: HandoffStatusValue[] = [
   "IN_PROGRESS",
 ];
 
+const PIPELINE_PAGE_SIZE_DEFAULT = 20;
+const PIPELINE_PAGE_SIZE_MIN = 5;
+const PIPELINE_PAGE_SIZE_MAX = 100;
+const VALID_PIPELINE_STATUS_FILTERS = new Set<PipelineStatusFilterValue>([
+  "all",
+  "open",
+  "won",
+  "lost",
+]);
+const VALID_PIPELINE_HANDOFF_FILTERS = new Set<PipelineHandoffFilterValue>([
+  "all",
+  "yes",
+  "no",
+]);
+const VALID_PIPELINE_BOT_FILTERS = new Set<PipelineBotFilterValue>([
+  "all",
+  "on",
+  "off",
+]);
+const VALID_PIPELINE_TRIAGE_FILTERS = new Set<PipelineTriageFilterValue>([
+  "all",
+  "done",
+  "pending",
+]);
+
+const PIPELINE_CONTACT_INCLUDE = {
+  tags: { include: { tag: true } },
+  messages: {
+    orderBy: { createdAt: "desc" },
+    take: 1,
+    select: { body: true, createdAt: true },
+  },
+} satisfies Prisma.ContactInclude;
+
 const activeHandoffWhere = (): Prisma.ContactWhereInput => ({
   OR: [
     { handoffRequested: true },
     { handoffStatus: { in: ACTIVE_HANDOFF_STATUSES } },
   ],
 });
+
+const parseBoundedInteger = (
+  raw: string | null,
+  defaultValue: number,
+  min: number,
+  max: number,
+): number => {
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed)) return defaultValue;
+  return Math.min(max, Math.max(min, parsed));
+};
+
+const parsePipelineStageId = (raw: string | null): number | null | "invalid" => {
+  if (raw === null || raw === "" || raw === "null" || raw === "unassigned") {
+    return null;
+  }
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed <= 0) return "invalid";
+  return parsed;
+};
+
+const parsePipelineFilters = (url: URL): PipelineQueryFilters => {
+  const statusRaw = url.searchParams.get("statusFilter")?.trim().toLowerCase() ?? "all";
+  const handoffRaw = url.searchParams.get("handoffFilter")?.trim().toLowerCase() ?? "all";
+  const botRaw = url.searchParams.get("botFilter")?.trim().toLowerCase() ?? "all";
+  const triageRaw = url.searchParams.get("triageFilter")?.trim().toLowerCase() ?? "all";
+
+  return {
+    searchTerm: url.searchParams.get("searchTerm")?.trim() ?? "",
+    statusFilter: VALID_PIPELINE_STATUS_FILTERS.has(statusRaw as PipelineStatusFilterValue)
+      ? (statusRaw as PipelineStatusFilterValue)
+      : "all",
+    handoffFilter: VALID_PIPELINE_HANDOFF_FILTERS.has(handoffRaw as PipelineHandoffFilterValue)
+      ? (handoffRaw as PipelineHandoffFilterValue)
+      : "all",
+    botFilter: VALID_PIPELINE_BOT_FILTERS.has(botRaw as PipelineBotFilterValue)
+      ? (botRaw as PipelineBotFilterValue)
+      : "all",
+    triageFilter: VALID_PIPELINE_TRIAGE_FILTERS.has(triageRaw as PipelineTriageFilterValue)
+      ? (triageRaw as PipelineTriageFilterValue)
+      : "all",
+  };
+};
+
+const buildPipelineContactsWhere = (
+  stageId: number | null,
+  filters: PipelineQueryFilters,
+): Prisma.ContactWhereInput => {
+  const where: Prisma.ContactWhereInput = { stageId };
+
+  if (filters.statusFilter !== "all") {
+    where.leadStatus = filters.statusFilter;
+  }
+
+  if (filters.handoffFilter === "yes") {
+    where.handoffRequested = true;
+  } else if (filters.handoffFilter === "no") {
+    where.handoffRequested = false;
+  }
+
+  if (filters.botFilter === "on") {
+    where.botEnabled = true;
+  } else if (filters.botFilter === "off") {
+    where.botEnabled = false;
+  }
+
+  if (filters.triageFilter === "done") {
+    where.triageCompleted = true;
+  } else if (filters.triageFilter === "pending") {
+    where.triageCompleted = false;
+  }
+
+  if (filters.searchTerm) {
+    const contains = { contains: filters.searchTerm, mode: "insensitive" as const };
+    where.OR = [
+      { name: contains },
+      { waId: contains },
+      { email: contains },
+      { tournament: contains },
+      { city: contains },
+      { category: contains },
+      { teamName: contains },
+      { messages: { some: { body: contains } } },
+    ];
+  }
+
+  return where;
+};
+
+const buildPipelineCacheKey = (scope: string, url: URL): string => {
+  const sortedParams = new URLSearchParams(
+    [...url.searchParams.entries()].sort(([left], [right]) => left.localeCompare(right)),
+  );
+  const suffix = sortedParams.toString() || "default";
+  return `${DASHBOARD_CACHE_PREFIX}pipeline:${scope}:${suffix}`;
+};
+
+const loadPipelineColumnPage = async (
+  prisma: PrismaClient,
+  stageId: number | null,
+  filters: PipelineQueryFilters,
+  limit: number,
+  requestedOffset: number,
+) => {
+  const where = buildPipelineContactsWhere(stageId, filters);
+  const total = await prisma.contact.count({ where });
+  const maxOffset = total > 0 ? Math.floor((total - 1) / limit) * limit : 0;
+  const offset = Math.min(Math.max(0, requestedOffset), maxOffset);
+  const items = await prisma.contact.findMany({
+    where,
+    include: PIPELINE_CONTACT_INCLUDE,
+    orderBy: { lastInteractionAt: "desc" },
+    skip: offset,
+    take: limit,
+  });
+
+  return {
+    items,
+    total,
+    limit,
+    offset,
+  };
+};
 
 const deriveHandoffStatus = (contact: HandoffStateSnapshot): HandoffStatusValue => {
   const currentStatus = contact.handoffStatus?.trim().toUpperCase() ?? "";
@@ -2519,51 +2693,92 @@ const handlePipelineBoard = async (req: Request): Promise<Response> => {
   if (denied) return denied;
 
   const url = new URL(req.url);
-  const contactLimitParam = Number(url.searchParams.get("contactLimit"));
-  const contactLimit = Number.isInteger(contactLimitParam)
-    ? Math.min(100, Math.max(5, contactLimitParam))
-    : 50;
+  const limit = parseBoundedInteger(
+    url.searchParams.get("limit") ?? url.searchParams.get("contactLimit"),
+    PIPELINE_PAGE_SIZE_DEFAULT,
+    PIPELINE_PAGE_SIZE_MIN,
+    PIPELINE_PAGE_SIZE_MAX,
+  );
+  const filters = parsePipelineFilters(url);
 
-  const cacheKey = `${DASHBOARD_CACHE_PREFIX}pipeline:board:${contactLimit}`;
-  const cached = await cacheGetJson<{ stages: unknown[]; unassigned: unknown[] }>(cacheKey);
+  const cacheKey = buildPipelineCacheKey("board", url);
+  const cached = await cacheGetJson<{ stages: unknown[]; unassigned: unknown }>(cacheKey);
   if (cached) {
     return json(cached, 200, req);
   }
 
   const stages = await current.prisma.pipelineStage.findMany({
     orderBy: { position: "asc" },
-    include: {
-      contacts: {
-        include: {
-          tags: { include: { tag: true } },
-          messages: {
-            orderBy: { createdAt: "desc" },
-            take: 1,
-            select: { body: true, createdAt: true },
-          },
-        },
-        orderBy: { lastInteractionAt: "desc" },
-        take: contactLimit,
-      },
-    },
   });
+  const [unassigned, stagePages] = await Promise.all([
+    loadPipelineColumnPage(current.prisma, null, filters, limit, 0),
+    Promise.all(
+      stages.map((stage) =>
+        loadPipelineColumnPage(current.prisma, stage.id, filters, limit, 0),
+      ),
+    ),
+  ]);
 
-  // Include unassigned contacts (no stage)
-  const unassigned = await current.prisma.contact.findMany({
-    where: { stageId: null },
-    include: {
-      tags: { include: { tag: true } },
-      messages: {
-        orderBy: { createdAt: "desc" },
-        take: 1,
-        select: { body: true, createdAt: true },
-      },
-    },
-    orderBy: { lastInteractionAt: "desc" },
-    take: contactLimit,
-  });
+  const payload = {
+    stages: stages.map((stage, index) => ({
+      ...stage,
+      ...stagePages[index],
+    })),
+    unassigned,
+  };
+  void cacheSetJson(cacheKey, payload, PIPELINE_CACHE_TTL_SECONDS);
+  return json(payload, 200, req);
+};
 
-  const payload = { stages, unassigned };
+const handlePipelineBoardColumn = async (req: Request): Promise<Response> => {
+  const current = await getAuthenticatedUser(req);
+  if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.PIPELINE_VIEW);
+  if (denied) return denied;
+
+  const url = new URL(req.url);
+  const stageId = parsePipelineStageId(url.searchParams.get("stageId"));
+  if (stageId === "invalid") {
+    return json({ error: "stageId invalido" }, 400, req);
+  }
+
+  if (typeof stageId === "number") {
+    const stageExists = await current.prisma.pipelineStage.findUnique({
+      where: { id: stageId },
+      select: { id: true },
+    });
+    if (!stageExists) {
+      return json({ error: "Etapa nao encontrada" }, 404, req);
+    }
+  }
+
+  const limit = parseBoundedInteger(
+    url.searchParams.get("limit"),
+    PIPELINE_PAGE_SIZE_DEFAULT,
+    PIPELINE_PAGE_SIZE_MIN,
+    PIPELINE_PAGE_SIZE_MAX,
+  );
+  const offset = parseBoundedInteger(
+    url.searchParams.get("offset"),
+    0,
+    0,
+    Number.MAX_SAFE_INTEGER,
+  );
+  const filters = parsePipelineFilters(url);
+
+  const cacheKey = buildPipelineCacheKey("column", url);
+  const cached = await cacheGetJson<{ items: unknown[]; total: number; limit: number; offset: number }>(cacheKey);
+  if (cached) {
+    return json(cached, 200, req);
+  }
+
+  const payload = await loadPipelineColumnPage(
+    current.prisma,
+    stageId,
+    filters,
+    limit,
+    offset,
+  );
   void cacheSetJson(cacheKey, payload, PIPELINE_CACHE_TTL_SECONDS);
   return json(payload, 200, req);
 };
@@ -5320,6 +5535,9 @@ const server = Bun.serve<WsUserData>({
     }
     if (pipelineBoardPaths.has(url.pathname) && req.method === "GET") {
       return handlePipelineBoard(req);
+    }
+    if (pipelineBoardColumnPaths.has(url.pathname) && req.method === "GET") {
+      return handlePipelineBoardColumn(req);
     }
     if (contactsPaths.has(url.pathname) && req.method === "POST") {
       return handleContactCreate(req);

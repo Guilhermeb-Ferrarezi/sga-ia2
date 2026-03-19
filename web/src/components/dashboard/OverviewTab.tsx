@@ -78,7 +78,7 @@ export default function OverviewTab() {
         api.overview(token),
         api.alertsSummary(token),
         api.conversations(token, 6),
-        api.pipelineBoard(token),
+        api.pipelineBoard(token, { limit: 100 }),
         api.tasks(token),
         api.funnelMetrics(token),
       ]);
@@ -127,7 +127,7 @@ export default function OverviewTab() {
   }, [subscribeFiltered, load]);
 
   const pipelineContacts = board
-    ? [...board.unassigned, ...board.stages.flatMap((stage) => stage.contacts)]
+    ? [...board.unassigned.items, ...board.stages.flatMap((stage) => stage.items)]
     : [];
 
   const leadStatusSummary = pipelineContacts.reduce(
@@ -257,7 +257,7 @@ export default function OverviewTab() {
             </div>
             <div className="flex items-center justify-between rounded-md border border-border/70 px-3 py-2 text-sm">
               <span className="text-muted-foreground">Sem estagio</span>
-              <span className="font-semibold">{board?.unassigned.length ?? 0}</span>
+              <span className="font-semibold">{board?.unassigned.total ?? 0}</span>
             </div>
             <div className="flex items-center justify-between rounded-md border border-border/70 px-3 py-2 text-sm">
               <span className="flex items-center gap-2 text-muted-foreground">
