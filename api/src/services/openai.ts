@@ -88,6 +88,7 @@ const FAQ_SELECTION_LIMIT = 3;
 const FAQ_MAX_CONTEXT_CHARS = 4000;
 const FAQ_SNIPPET_MAX_CHARS = 900;
 const FAQ_CONTENT_ONLY_PREFIX = "__content__:";
+const FAQ_RELEVANCE_RATIO_THRESHOLD = 0.55;
 const FAQ_SYNONYM_GROUPS = [
   ["preco", "valor", "custa", "custo", "ticket", "ingresso", "inscricao"],
   ["campeonato", "torneio", "camp"],
@@ -222,37 +223,110 @@ const extractRelevantFaqSnippet = (
   const asksForDate = textContainsAnyFaqToken(directQueryTokens, FAQ_SYNONYM_GROUPS[3] ?? []);
   const asksForTime = textContainsAnyFaqToken(directQueryTokens, FAQ_SYNONYM_GROUPS[4] ?? []);
   const asksForLocation = textContainsAnyFaqToken(directQueryTokens, FAQ_SYNONYM_GROUPS[5] ?? []);
+  const prefersOverview =
+    !asksForPrice &&
+    !asksForDate &&
+    !asksForTime &&
+    !asksForLocation &&
+    directQueryTokens.size <= 2;
 
   const rankedParagraphs = paragraphs
-    .map((paragraph) => {
+    .map((paragraph, index) => {
       const paragraphTokens = buildFaqTokenSet(paragraph);
+      const hasPrice = /r\$\s*\d|valor|preco|desconto/i.test(paragraph);
+      const hasDate =
+        /\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b|domingo|segunda|terca|quarta|quinta|sexta|sabado/i.test(
+          paragraph,
+        );
+      const hasTime =
+        /\b\d{1,2}h\b|\b\d{1,2}:\d{2}\b|horario|hora|duracao|manha|tarde|noite/i.test(
+          paragraph,
+        );
+      const hasLocation =
+        /avenida|rua|endereco|local|arena|ribeirao|santos|jardim/i.test(paragraph);
       let score = countFaqTokenMatches(paragraphTokens, directQueryTokens) * 12;
       score += countFaqTokenMatches(paragraphTokens, expandedQueryTokens) * 3;
 
-      if (asksForPrice && /r\$\s*\d|valor|preco|desconto/i.test(paragraph)) {
-        score += 18;
+      if (asksForPrice && hasPrice) score += 24;
+      if (asksForDate && hasDate) score += 20;
+      if (asksForTime && hasTime) score += 20;
+      if (asksForLocation && hasLocation) score += 20;
+
+      if (prefersOverview && (hasPrice || hasDate || hasTime || hasLocation)) {
+        score += 10;
       }
-      if (asksForDate && /\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b|domingo|segunda|terca|quarta|quinta|sexta|sabado/i.test(paragraph)) {
-        score += 18;
-      }
-      if (asksForTime && /\b\d{1,2}h\b|\b\d{1,2}:\d{2}\b|horario|hora/i.test(paragraph)) {
-        score += 18;
-      }
-      if (asksForLocation && /avenida|rua|endereco|local|arena|ribeirao|santos/i.test(paragraph)) {
-        score += 18;
-      }
+
+      if (index === 1) score += 4;
+      if (index === 2 || index === 3) score += 2;
 
       return {
         paragraph,
+        index,
+        hasPrice,
+        hasDate,
+        hasTime,
+        hasLocation,
         score,
       };
     })
     .filter((item) => item.score > 0)
     .sort((left, right) => right.score - left.score);
 
-  const selectedParagraphs = rankedParagraphs.length > 0
-    ? rankedParagraphs.slice(0, 2).map((item) => item.paragraph)
-    : paragraphs.slice(0, 1);
+  const introParagraph =
+    paragraphs.find(
+      (paragraph) =>
+        paragraph.length >= 80 &&
+        !/r\$\s*\d|valor|preco|desconto/i.test(paragraph),
+    ) ?? paragraphs[0];
+
+  const addParagraph = (target: string[], paragraph: string | undefined): void => {
+    if (!paragraph) return;
+    if (target.includes(paragraph)) return;
+    target.push(paragraph);
+  };
+
+  const selectedParagraphs: string[] = [];
+
+  if (prefersOverview) {
+    addParagraph(selectedParagraphs, introParagraph);
+  }
+
+  if (asksForPrice) {
+    addParagraph(
+      selectedParagraphs,
+      rankedParagraphs.find((item) => item.hasPrice)?.paragraph,
+    );
+  }
+  if (asksForDate || asksForTime) {
+    addParagraph(
+      selectedParagraphs,
+      rankedParagraphs.find((item) => item.hasDate || item.hasTime)?.paragraph,
+    );
+  }
+  if (asksForLocation) {
+    addParagraph(
+      selectedParagraphs,
+      rankedParagraphs.find((item) => item.hasLocation)?.paragraph,
+    );
+  }
+
+  if (prefersOverview) {
+    addParagraph(
+      selectedParagraphs,
+      rankedParagraphs.find(
+        (item) => item.hasPrice || item.hasDate || item.hasTime || item.hasLocation,
+      )?.paragraph,
+    );
+  }
+
+  for (const item of rankedParagraphs) {
+    if (selectedParagraphs.length >= 2) break;
+    addParagraph(selectedParagraphs, item.paragraph);
+  }
+
+  if (selectedParagraphs.length === 0) {
+    addParagraph(selectedParagraphs, paragraphs[0]);
+  }
 
   return trimFaqSnippet(selectedParagraphs.join("\n\n"));
 };
@@ -343,7 +417,10 @@ const buildRelevantFaqContext = (
     .sort((left, right) => right.score - left.score)
     .slice(0, FAQ_SELECTION_LIMIT);
 
-  const selectedFaqs = rankedFaqs.length > 0 ? rankedFaqs : [];
+  const topScore = rankedFaqs[0]?.score ?? 0;
+  const selectedFaqs = topScore > 0
+    ? rankedFaqs.filter((faq) => faq.score >= Math.max(6, topScore * FAQ_RELEVANCE_RATIO_THRESHOLD))
+    : [];
   let totalChars = 0;
   const chunks: string[] = [];
 
