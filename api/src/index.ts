@@ -6,10 +6,21 @@ import {
   getCacheMetrics,
 } from "./lib/cache";
 import { getPrismaClient } from "./lib/prisma";
-import { Prisma, type PrismaClient, type UserRole } from "@prisma/client";
+import {
+  Prisma,
+  type ContactChannel,
+  type PrismaClient,
+  type UserRole,
+} from "@prisma/client";
+import { SignJWT, jwtVerify } from "jose";
 import { AuthService } from "./services/auth";
 import { toPublicUser, type PublicUser } from "./services/auth";
 import { DashboardService } from "./services/dashboard";
+import {
+  extractInstagramInboundMessages,
+  InstagramApiError,
+  InstagramService,
+} from "./services/instagram";
 import { OpenAIService } from "./services/openai";
 import { buildOpenApiDocument, renderSwaggerUiHtml } from "./services/swagger";
 import {
@@ -23,6 +34,7 @@ import {
   WhatsAppApiError,
   WhatsAppService,
 } from "./services/whatsapp";
+import type { InstagramWebhookPayload } from "./types/instagram";
 import type { InboundMessage, WhatsAppWebhookPayload } from "./types/whatsapp";
 import {
   HANDOFF_CRITICAL_MINUTES,
@@ -92,6 +104,12 @@ const whatsapp = new WhatsAppService(
   config.whatsappPhoneNumberId,
   config.whatsappGraphVersion,
   config.whatsappAppId,
+);
+const instagram = new InstagramService(
+  config.metaGraphVersion,
+  config.metaAppId,
+  config.metaAppSecret,
+  config.metaRedirectUri,
 );
 
 const logWhatsAppPermissionHint = (error: unknown): void => {
@@ -310,6 +328,22 @@ const whatsappProfilePaths = new Set<string>([
   `${config.apiBasePath}/whatsapp/profile`,
   "/whatsapp/profile",
 ]);
+const instagramConnectionsPaths = new Set<string>([
+  `${config.apiBasePath}/instagram/connections`,
+  "/instagram/connections",
+]);
+const instagramOauthStartPaths = new Set<string>([
+  `${config.apiBasePath}/instagram/oauth/start`,
+  "/instagram/oauth/start",
+]);
+const instagramOauthCallbackPaths = new Set<string>([
+  `${config.apiBasePath}/instagram/oauth/callback`,
+  "/instagram/oauth/callback",
+]);
+const instagramConnectionsPrefix = [
+  `${config.apiBasePath}/instagram/connections/`,
+  "/instagram/connections/",
+];
 const aiSettingsPaths = new Set<string>([
   `${config.apiBasePath}/settings/ai`,
   "/settings/ai",
@@ -378,6 +412,25 @@ type HandoffStatusValue =
   | "RESOLVED";
 
 type MessageSourceValue = "USER" | "AI" | "AGENT" | "SYSTEM";
+type ContactChannelValue = ContactChannel;
+type MetaOauthStatePayload = {
+  type: "instagram_oauth";
+};
+type InstagramOauthCallbackBody = {
+  accessToken?: unknown;
+  state?: unknown;
+  grantedScopes?: unknown;
+};
+
+type MessageDeliveryTarget = {
+  waId: string;
+  channel?: ContactChannelValue | null;
+  externalId?: string | null;
+  instagramConnection?: {
+    pageId: string;
+    pageAccessToken: string;
+  } | null;
+};
 
 type PipelineStatusFilterValue = "all" | "open" | "won" | "lost";
 type PipelineHandoffFilterValue = "all" | "yes" | "no";
@@ -412,9 +465,294 @@ const ACTIVE_HANDOFF_STATUSES: HandoffStatusValue[] = [
   "IN_PROGRESS",
 ];
 
+const META_OAUTH_STATE_TTL_SECONDS = 10 * 60;
+const INSTAGRAM_CONTACT_PREFIX = "ig:";
+const INSTAGRAM_DASHBOARD_PATH = "/dashboard/instagram";
+
+const oauthStateSecretKey = new TextEncoder().encode(config.jwtSecret);
+
+const inferContactChannel = (
+  channel: ContactChannelValue | null | undefined,
+  waId: string,
+): ContactChannelValue =>
+  channel ?? (waId.startsWith(INSTAGRAM_CONTACT_PREFIX) ? "INSTAGRAM" : "WHATSAPP");
+
+const buildContactKey = (
+  channel: ContactChannelValue,
+  externalId: string,
+): string => {
+  const normalizedExternalId = externalId.trim();
+  return channel === "INSTAGRAM"
+    ? `${INSTAGRAM_CONTACT_PREFIX}${normalizedExternalId}`
+    : normalizedExternalId;
+};
+
+const resolveContactExternalId = (
+  waId: string,
+  channel?: ContactChannelValue | null,
+  externalId?: string | null,
+): string => {
+  const normalizedExternalId = externalId?.trim();
+  if (normalizedExternalId) return normalizedExternalId;
+  const resolvedChannel = inferContactChannel(channel, waId);
+  return resolvedChannel === "INSTAGRAM"
+    ? waId.replace(new RegExp(`^${INSTAGRAM_CONTACT_PREFIX}`), "")
+    : waId;
+};
+
+const isInstagramWebhookPayload = (
+  payload: unknown,
+): payload is InstagramWebhookPayload =>
+  typeof payload === "object" &&
+  payload !== null &&
+  (payload as { object?: unknown }).object === "page";
+
+const isWhatsAppWebhookPayload = (
+  payload: unknown,
+): payload is WhatsAppWebhookPayload =>
+  typeof payload === "object" &&
+  payload !== null &&
+  (payload as { object?: unknown }).object === "whatsapp_business_account";
+
+const resolveAppOrigin = (req?: Request): string => {
+  const configuredOrigin = config.allowedOrigins.find(
+    (origin) => origin !== "*" && /^https?:\/\//i.test(origin),
+  );
+  if (configuredOrigin) return configuredOrigin;
+
+  if (req) {
+    try {
+      return new URL(req.url).origin;
+    } catch {
+      // Ignore invalid request urls.
+    }
+  }
+
+  return "http://localhost:5173";
+};
+
+const buildAppRedirectUrl = (
+  req: Request,
+  path: string,
+  params?: Record<string, string | null | undefined>,
+): string => {
+  const url = new URL(path, resolveAppOrigin(req));
+  for (const [key, value] of Object.entries(params ?? {})) {
+    if (!value) continue;
+    url.searchParams.set(key, value);
+  }
+  return url.toString();
+};
+
+const signInstagramOauthState = async (userId: string): Promise<string> =>
+  new SignJWT({ type: "instagram_oauth" as MetaOauthStatePayload["type"] })
+    .setProtectedHeader({ alg: "HS256" })
+    .setSubject(userId)
+    .setIssuedAt()
+    .setJti(crypto.randomUUID())
+    .setExpirationTime(Math.floor(Date.now() / 1000) + META_OAUTH_STATE_TTL_SECONDS)
+    .sign(oauthStateSecretKey);
+
+const verifyInstagramOauthState = async (
+  state: string,
+): Promise<{ userId: string }> => {
+  const { payload } = await jwtVerify(state, oauthStateSecretKey, {
+    algorithms: ["HS256"],
+  });
+  if (payload.type !== "instagram_oauth" || !payload.sub) {
+    throw new Error("Estado OAuth invalido");
+  }
+  return { userId: payload.sub };
+};
+
+const normalizeInstagramGrantedScopes = (value: unknown): string[] => {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item): item is string => typeof item === "string")
+    .map((item) => item.trim())
+    .filter(Boolean);
+};
+
+const buildInstagramDashboardRedirect = (
+  req: Request,
+  status: "connected" | "error",
+  message: string,
+): string =>
+  buildAppRedirectUrl(req, INSTAGRAM_DASHBOARD_PATH, {
+    status,
+    message,
+  });
+
+const renderInstagramOauthCallbackBridge = (req: Request): Response => {
+  const callbackUrl = new URL(req.url);
+  const callbackPath = callbackUrl.pathname;
+  const fallbackRedirect = buildAppRedirectUrl(req, INSTAGRAM_DASHBOARD_PATH);
+  const html = `<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Conectando Instagram</title>
+    <style>
+      body {
+        margin: 0;
+        font-family: Arial, sans-serif;
+        background: #0f172a;
+        color: #e2e8f0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+      }
+      main {
+        width: min(460px, calc(100vw - 32px));
+        border: 1px solid rgba(148, 163, 184, 0.24);
+        border-radius: 20px;
+        padding: 24px;
+        background: rgba(15, 23, 42, 0.92);
+        box-shadow: 0 20px 50px rgba(15, 23, 42, 0.45);
+      }
+      h1 {
+        margin: 0 0 10px;
+        font-size: 22px;
+      }
+      p {
+        margin: 0;
+        line-height: 1.5;
+        color: #cbd5e1;
+      }
+      .hint {
+        margin-top: 14px;
+        font-size: 14px;
+        color: #94a3b8;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Finalizando conexao</h1>
+      <p>Estamos validando o retorno da Meta e vinculando a conta ao painel.</p>
+      <p class="hint">Se nada acontecer em alguns segundos, feche esta janela e tente novamente.</p>
+    </main>
+    <script>
+      const redirectBase = ${JSON.stringify(fallbackRedirect)};
+      const callbackPath = ${JSON.stringify(callbackPath)};
+
+      const redirectToApp = (status, message) => {
+        const target = new URL(redirectBase);
+        if (status) target.searchParams.set("status", status);
+        if (message) target.searchParams.set("message", message);
+        window.location.replace(target.toString());
+      };
+
+      const finalize = async () => {
+        const fragment = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+        const query = new URLSearchParams(window.location.search);
+        const accessToken = fragment.get("access_token") || query.get("access_token");
+        const state = fragment.get("state") || query.get("state");
+        const errorReason = fragment.get("error_reason") || query.get("error_reason");
+        const errorDescription =
+          fragment.get("error_description") || query.get("error_description");
+        const grantedScopesRaw =
+          fragment.get("granted_scopes") || query.get("granted_scopes");
+
+        if (errorReason || errorDescription) {
+          redirectToApp("error", errorDescription || errorReason || "Conexao cancelada.");
+          return;
+        }
+
+        if (!accessToken || !state) {
+          redirectToApp("error", "Callback da Meta incompleto.");
+          return;
+        }
+
+        const grantedScopes = grantedScopesRaw
+          ? grantedScopesRaw.split(",").map((item) => item.trim()).filter(Boolean)
+          : [];
+
+        try {
+          const response = await fetch(callbackPath, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              accessToken,
+              state,
+              grantedScopes,
+            }),
+          });
+
+          const payload = await response.json().catch(() => null);
+          if (payload && typeof payload.redirectUrl === "string") {
+            window.location.replace(payload.redirectUrl);
+            return;
+          }
+
+          redirectToApp(
+            "error",
+            payload && typeof payload.error === "string"
+              ? payload.error
+              : "Nao foi possivel concluir a conexao.",
+          );
+        } catch {
+          redirectToApp("error", "Falha de rede ao concluir a conexao.");
+        }
+      };
+
+      void finalize();
+    </script>
+  </body>
+</html>`;
+
+  return textResponse(html, 200, req, "text/html; charset=utf-8");
+};
+
+const verifyMetaWebhookSignature = async (
+  req: Request,
+  rawBody: string,
+): Promise<boolean> => {
+  const appSecret = config.metaAppSecret?.trim();
+  const signatureHeader = req.headers.get("x-hub-signature-256")?.trim();
+
+  if (!appSecret || !signatureHeader) {
+    return true;
+  }
+
+  if (!signatureHeader.startsWith("sha256=")) {
+    return false;
+  }
+
+  const expected = signatureHeader.slice("sha256=".length);
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(appSecret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const signatureBuffer = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    new TextEncoder().encode(rawBody),
+  );
+  const actual = Array.from(new Uint8Array(signatureBuffer))
+    .map((value) => value.toString(16).padStart(2, "0"))
+    .join("");
+
+  if (actual.length !== expected.length) return false;
+
+  let mismatch = 0;
+  for (let index = 0; index < actual.length; index += 1) {
+    mismatch |= actual.charCodeAt(index) ^ expected.charCodeAt(index);
+  }
+  return mismatch === 0;
+};
+
 const resumedReplyContactSelect = {
   id: true,
   waId: true,
+  channel: true,
+  externalId: true,
   name: true,
   email: true,
   tournament: true,
@@ -429,7 +767,61 @@ const resumedReplyContactSelect = {
   triageCompleted: true,
   botEnabled: true,
   handoffRequested: true,
+  instagramConnection: {
+    select: {
+      pageId: true,
+      pageAccessToken: true,
+    },
+  },
 } satisfies Prisma.ContactSelect;
+
+const sendTextToTarget = async (
+  target: MessageDeliveryTarget,
+  body: string,
+  options?: {
+    allowHumanAgentTag?: boolean;
+  },
+): Promise<void> => {
+  const channel = inferContactChannel(target.channel, target.waId);
+  const externalId = resolveContactExternalId(
+    target.waId,
+    channel,
+    target.externalId,
+  );
+
+  if (channel === "INSTAGRAM") {
+    if (!target.instagramConnection?.pageId || !target.instagramConnection?.pageAccessToken) {
+      throw new Error(
+        `Instagram contact ${target.waId} is missing an active connection.`,
+      );
+    }
+    await instagram.sendTextMessage(
+      target.instagramConnection.pageId,
+      target.instagramConnection.pageAccessToken,
+      externalId,
+      body,
+      options?.allowHumanAgentTag
+        ? {
+            messagingType: "MESSAGE_TAG",
+            tag: "HUMAN_AGENT",
+          }
+        : undefined,
+    );
+    return;
+  }
+
+  await whatsapp.sendTextMessage(externalId, body);
+};
+
+const sendTypingIndicatorToTarget = async (
+  target: MessageDeliveryTarget,
+  messageId: string | null | undefined,
+  type: "text" | "audio" = "text",
+): Promise<void> => {
+  const channel = inferContactChannel(target.channel, target.waId);
+  if (channel !== "WHATSAPP" || !messageId) return;
+  await whatsapp.sendTypingIndicator(messageId, type);
+};
 
 const PIPELINE_PAGE_SIZE_DEFAULT = 20;
 const PIPELINE_PAGE_SIZE_MIN = 5;
@@ -841,6 +1233,10 @@ const tryAutoTag = async (
 // ── FAQ Feedback Loop: cache recent Q&A and serve cached answer for repeated questions ──
 const FAQ_FEEDBACK_CACHE_PREFIX = "esports:faq-feedback:";
 const FAQ_FEEDBACK_TTL_SECONDS = 24 * 60 * 60; // 24h
+const FACTUAL_FAQ_CACHE_BYPASS_REGEX =
+  /\b(valor|preco|custa|custo|ticket|ingresso|inscricao|horario|hora|horas|data|dia|quando|onde|local|endereco|edicao|temporada|regra|regras|formato|como funciona)\b/i;
+const NON_CACHEABLE_REPLY_REGEX =
+  /\b(nao sei|não sei|nao informa|não informa|nao encontrei|não encontrei|confirmar o preco|confirmar o preço|encaminh|equipe confirmar|quer que eu encaminhe)\b/i;
 
 const normalizeFaqKey = (text: string): string =>
   text
@@ -853,9 +1249,26 @@ const normalizeFaqKey = (text: string): string =>
     .sort()
     .join("_");
 
+const shouldBypassReplyCache = (text: string): boolean =>
+  FACTUAL_FAQ_CACHE_BYPASS_REGEX.test(
+    text
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, ""),
+  );
+
+const shouldCacheBotReply = (reply: string): boolean => {
+  const normalized = reply
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+  return !NON_CACHEABLE_REPLY_REGEX.test(normalized);
+};
+
 const tryFaqFeedbackCache = async (
   userMessage: string,
 ): Promise<string | null> => {
+  if (shouldBypassReplyCache(userMessage)) return null;
   const key = normalizeFaqKey(userMessage);
   if (!key) return null;
   return cacheGetJson<string>(`${FAQ_FEEDBACK_CACHE_PREFIX}${key}`);
@@ -865,6 +1278,7 @@ const saveFaqFeedbackCache = async (
   userMessage: string,
   aiReply: string,
 ): Promise<void> => {
+  if (shouldBypassReplyCache(userMessage) || !shouldCacheBotReply(aiReply)) return;
   const key = normalizeFaqKey(userMessage);
   if (!key) return;
   await cacheSetJson(`${FAQ_FEEDBACK_CACHE_PREFIX}${key}`, aiReply, FAQ_FEEDBACK_TTL_SECONDS);
@@ -1002,6 +1416,7 @@ const buildSemanticKey = (text: string): string => {
 const trySemanticReplyCache = async (
   userMessage: string,
 ): Promise<string | null> => {
+  if (shouldBypassReplyCache(userMessage)) return null;
   const key = buildSemanticKey(userMessage);
   if (!key) return null;
   return cacheGetJson<string>(`${SEMANTIC_REPLY_CACHE_PREFIX}${key}`);
@@ -1011,6 +1426,7 @@ const saveSemanticReplyCache = async (
   userMessage: string,
   aiReply: string,
 ): Promise<void> => {
+  if (shouldBypassReplyCache(userMessage) || !shouldCacheBotReply(aiReply)) return;
   const key = buildSemanticKey(userMessage);
   if (!key) return;
   await cacheSetJson(`${SEMANTIC_REPLY_CACHE_PREFIX}${key}`, aiReply, SEMANTIC_REPLY_TTL_SECONDS);
@@ -1045,8 +1461,16 @@ const runHandoffEscalation = async (): Promise<void> => {
       select: {
         id: true,
         waId: true,
+        channel: true,
+        externalId: true,
         name: true,
         handoffAt: true,
+        instagramConnection: {
+          select: {
+            pageId: true,
+            pageAccessToken: true,
+          },
+        },
         messages: {
           where: { direction: "out", source: "SYSTEM" },
           orderBy: { createdAt: "desc" },
@@ -1088,8 +1512,12 @@ const runHandoffEscalation = async (): Promise<void> => {
       const followUp = `Oi${contact.name ? ` ${contact.name}` : ""}, nosso time segue analisando sua solicitacao. Tempo de espera atual: ${waitMin} min. Obrigado pela paciencia!`;
 
       try {
-        await whatsapp.sendTextMessage(contact.waId, followUp);
-        await persistTurn(contact.waId, "assistant", followUp, { source: "SYSTEM" });
+        await sendTextToTarget(contact, followUp, { allowHumanAgentTag: true });
+        await persistTurn(contact.waId, "assistant", followUp, {
+          source: "SYSTEM",
+          channel: inferContactChannel(contact.channel, contact.waId),
+          externalId: contact.externalId,
+        });
         broadcast("message:new", {
           phone: contact.waId,
           role: "assistant",
@@ -1405,7 +1833,7 @@ const getDb = async (req: Request): Promise<{ prisma: PrismaClient } | Response>
 };
 
 const persistTurn = async (
-  phone: string,
+  contactKey: string,
   role: "user" | "assistant",
   content: string,
   options?: {
@@ -1413,22 +1841,53 @@ const persistTurn = async (
     contactName?: string;
     source?: MessageSourceValue;
     sentByUserId?: string | null;
+    channel?: ContactChannelValue;
+    externalId?: string | null;
+    externalThreadId?: string | null;
+    platformHandle?: string | null;
+    instagramConnectionId?: string | null;
   },
 ): Promise<void> => {
   const prisma = await getPrismaClient();
   if (!prisma) return;
 
   try {
+    const channel = inferContactChannel(options?.channel, contactKey);
+    const externalId = resolveContactExternalId(
+      contactKey,
+      channel,
+      options?.externalId,
+    );
+    const contactUpsertData: Prisma.ContactUncheckedCreateInput = {
+      waId: contactKey,
+      channel,
+      externalId: externalId || null,
+      name: options?.contactName || null,
+      lastInteractionAt: new Date(),
+    };
+    const contactUpdateData: Prisma.ContactUncheckedUpdateInput = {
+      channel,
+      externalId: externalId || null,
+      lastInteractionAt: new Date(),
+    };
+
+    if (options?.externalThreadId !== undefined) {
+      contactUpsertData.externalThreadId = options.externalThreadId;
+      contactUpdateData.externalThreadId = options.externalThreadId;
+    }
+    if (options?.platformHandle !== undefined) {
+      contactUpsertData.platformHandle = options.platformHandle;
+      contactUpdateData.platformHandle = options.platformHandle;
+    }
+    if (options?.instagramConnectionId !== undefined) {
+      contactUpsertData.instagramConnectionId = options.instagramConnectionId;
+      contactUpdateData.instagramConnectionId = options.instagramConnectionId;
+    }
+
     const contact = await prisma.contact.upsert({
-      where: { waId: phone },
-      update: {
-        lastInteractionAt: new Date(),
-      },
-      create: {
-        waId: phone,
-        name: options?.contactName || null,
-        lastInteractionAt: new Date(),
-      },
+      where: { waId: contactKey },
+      update: contactUpdateData,
+      create: contactUpsertData,
     });
 
     if (
@@ -1469,7 +1928,7 @@ const persistTurn = async (
     });
     void invalidateDashboardCaches();
   } catch (error) {
-    console.error(`[phone:${phone}] failed to persist ${role} turn`, error);
+    console.error(`[phone:${contactKey}] failed to persist ${role} turn`, error);
   }
 };
 
@@ -1619,13 +2078,13 @@ const replyPendingContactAfterBotResume = async (
         broadcast("ai:done", { phone: waId });
         return;
       }
-      if (resumeBacklog.latestMessageId) {
-        await whatsapp.sendTypingIndicator(resumeBacklog.latestMessageId, "text");
-      }
+      await sendTypingIndicatorToTarget(contact, resumeBacklog.latestMessageId, "text");
       await sleep(computeReplyDelayMs(greetingReply));
-      await whatsapp.sendTextMessage(waId, greetingReply);
+      await sendTextToTarget(contact, greetingReply);
       await persistTurn(waId, "assistant", greetingReply, {
         source: "AI",
+        channel: inferContactChannel(contact.channel, waId),
+        externalId: contact.externalId,
       });
       broadcast("message:new", {
         phone: waId,
@@ -1725,13 +2184,13 @@ const replyPendingContactAfterBotResume = async (
         broadcast("ai:done", { phone: waId });
         return;
       }
-      if (pendingMessageId) {
-        await whatsapp.sendTypingIndicator(pendingMessageId, "text");
-      }
+      await sendTypingIndicatorToTarget(contact, pendingMessageId, "text");
       await sleep(computeReplyDelayMs(handoffReply));
-      await whatsapp.sendTextMessage(waId, handoffReply);
+      await sendTextToTarget(contact, handoffReply);
       await persistTurn(waId, "assistant", handoffReply, {
         source: "SYSTEM",
+        channel: inferContactChannel(contact.channel, waId),
+        externalId: contact.externalId,
       });
       broadcast("message:new", {
         phone: waId,
@@ -1752,9 +2211,7 @@ const replyPendingContactAfterBotResume = async (
 
     void tryAutoTask(prisma, contact.id, resumeMergedText);
 
-    if (pendingMessageId) {
-      await whatsapp.sendTypingIndicator(pendingMessageId, "text");
-    }
+    await sendTypingIndicatorToTarget(contact, pendingMessageId, "text");
 
     const typingDelay = Math.min(3000, Math.max(800, aiReply.length * 12));
     await sleep(typingDelay);
@@ -1766,6 +2223,32 @@ const replyPendingContactAfterBotResume = async (
 
     const audioTag = parseAudioTag(aiReply);
     if (audioTag) {
+      if (inferContactChannel(contact.channel, waId) === "INSTAGRAM") {
+        const fallbackText =
+          audioTag.textWithoutTag || aiReply.replace(AUDIO_TAG_REGEX, "").trim() || aiReply;
+        await sendTextToTarget(contact, fallbackText);
+        await persistTurn(waId, "assistant", fallbackText, {
+          source: "AI",
+          channel: inferContactChannel(contact.channel, waId),
+          externalId: contact.externalId,
+        });
+        broadcast("message:new", {
+          phone: waId,
+          role: "assistant",
+          source: "AI",
+          content: fallbackText,
+        });
+        broadcast("ai:done", { phone: waId });
+
+        const overview = await dashboard.getOverview(prisma);
+        broadcast("overview:updated", overview as unknown as Record<string, unknown>);
+        void tryAutoFaq(prisma, waId, resumeMergedText, fallbackText);
+        console.log(
+          `[resume-reply] answered pending message for ${waId} mode=resume pending_messages=${resumeBacklog.mergedCount}`,
+        );
+        return;
+      }
+
       const audioRecord = await prisma.audio.findUnique({
         where: { id: audioTag.audioId },
         select: {
@@ -1781,17 +2264,17 @@ const replyPendingContactAfterBotResume = async (
 
       if (audioRecord) {
         if (audioTag.textWithoutTag) {
-          if (pendingMessageId) {
-            await whatsapp.sendTypingIndicator(pendingMessageId, "text");
-          }
+          await sendTypingIndicatorToTarget(contact, pendingMessageId, "text");
           const textDelay = Math.min(
             3000,
             Math.max(800, audioTag.textWithoutTag.length * 15),
           );
           await sleep(textDelay);
-          await whatsapp.sendTextMessage(waId, audioTag.textWithoutTag);
+          await sendTextToTarget(contact, audioTag.textWithoutTag);
           await persistTurn(waId, "assistant", audioTag.textWithoutTag, {
             source: "AI",
+            channel: inferContactChannel(contact.channel, waId),
+            externalId: contact.externalId,
           });
           broadcast("message:new", {
             phone: waId,
@@ -1808,9 +2291,7 @@ const replyPendingContactAfterBotResume = async (
           20000,
           Math.max(3000, estimatedDurationSec * 1000),
         );
-        if (pendingMessageId) {
-          await whatsapp.sendTypingIndicator(pendingMessageId, "audio");
-        }
+        await sendTypingIndicatorToTarget(contact, pendingMessageId, "audio");
         await sleep(recordingDelay);
 
         try {
@@ -1824,7 +2305,11 @@ const replyPendingContactAfterBotResume = async (
           );
           await whatsapp.sendAudioMessageById(waId, mediaId);
           const persistBody = `[AUDIO:${audioRecord.url}|${audioRecord.title}]`;
-          await persistTurn(waId, "assistant", persistBody, { source: "AI" });
+          await persistTurn(waId, "assistant", persistBody, {
+            source: "AI",
+            channel: inferContactChannel(contact.channel, waId),
+            externalId: contact.externalId,
+          });
           broadcast("message:new", {
             phone: waId,
             role: "assistant",
@@ -1841,8 +2326,12 @@ const replyPendingContactAfterBotResume = async (
       } else {
         const fallbackText =
           audioTag.textWithoutTag || aiReply.replace(AUDIO_TAG_REGEX, "").trim();
-        await whatsapp.sendTextMessage(waId, fallbackText);
-        await persistTurn(waId, "assistant", fallbackText, { source: "AI" });
+        await sendTextToTarget(contact, fallbackText);
+        await persistTurn(waId, "assistant", fallbackText, {
+          source: "AI",
+          channel: inferContactChannel(contact.channel, waId),
+          externalId: contact.externalId,
+        });
         broadcast("message:new", {
           phone: waId,
           role: "assistant",
@@ -1851,8 +2340,12 @@ const replyPendingContactAfterBotResume = async (
         });
       }
     } else {
-      await whatsapp.sendTextMessage(waId, aiReply);
-      await persistTurn(waId, "assistant", aiReply, { source: "AI" });
+      await sendTextToTarget(contact, aiReply);
+      await persistTurn(waId, "assistant", aiReply, {
+        source: "AI",
+        channel: inferContactChannel(contact.channel, waId),
+        externalId: contact.externalId,
+      });
       broadcast("message:new", {
         phone: waId,
         role: "assistant",
@@ -1919,8 +2412,9 @@ const webhookVerify = (req: Request): Response => {
   const mode = url.searchParams.get("hub.mode");
   const token = url.searchParams.get("hub.verify_token");
   const challenge = url.searchParams.get("hub.challenge");
+  const expectedToken = config.metaWebhookVerifyToken ?? config.webhookVerifyToken;
 
-  if (mode !== "subscribe" || token !== config.webhookVerifyToken || !challenge) {
+  if (mode !== "subscribe" || token !== expectedToken || !challenge) {
     return new Response("Forbidden", { status: 403 });
   }
 
@@ -2156,6 +2650,296 @@ const handleWhatsAppProfileUpdate = async (req: Request): Promise<Response> => {
     );
     return json({ error: parsed.message }, parsed.status, req);
   }
+};
+
+const parseInstagramError = (
+  error: unknown,
+  fallback: string,
+): { status: number; message: string } => {
+  if (error instanceof InstagramApiError) {
+    return {
+      status: error.status,
+      message: error.details ?? error.message,
+    };
+  }
+
+  return {
+    status: 500,
+    message: error instanceof Error ? error.message : fallback,
+  };
+};
+
+const buildInstagramConnectionsPayload = async (
+  prisma: PrismaClient,
+): Promise<Record<string, unknown>> => {
+  const connections = await prisma.instagramConnection.findMany({
+    orderBy: [{ status: "asc" }, { updatedAt: "desc" }],
+    select: {
+      id: true,
+      pageId: true,
+      pageName: true,
+      instagramAccountId: true,
+      instagramUsername: true,
+      status: true,
+      webhookSubscribed: true,
+      lastSyncedAt: true,
+      createdAt: true,
+      updatedAt: true,
+      _count: {
+        select: {
+          contacts: true,
+        },
+      },
+    },
+  });
+
+  return {
+    appConfigured: instagram.isConfigured(),
+    graphVersion: config.metaGraphVersion,
+    requiredScopes: config.instagramScopes,
+    callbackUrl: config.metaRedirectUri ?? null,
+    webhookPath: `${config.apiBasePath}/webhook`,
+    prerequisites: {
+      appIdConfigured: Boolean(config.metaAppId),
+      appSecretConfigured: Boolean(config.metaAppSecret),
+      redirectUriConfigured: Boolean(config.metaRedirectUri),
+      webhookVerifyTokenConfigured: Boolean(config.metaWebhookVerifyToken),
+    },
+    connections: connections.map((connection) => {
+      const { _count, ...rest } = connection;
+      return {
+        ...rest,
+        contactsCount: _count.contacts,
+        lastSyncedAt: connection.lastSyncedAt?.toISOString() ?? null,
+        createdAt: connection.createdAt.toISOString(),
+        updatedAt: connection.updatedAt.toISOString(),
+      };
+    }),
+  };
+};
+
+const finalizeInstagramOauthConnection = async (
+  userAccessToken: string,
+  state: string,
+  scopes: string[],
+): Promise<string> => {
+  const verifiedState = await verifyInstagramOauthState(state);
+  const prisma = await getPrismaClient();
+  if (!prisma) {
+    throw new Error("Banco desabilitado. Ative ENABLE_DB=true para conectar Instagram.");
+  }
+
+  const existingUser = await prisma.user.findUnique({
+    where: { id: verifiedState.userId },
+    select: { id: true },
+  });
+  if (!existingUser) {
+    throw new Error("Usuario da conexao nao encontrado.");
+  }
+
+  const normalizedScopes = scopes.length ? scopes : config.instagramScopes;
+  const connection = await instagram.resolveConnection(
+    userAccessToken,
+    normalizedScopes,
+  );
+
+  await prisma.instagramConnection.upsert({
+    where: { pageId: connection.pageId },
+    update: {
+      pageName: connection.pageName,
+      instagramAccountId: connection.instagramAccountId,
+      instagramUsername: connection.instagramUsername,
+      pageAccessToken: connection.pageAccessToken,
+      scopes: connection.scopes,
+      status: "CONNECTED",
+      webhookSubscribed: connection.webhookSubscribed,
+      lastSyncedAt: new Date(),
+    },
+    create: {
+      pageId: connection.pageId,
+      pageName: connection.pageName,
+      instagramAccountId: connection.instagramAccountId,
+      instagramUsername: connection.instagramUsername,
+      pageAccessToken: connection.pageAccessToken,
+      scopes: connection.scopes,
+      status: "CONNECTED",
+      webhookSubscribed: connection.webhookSubscribed,
+      lastSyncedAt: new Date(),
+    },
+  });
+
+  return connection.instagramUsername
+    ? `@${connection.instagramUsername} conectado com sucesso.`
+    : "Conta conectada com sucesso.";
+};
+
+const handleInstagramConnectionsGet = async (req: Request): Promise<Response> => {
+  const current = await getAuthenticatedUser(req);
+  if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.WHATSAPP_PROFILE_VIEW);
+  if (denied) return denied;
+
+  const payload = await buildInstagramConnectionsPayload(current.prisma);
+  return json(payload, 200, req);
+};
+
+const handleInstagramOauthStart = async (req: Request): Promise<Response> => {
+  const current = await getAuthenticatedUser(req);
+  if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.WHATSAPP_PROFILE_MANAGE);
+  if (denied) return denied;
+
+  if (!instagram.isConfigured()) {
+    return json(
+      {
+        error:
+          "Integracao da Meta incompleta. Configure META_APP_ID, META_APP_SECRET e META_REDIRECT_URI.",
+      },
+      400,
+      req,
+    );
+  }
+
+  const state = await signInstagramOauthState(current.user.id);
+  const url = instagram.buildOAuthUrl(state, config.instagramScopes);
+
+  return json({ url }, 200, req);
+};
+
+const handleInstagramOauthCallback = async (req: Request): Promise<Response> => {
+  const url = new URL(req.url);
+  const errorReason = url.searchParams.get("error_reason");
+  const errorDescription = url.searchParams.get("error_description");
+
+  if (errorReason) {
+    return Response.redirect(
+      buildInstagramDashboardRedirect(req, "error", errorDescription ?? errorReason),
+      302,
+    );
+  }
+
+  const accessToken = url.searchParams.get("access_token")?.trim();
+  const state = url.searchParams.get("state")?.trim();
+  if (accessToken && state) {
+    try {
+      const message = await finalizeInstagramOauthConnection(
+        accessToken,
+        state,
+        config.instagramScopes,
+      );
+      return Response.redirect(
+        buildInstagramDashboardRedirect(req, "connected", message),
+        302,
+      );
+    } catch (error) {
+      const parsed = parseInstagramError(
+        error,
+        "Nao foi possivel concluir a conexao com o Instagram.",
+      );
+      return Response.redirect(
+        buildInstagramDashboardRedirect(req, "error", parsed.message),
+        302,
+      );
+    }
+  }
+
+  const code = url.searchParams.get("code")?.trim();
+  if (!code || !state) {
+    return renderInstagramOauthCallbackBridge(req);
+  }
+
+  try {
+    const userToken = await instagram.exchangeCodeForUserToken(code);
+    const message = await finalizeInstagramOauthConnection(
+      userToken,
+      state,
+      config.instagramScopes,
+    );
+
+    return Response.redirect(
+      buildInstagramDashboardRedirect(req, "connected", message),
+      302,
+    );
+  } catch (error) {
+    const parsed = parseInstagramError(
+      error,
+      "Nao foi possivel concluir a conexao com o Instagram.",
+    );
+    return Response.redirect(
+      buildInstagramDashboardRedirect(req, "error", parsed.message),
+      302,
+    );
+  }
+};
+
+const handleInstagramOauthCallbackPost = async (
+  req: Request,
+): Promise<Response> => {
+  let body: InstagramOauthCallbackBody;
+
+  try {
+    body = (await req.json()) as InstagramOauthCallbackBody;
+  } catch {
+    return json({ error: "Invalid JSON payload" }, 400, req);
+  }
+
+  const accessToken =
+    typeof body.accessToken === "string" ? body.accessToken.trim() : "";
+  const state = typeof body.state === "string" ? body.state.trim() : "";
+  const grantedScopes = normalizeInstagramGrantedScopes(body.grantedScopes);
+
+  if (!accessToken || !state) {
+    return json({ error: "Callback da Meta incompleto." }, 400, req);
+  }
+
+  try {
+    const message = await finalizeInstagramOauthConnection(
+      accessToken,
+      state,
+      grantedScopes,
+    );
+    return json(
+      {
+        ok: true,
+        redirectUrl: buildInstagramDashboardRedirect(req, "connected", message),
+      },
+      200,
+      req,
+    );
+  } catch (error) {
+    const parsed = parseInstagramError(
+      error,
+      "Nao foi possivel concluir a conexao com o Instagram.",
+    );
+    return json(
+      {
+        error: parsed.message,
+        redirectUrl: buildInstagramDashboardRedirect(req, "error", parsed.message),
+      },
+      parsed.status,
+      req,
+    );
+  }
+};
+
+const handleInstagramConnectionDelete = async (
+  req: Request,
+  connectionId: string,
+): Promise<Response> => {
+  const current = await getAuthenticatedUser(req);
+  if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.WHATSAPP_PROFILE_MANAGE);
+  if (denied) return denied;
+
+  try {
+    await current.prisma.instagramConnection.delete({
+      where: { id: connectionId },
+    });
+  } catch {
+    return json({ error: "Conexao nao encontrada" }, 404, req);
+  }
+
+  return json({ ok: true }, 200, req);
 };
 
 const authLogin = async (req: Request): Promise<Response> => {
@@ -2584,15 +3368,9 @@ const handleFunnelMetrics = async (req: Request): Promise<Response> => {
   return json(result, 200, req);
 };
 
-const webhookEvent = async (req: Request): Promise<Response> => {
-  let payload: WhatsAppWebhookPayload;
-
-  try {
-    payload = (await req.json()) as WhatsAppWebhookPayload;
-  } catch {
-    return json({ error: "Invalid JSON payload" }, 400);
-  }
-
+const whatsappWebhookEvent = async (
+  payload: WhatsAppWebhookPayload,
+): Promise<Response> => {
   console.log("[webhook] received event payload entries:", payload.entry?.length ?? 0);
 
   const inbound = extractInboundMessages(payload);
@@ -2998,6 +3776,384 @@ const webhookEvent = async (req: Request): Promise<Response> => {
 
 // ── Phase 2: Pipeline / Kanban endpoints ───────────────────────────
 
+const instagramWebhookEvent = async (
+  payload: InstagramWebhookPayload,
+): Promise<Response> => {
+  console.log(
+    "[instagram-webhook] received event payload entries:",
+    payload.entry?.length ?? 0,
+  );
+
+  const inbound = extractInstagramInboundMessages(payload);
+  console.log("[instagram-webhook] extracted inbound messages:", inbound.length);
+
+  void (async () => {
+    for (const message of inbound) {
+      if (!shouldProcessMessage(message.messageId)) {
+        console.log(
+          `[instagram-webhook] skipping duplicate message ${message.messageId}`,
+        );
+        continue;
+      }
+
+      const contactKey = buildContactKey("INSTAGRAM", message.from);
+      console.log(`[instagram-webhook] processing message from ${contactKey}`);
+
+      try {
+        const prisma = await getPrismaClient();
+        const connection = prisma
+          ? await prisma.instagramConnection.findUnique({
+              where: { pageId: message.pageId },
+              select: {
+                id: true,
+                pageId: true,
+                pageAccessToken: true,
+                status: true,
+              },
+            })
+          : null;
+
+        if (!connection || connection.status === "DISCONNECTED") {
+          console.warn(
+            `[instagram-webhook] no active connection found for page ${message.pageId}`,
+          );
+          continue;
+        }
+
+        const deliveryTarget: MessageDeliveryTarget = {
+          waId: contactKey,
+          channel: "INSTAGRAM",
+          externalId: message.from,
+          instagramConnection: {
+            pageId: connection.pageId,
+            pageAccessToken: connection.pageAccessToken,
+          },
+        };
+
+        const rawUserText = message.text?.trim() ?? "";
+        const userText = rawUserText || (message.hasAttachments ? "[midia recebida]" : "");
+
+        if (!userText) {
+          continue;
+        }
+
+        await persistTurn(contactKey, "user", userText, {
+          externalMessageId: message.messageId,
+          source: "USER",
+          channel: "INSTAGRAM",
+          externalId: message.from,
+          externalThreadId: message.pageId,
+          instagramConnectionId: connection.id,
+        });
+
+        broadcast("message:new", {
+          phone: contactKey,
+          role: "user",
+          source: "USER",
+          content: userText,
+        });
+        broadcast("ai:processing", { phone: contactKey });
+        broadcast("notification", {
+          phone: contactKey,
+          name: null,
+          messageId: message.messageId,
+          preview: userText.slice(0, 120),
+        });
+
+        if (!rawUserText) {
+          const fallbackReply =
+            "No momento eu consigo te atender melhor por texto. Pode me mandar sua duvida escrita?";
+          await sendTextToTarget(deliveryTarget, fallbackReply);
+          await persistTurn(contactKey, "assistant", fallbackReply, {
+            source: "SYSTEM",
+            channel: "INSTAGRAM",
+            externalId: message.from,
+            externalThreadId: message.pageId,
+            instagramConnectionId: connection.id,
+          });
+          broadcast("message:new", {
+            phone: contactKey,
+            role: "assistant",
+            source: "SYSTEM",
+            content: fallbackReply,
+          });
+          broadcast("ai:done", { phone: contactKey });
+          continue;
+        }
+
+        if (isGreetingOnlyMessage(rawUserText)) {
+          const greetingReply = buildGreetingReply();
+          if (prisma) {
+            const latestContact = await prisma.contact.findUnique({
+              where: { waId: contactKey },
+              select: { botEnabled: true },
+            });
+            if (latestContact && !latestContact.botEnabled) {
+              broadcast("ai:done", { phone: contactKey });
+              continue;
+            }
+          }
+
+          await sleep(computeReplyDelayMs(greetingReply));
+          await sendTextToTarget(deliveryTarget, greetingReply);
+          await persistTurn(contactKey, "assistant", greetingReply, {
+            source: "AI",
+            channel: "INSTAGRAM",
+            externalId: message.from,
+            externalThreadId: message.pageId,
+            instagramConnectionId: connection.id,
+          });
+          broadcast("message:new", {
+            phone: contactKey,
+            role: "assistant",
+            source: "AI",
+            content: greetingReply,
+          });
+          broadcast("ai:done", { phone: contactKey });
+          continue;
+        }
+
+        let aiReply: string;
+
+        const cachedReply =
+          (await tryFaqFeedbackCache(rawUserText)) ??
+          (await trySemanticReplyCache(rawUserText));
+
+        if (cachedReply && prisma) {
+          const latestContact = await prisma.contact.findUnique({
+            where: { waId: contactKey },
+            select: { botEnabled: true },
+          });
+          if (latestContact && latestContact.botEnabled) {
+            const typingDelay = Math.min(
+              2000,
+              Math.max(500, cachedReply.length * 15),
+            );
+            await sleep(typingDelay);
+            await sendTextToTarget(deliveryTarget, cachedReply);
+            await persistTurn(contactKey, "assistant", cachedReply, {
+              source: "AI",
+              channel: "INSTAGRAM",
+              externalId: message.from,
+              externalThreadId: message.pageId,
+              instagramConnectionId: connection.id,
+            });
+            broadcast("message:new", {
+              phone: contactKey,
+              role: "assistant",
+              source: "AI",
+              content: cachedReply,
+            });
+            broadcast("ai:done", { phone: contactKey });
+            console.log(
+              `[instagram-cache-reply] served cached reply to ${contactKey}`,
+            );
+            continue;
+          }
+        }
+
+        if (prisma) {
+          let contact = await prisma.contact.findUnique({
+            where: { waId: contactKey },
+          });
+          if (contact && !contact.botEnabled) {
+            broadcast("ai:done", { phone: contactKey });
+            continue;
+          }
+
+          let extraction: Awaited<ReturnType<OpenAIService["extractLeadData"]>> = {};
+          try {
+            extraction = await openAI.extractLeadData(rawUserText, prisma);
+          } catch (error) {
+            console.warn(`[instagram:${contactKey}] extraction failed`, error);
+          }
+
+          const wantsHuman = shouldTriggerHumanHandoff(rawUserText, extraction);
+          const updateData = buildContactUpdateFromExtraction(extraction);
+
+          if (wantsHuman) {
+            Object.assign(
+              updateData,
+              buildQueuedHandoffState(
+                extraction.handoffReason ?? "Solicitacao de verificacao humana",
+                new Date(),
+              ),
+            );
+          }
+
+          const mergedSnapshot: ContactTriageSnapshot = {
+            name: (updateData.name as string | undefined) ?? contact?.name,
+            email: (updateData.email as string | undefined) ?? contact?.email,
+            tournament:
+              (updateData.tournament as string | undefined) ?? contact?.tournament,
+            eventDate:
+              (updateData.eventDate as string | undefined) ?? contact?.eventDate,
+            category: (updateData.category as string | undefined) ?? contact?.category,
+            city: (updateData.city as string | undefined) ?? contact?.city,
+            teamName: (updateData.teamName as string | undefined) ?? contact?.teamName,
+            playersCount:
+              (updateData.playersCount as number | undefined) ??
+              contact?.playersCount ??
+              null,
+          };
+
+          const missingFields = computeMissingLeadFields(mergedSnapshot);
+          updateData.triageCompleted = missingFields.length === 0;
+          updateData.channel = "INSTAGRAM";
+          updateData.externalId = message.from;
+          updateData.externalThreadId = message.pageId;
+          updateData.instagramConnectionId = connection.id;
+
+          if (Object.keys(updateData).length > 0) {
+            contact = await prisma.contact.update({
+              where: { waId: contactKey },
+              data: updateData,
+            });
+
+            broadcast("contact:updated", {
+              waId: contactKey,
+              contact: contact as unknown as Record<string, unknown>,
+            });
+            void emitAlertsSummary(prisma);
+
+            if (wantsHuman) {
+              void openAI.refreshConversationSummary(prisma, contact.id, contactKey);
+            }
+
+            if (updateData.triageCompleted === true && !wantsHuman) {
+              void tryAutoQualify(
+                prisma,
+                contact.id,
+                contact.triageCompleted,
+                contact.stageId,
+              );
+            }
+
+            void tryAutoTag(prisma, contact.id, {
+              ...mergedSnapshot,
+              age: contact.age,
+              level: contact.level,
+            });
+            void tryAdvancedAutoTag(prisma, contact.id, rawUserText);
+            void updateLeadScore(prisma, contact.id);
+          }
+
+          if (wantsHuman) {
+            const handoffReply = buildHandoffAcknowledgement();
+            await sleep(computeReplyDelayMs(handoffReply));
+            await sendTextToTarget(deliveryTarget, handoffReply);
+            await persistTurn(contactKey, "assistant", handoffReply, {
+              source: "SYSTEM",
+              channel: "INSTAGRAM",
+              externalId: message.from,
+              externalThreadId: message.pageId,
+              instagramConnectionId: connection.id,
+            });
+            broadcast("message:new", {
+              phone: contactKey,
+              role: "assistant",
+              source: "SYSTEM",
+              content: handoffReply,
+            });
+            broadcast("ai:done", { phone: contactKey });
+            continue;
+          }
+
+          aiReply = await openAI.generateReply(rawUserText, prisma, contactKey, {
+            triageMissing: missingFields,
+          });
+
+          if (contact) {
+            void tryAutoTask(prisma, contact.id, rawUserText);
+          }
+        } else {
+          aiReply = await openAI.generateReply(rawUserText);
+        }
+
+        const typingDelay = Math.min(3000, Math.max(800, aiReply.length * 12));
+        await sleep(typingDelay);
+
+        if (prisma) {
+          const latestContact = await prisma.contact.findUnique({
+            where: { waId: contactKey },
+            select: { botEnabled: true },
+          });
+          if (latestContact && !latestContact.botEnabled) {
+            broadcast("ai:done", { phone: contactKey });
+            continue;
+          }
+        }
+
+        const audioTag = parseAudioTag(aiReply);
+        const finalReply =
+          audioTag?.textWithoutTag ||
+          aiReply.replace(AUDIO_TAG_REGEX, "").trim() ||
+          aiReply;
+
+        await sendTextToTarget(deliveryTarget, finalReply);
+        await persistTurn(contactKey, "assistant", finalReply, {
+          source: "AI",
+          channel: "INSTAGRAM",
+          externalId: message.from,
+          externalThreadId: message.pageId,
+          instagramConnectionId: connection.id,
+        });
+        broadcast("message:new", {
+          phone: contactKey,
+          role: "assistant",
+          source: "AI",
+          content: finalReply,
+        });
+
+        broadcast("ai:done", { phone: contactKey });
+
+        if (prisma) {
+          const overview = await dashboard.getOverview(prisma);
+          broadcast("overview:updated", overview as unknown as Record<string, unknown>);
+          void tryAutoFaq(prisma, contactKey, rawUserText, finalReply);
+          if (!isGreetingOnlyMessage(rawUserText)) {
+            void saveFaqFeedbackCache(rawUserText, finalReply);
+            void saveSemanticReplyCache(rawUserText, finalReply);
+          }
+        }
+      } catch (error) {
+        console.error(
+          `[instagram:${message.messageId}] failed processing from ${contactKey}`,
+          error,
+        );
+        broadcast("ai:done", { phone: contactKey });
+      }
+    }
+  })();
+
+  return new Response("EVENT_RECEIVED", { status: 200 });
+};
+
+const webhookEvent = async (req: Request): Promise<Response> => {
+  const rawBody = await req.text();
+  const isSignatureValid = await verifyMetaWebhookSignature(req, rawBody);
+  if (!isSignatureValid) {
+    return json({ error: "Invalid webhook signature" }, 403, req);
+  }
+
+  let payload: unknown;
+  try {
+    payload = rawBody ? (JSON.parse(rawBody) as unknown) : {};
+  } catch {
+    return json({ error: "Invalid JSON payload" }, 400, req);
+  }
+
+  if (isWhatsAppWebhookPayload(payload)) {
+    return whatsappWebhookEvent(payload);
+  }
+
+  if (isInstagramWebhookPayload(payload)) {
+    return instagramWebhookEvent(payload);
+  }
+
+  return json({ error: "Unsupported webhook payload" }, 400, req);
+};
+
 const handlePipelineStages = async (req: Request): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
@@ -3308,17 +4464,82 @@ const handleContactCreate = async (req: Request): Promise<Response> => {
       ? (body as Record<string, unknown>)
       : {};
 
-  const waId = typeof input.waId === "string" ? input.waId.trim() : "";
-  if (!waId) {
+  const rawWaId = typeof input.waId === "string" ? input.waId.trim() : "";
+  if (!rawWaId) {
     return json({ error: "waId is required" }, 400, req);
   }
 
+  let channel: ContactChannelValue = "WHATSAPP";
+  if (hasOwn(input, "channel")) {
+    const rawChannel =
+      typeof input.channel === "string" ? input.channel.trim().toUpperCase() : "";
+    if (rawChannel !== "WHATSAPP" && rawChannel !== "INSTAGRAM") {
+      return json({ error: "channel must be WHATSAPP or INSTAGRAM" }, 400, req);
+    }
+    channel = rawChannel as ContactChannelValue;
+  } else {
+    channel = inferContactChannel(undefined, rawWaId);
+  }
+
+  let externalId = normalizeNullableText(input.externalId);
+  if (externalId === undefined) {
+    externalId = resolveContactExternalId(rawWaId, channel);
+  }
+
+  let instagramConnectionId: string | null | undefined;
+  if (hasOwn(input, "instagramConnectionId")) {
+    const value = normalizeNullableText(input.instagramConnectionId);
+    if (value === undefined) {
+      return json(
+        { error: "instagramConnectionId must be a string or null" },
+        400,
+        req,
+      );
+    }
+    instagramConnectionId = value;
+  }
+
+  if (instagramConnectionId) {
+    const connection = await current.prisma.instagramConnection.findUnique({
+      where: { id: instagramConnectionId },
+      select: { id: true },
+    });
+    if (!connection) {
+      return json({ error: "Instagram connection not found" }, 404, req);
+    }
+  }
+
+  const waId =
+    channel === "INSTAGRAM"
+      ? buildContactKey("INSTAGRAM", externalId ?? rawWaId)
+      : rawWaId;
+
   const data: Prisma.ContactUncheckedCreateInput = {
     waId,
+    channel,
+    externalId: externalId ?? resolveContactExternalId(waId, channel),
     leadStatus: "open",
     triageCompleted: false,
     ...buildNoHandoffState(),
   };
+
+  if (instagramConnectionId !== undefined) {
+    data.instagramConnectionId = instagramConnectionId;
+  }
+  if (hasOwn(input, "externalThreadId")) {
+    const value = normalizeNullableText(input.externalThreadId);
+    if (value === undefined) {
+      return json({ error: "externalThreadId must be a string or null" }, 400, req);
+    }
+    data.externalThreadId = value;
+  }
+  if (hasOwn(input, "platformHandle")) {
+    const value = normalizeNullableText(input.platformHandle);
+    if (value === undefined) {
+      return json({ error: "platformHandle must be a string or null" }, 400, req);
+    }
+    data.platformHandle = value;
+  }
 
   if (hasOwn(input, "name")) {
     const value = normalizeNullableText(input.name);
@@ -3677,6 +4898,11 @@ const handleContactUpdate = async (
     where: { waId },
     select: {
       id: true,
+      channel: true,
+      externalId: true,
+      externalThreadId: true,
+      platformHandle: true,
+      instagramConnectionId: true,
       name: true,
       email: true,
       tournament: true,
@@ -3767,6 +4993,55 @@ const handleContactUpdate = async (
   if (hasOwn(input, "source")) {
     const value = normalizeNullableText(input.source);
     if (value !== undefined) data.source = value;
+  }
+  if (hasOwn(input, "channel")) {
+    const rawChannel =
+      typeof input.channel === "string" ? input.channel.trim().toUpperCase() : "";
+    if (rawChannel !== "WHATSAPP" && rawChannel !== "INSTAGRAM") {
+      return json({ error: "channel must be WHATSAPP or INSTAGRAM" }, 400, req);
+    }
+    data.channel = rawChannel as ContactChannelValue;
+  }
+  if (hasOwn(input, "externalId")) {
+    const value = normalizeNullableText(input.externalId);
+    if (value === undefined) {
+      return json({ error: "externalId must be a string or null" }, 400, req);
+    }
+    data.externalId = value;
+  }
+  if (hasOwn(input, "externalThreadId")) {
+    const value = normalizeNullableText(input.externalThreadId);
+    if (value === undefined) {
+      return json({ error: "externalThreadId must be a string or null" }, 400, req);
+    }
+    data.externalThreadId = value;
+  }
+  if (hasOwn(input, "platformHandle")) {
+    const value = normalizeNullableText(input.platformHandle);
+    if (value === undefined) {
+      return json({ error: "platformHandle must be a string or null" }, 400, req);
+    }
+    data.platformHandle = value;
+  }
+  if (hasOwn(input, "instagramConnectionId")) {
+    const value = normalizeNullableText(input.instagramConnectionId);
+    if (value === undefined) {
+      return json(
+        { error: "instagramConnectionId must be a string or null" },
+        400,
+        req,
+      );
+    }
+    if (value) {
+      const connection = await current.prisma.instagramConnection.findUnique({
+        where: { id: value },
+        select: { id: true },
+      });
+      if (!connection) {
+        return json({ error: "Instagram connection not found" }, 404, req);
+      }
+    }
+    data.instagramConnectionId = value;
   }
   if (hasOwn(input, "notes")) {
     const value = normalizeNullableText(input.notes);
@@ -4401,11 +5676,20 @@ const handleContactSend = async (
     where: { waId },
     select: {
       id: true,
+      waId: true,
+      channel: true,
+      externalId: true,
       handoffRequested: true,
       handoffStatus: true,
       handoffAssignedAt: true,
       handoffAssignedToUserId: true,
       handoffFirstHumanReplyAt: true,
+      instagramConnection: {
+        select: {
+          pageId: true,
+          pageAccessToken: true,
+        },
+      },
     },
   });
   if (!existing) {
@@ -4416,10 +5700,14 @@ const handleContactSend = async (
   const shouldAdvanceHandoff =
     existingHandoffStatus !== "NONE" && existingHandoffStatus !== "RESOLVED";
 
-  await whatsapp.sendTextMessage(waId, message);
+  await sendTextToTarget(existing, message, {
+    allowHumanAgentTag: shouldAdvanceHandoff,
+  });
   await persistTurn(waId, "assistant", message, {
     source: "AGENT",
     sentByUserId: current.user.id,
+    channel: inferContactChannel(existing.channel, waId),
+    externalId: existing.externalId,
   });
 
   let handoffProgress:
@@ -6067,6 +7355,23 @@ const server = Bun.serve<WsUserData>({
     if (whatsappProfilePaths.has(url.pathname)) {
       if (req.method === "GET") return handleWhatsAppProfileGet(req);
       if (req.method === "PUT") return handleWhatsAppProfileUpdate(req);
+    }
+    if (instagramConnectionsPaths.has(url.pathname) && req.method === "GET") {
+      return handleInstagramConnectionsGet(req);
+    }
+    if (instagramOauthStartPaths.has(url.pathname) && req.method === "GET") {
+      return handleInstagramOauthStart(req);
+    }
+    if (instagramOauthCallbackPaths.has(url.pathname)) {
+      if (req.method === "GET") return handleInstagramOauthCallback(req);
+      if (req.method === "POST") return handleInstagramOauthCallbackPost(req);
+    }
+    const instagramConnectionSuffix = extractPathSuffix(
+      url.pathname,
+      instagramConnectionsPrefix,
+    );
+    if (instagramConnectionSuffix && req.method === "DELETE") {
+      return handleInstagramConnectionDelete(req, instagramConnectionSuffix);
     }
     if (dashboardOverviewPaths.has(url.pathname) && req.method === "GET") {
       return dashboardOverview(req);
