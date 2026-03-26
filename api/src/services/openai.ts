@@ -86,6 +86,8 @@ const CONTEXT_MESSAGE_LIMIT = 20;
 const SUMMARY_TRIGGER_COUNT = 40;
 const FAQ_SELECTION_LIMIT = 3;
 const FAQ_MAX_CONTEXT_CHARS = 4000;
+const FAQ_SNIPPET_MAX_CHARS = 900;
+const FAQ_CONTENT_ONLY_PREFIX = "__content__:";
 const FAQ_SYNONYM_GROUPS = [
   ["preco", "valor", "custa", "custo", "ticket", "ingresso", "inscricao"],
   ["campeonato", "torneio", "camp"],
@@ -102,6 +104,7 @@ type FaqCandidate = {
   answer: string;
   content?: string | null;
   subject?: string | null;
+  edition?: string | null;
 };
 
 const FAQ_STOP_WORDS = new Set([
@@ -153,6 +156,15 @@ const tokenizeFaqText = (value: string): string[] =>
     .split(" ")
     .filter((token) => token.length >= 3 && !FAQ_STOP_WORDS.has(token));
 
+const buildFaqTokenSet = (value: string): Set<string> =>
+  new Set(tokenizeFaqText(value));
+
+const hasFaqContentOnlyQuestion = (question: string): boolean =>
+  question.startsWith(FAQ_CONTENT_ONLY_PREFIX);
+
+const normalizeFaqQuestion = (question: string): string =>
+  hasFaqContentOnlyQuestion(question) ? "" : question.trim();
+
 const expandQueryTokens = (tokens: Set<string>): Set<string> => {
   const expanded = new Set(tokens);
   for (const group of FAQ_SYNONYM_GROUPS) {
@@ -163,6 +175,86 @@ const expandQueryTokens = (tokens: Set<string>): Set<string> => {
     }
   }
   return expanded;
+};
+
+const countFaqTokenMatches = (
+  sourceTokens: Set<string>,
+  queryTokens: Set<string>,
+): number => {
+  let matches = 0;
+  for (const token of queryTokens) {
+    if (sourceTokens.has(token)) matches += 1;
+  }
+  return matches;
+};
+
+const textContainsAnyFaqToken = (
+  tokens: Set<string>,
+  candidates: readonly string[],
+): boolean => candidates.some((token) => tokens.has(token));
+
+const trimFaqSnippet = (value: string, maxChars = FAQ_SNIPPET_MAX_CHARS): string => {
+  const normalized = value.replace(/\s+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+  if (normalized.length <= maxChars) return normalized;
+  return `${normalized.slice(0, maxChars - 3).trimEnd()}...`;
+};
+
+const extractRelevantFaqSnippet = (
+  faq: FaqCandidate,
+  directQueryTokens: Set<string>,
+  expandedQueryTokens: Set<string>,
+): string => {
+  const baseSources = [faq.content ?? "", faq.answer ?? ""]
+    .map((value) => value.trim())
+    .filter(Boolean);
+  const paragraphs = Array.from(
+    new Set(
+      baseSources.flatMap((value) =>
+        value
+          .split(/\n{2,}/)
+          .map((paragraph) => paragraph.trim())
+          .filter(Boolean),
+      ),
+    ),
+  );
+
+  const asksForPrice = textContainsAnyFaqToken(directQueryTokens, FAQ_SYNONYM_GROUPS[0] ?? []);
+  const asksForDate = textContainsAnyFaqToken(directQueryTokens, FAQ_SYNONYM_GROUPS[3] ?? []);
+  const asksForTime = textContainsAnyFaqToken(directQueryTokens, FAQ_SYNONYM_GROUPS[4] ?? []);
+  const asksForLocation = textContainsAnyFaqToken(directQueryTokens, FAQ_SYNONYM_GROUPS[5] ?? []);
+
+  const rankedParagraphs = paragraphs
+    .map((paragraph) => {
+      const paragraphTokens = buildFaqTokenSet(paragraph);
+      let score = countFaqTokenMatches(paragraphTokens, directQueryTokens) * 12;
+      score += countFaqTokenMatches(paragraphTokens, expandedQueryTokens) * 3;
+
+      if (asksForPrice && /r\$\s*\d|valor|preco|desconto/i.test(paragraph)) {
+        score += 18;
+      }
+      if (asksForDate && /\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b|domingo|segunda|terca|quarta|quinta|sexta|sabado/i.test(paragraph)) {
+        score += 18;
+      }
+      if (asksForTime && /\b\d{1,2}h\b|\b\d{1,2}:\d{2}\b|horario|hora/i.test(paragraph)) {
+        score += 18;
+      }
+      if (asksForLocation && /avenida|rua|endereco|local|arena|ribeirao|santos/i.test(paragraph)) {
+        score += 18;
+      }
+
+      return {
+        paragraph,
+        score,
+      };
+    })
+    .filter((item) => item.score > 0)
+    .sort((left, right) => right.score - left.score);
+
+  const selectedParagraphs = rankedParagraphs.length > 0
+    ? rankedParagraphs.slice(0, 2).map((item) => item.paragraph)
+    : paragraphs.slice(0, 1);
+
+  return trimFaqSnippet(selectedParagraphs.join("\n\n"));
 };
 
 const buildRelevantFaqContext = (
@@ -181,39 +273,71 @@ const buildRelevantFaqContext = (
     .filter(Boolean)
     .join(" ")
     .trim();
+  const normalizedQuery = normalizeFaqText(query);
+  const directQueryTokens = new Set(tokenizeFaqText([userMessage, recentHistory].filter(Boolean).join(" ").trim()));
   const queryTokens = expandQueryTokens(new Set(tokenizeFaqText(query)));
 
   const rankedFaqs = faqs
     .map((faq) => {
-      const questionText = normalizeFaqText(faq.question);
+      const normalizedQuestion = normalizeFaqQuestion(faq.question);
+      const questionText = normalizeFaqText(normalizedQuestion);
       const answerText = normalizeFaqText(faq.answer);
       const subjectText = normalizeFaqText(faq.subject ?? "");
+      const editionText = normalizeFaqText(faq.edition ?? "");
       const contentText = normalizeFaqText(faq.content ?? "");
-      const combinedText = [questionText, answerText, subjectText, contentText].join(" ");
-      const combinedTokens = tokenizeFaqText(combinedText);
+      const questionTokens = buildFaqTokenSet(normalizedQuestion);
+      const answerTokens = buildFaqTokenSet(faq.answer);
+      const subjectTokens = buildFaqTokenSet(faq.subject ?? "");
+      const editionTokens = buildFaqTokenSet(faq.edition ?? "");
+      const contentTokens = buildFaqTokenSet(faq.content ?? "");
+      const combinedTokens = new Set([
+        ...questionTokens,
+        ...answerTokens,
+        ...subjectTokens,
+        ...editionTokens,
+        ...contentTokens,
+      ]);
       let score = 0;
 
-      for (const token of queryTokens) {
-        if (questionText.includes(token)) score += 5;
-        else if (answerText.includes(token)) score += 2;
-        else if (subjectText.includes(token)) score += 4;
-        else if (contentText.includes(token)) score += 3;
+      if (subjectText && normalizedQuery.includes(subjectText)) score += 60;
+      if (editionText && normalizedQuery.includes(editionText)) score += 40;
+
+      for (const token of directQueryTokens) {
+        if (subjectTokens.has(token)) score += 18;
+        else if (editionTokens.has(token)) score += 14;
+        else if (questionTokens.has(token)) score += 12;
+        else if (contentTokens.has(token)) score += 8;
+        else if (answerTokens.has(token)) score += 7;
       }
 
-      for (const token of combinedTokens) {
-        if (queryTokens.has(token)) {
-          score += questionText.includes(token) ? 3 : contentText.includes(token) ? 2 : 1;
-        }
+      for (const token of queryTokens) {
+        if (directQueryTokens.has(token)) continue;
+        if (subjectTokens.has(token)) score += 5;
+        else if (editionTokens.has(token)) score += 4;
+        else if (questionTokens.has(token)) score += 3;
+        else if (contentTokens.has(token)) score += 2;
+        else if (answerTokens.has(token)) score += 1;
+      }
+
+      const exactMatches = countFaqTokenMatches(combinedTokens, directQueryTokens);
+      score += exactMatches * 6;
+      if (directQueryTokens.size > 0 && exactMatches === directQueryTokens.size) {
+        score += 12;
       }
 
       if (
-        questionText.includes("campeonato") &&
+        combinedTokens.has("campeonato") &&
         (queryTokens.has("campeonato") || queryTokens.has("torneio"))
       ) {
         score += 2;
       }
 
-      return { ...faq, score };
+      return {
+        ...faq,
+        question: normalizedQuestion,
+        score,
+        snippet: extractRelevantFaqSnippet(faq, directQueryTokens, queryTokens),
+      };
     })
     .filter((faq) => faq.score > 0)
     .sort((left, right) => right.score - left.score)
@@ -226,9 +350,9 @@ const buildRelevantFaqContext = (
   for (const faq of selectedFaqs) {
     const sectionParts = [
       faq.subject ? `Assunto: ${faq.subject}` : null,
-      `P: ${faq.question}`,
-      `R: ${faq.answer}`,
-      faq.content ? `Detalhes:\n${faq.content}` : null,
+      faq.edition ? `Edicao: ${faq.edition}` : null,
+      faq.question ? `P: ${faq.question}` : null,
+      faq.snippet ? `Trechos relevantes:\n${faq.snippet}` : `R: ${trimFaqSnippet(faq.answer)}`,
     ].filter(Boolean);
     const section = sectionParts.join("\n");
     if (totalChars > 0 && totalChars + section.length > FAQ_MAX_CONTEXT_CHARS) break;
@@ -548,16 +672,14 @@ export class OpenAIService {
       // Load active FAQs
       const faqs = await prisma.faq.findMany({
         where: { isActive: true },
-        select: { question: true, answer: true, content: true, subject: true },
+        select: {
+          question: true,
+          answer: true,
+          content: true,
+          subject: true,
+          edition: true,
+        },
       });
-      if (faqs.length) {
-        extras.faqs = buildRelevantFaqContext(
-          faqs,
-          userMessage,
-          historyMessages,
-          extras.contactInfo,
-        );
-      }
 
       // Load available audios for the AI to choose from
       const audios = await prisma.audio.findMany({
@@ -600,6 +722,15 @@ export class OpenAIService {
         if (totalMessages > 0 && totalMessages % SUMMARY_TRIGGER_COUNT === 0) {
           void this.generateAndSaveSummary(prisma, contact.id, phone);
         }
+      }
+
+      if (faqs.length) {
+        extras.faqs = buildRelevantFaqContext(
+          faqs,
+          userMessage,
+          historyMessages,
+          extras.contactInfo,
+        );
       }
     }
 
