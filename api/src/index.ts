@@ -1436,6 +1436,10 @@ const saveSemanticReplyCache = async (
 const HANDOFF_ESCALATION_INTERVAL_MS = 60_000; // check every 60s
 const HANDOFF_ESCALATION_WARN_MINUTES = 15;
 let handoffEscalationInterval: ReturnType<typeof setInterval> | null = null;
+const PENDING_AUTO_REPLY_RECOVERY_INTERVAL_MS = 60_000;
+const PENDING_AUTO_REPLY_RECOVERY_LOOKBACK_MS = 23 * 60 * 60 * 1000;
+const PENDING_AUTO_REPLY_RECOVERY_BATCH_SIZE = 80;
+let pendingAutoReplyRecoveryInterval: ReturnType<typeof setInterval> | null = null;
 
 const runHandoffEscalation = async (): Promise<void> => {
   const prisma = await getPrismaClient();
@@ -1555,6 +1559,68 @@ const stopHandoffEscalation = (): void => {
   if (!handoffEscalationInterval) return;
   clearInterval(handoffEscalationInterval);
   handoffEscalationInterval = null;
+};
+
+const runPendingAutoReplyRecovery = async (): Promise<void> => {
+  const prisma = await getPrismaClient();
+  if (!prisma) return;
+
+  try {
+    const since = new Date(Date.now() - PENDING_AUTO_REPLY_RECOVERY_LOOKBACK_MS);
+    const pendingInbound = await prisma.message.findMany({
+      where: {
+        direction: "in",
+        createdAt: { gte: since },
+        contact: {
+          botEnabled: true,
+          handoffRequested: false,
+        },
+      },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      take: PENDING_AUTO_REPLY_RECOVERY_BATCH_SIZE,
+      select: {
+        contact: {
+          select: {
+            waId: true,
+          },
+        },
+      },
+    });
+
+    const waIds = Array.from(
+      new Set(
+        pendingInbound
+          .map((message) => message.contact.waId?.trim())
+          .filter((waId): waId is string => Boolean(waId)),
+      ),
+    );
+
+    if (waIds.length === 0) return;
+
+    console.log(
+      `[pending-auto-reply] scanning ${waIds.length} active contact(s) for unanswered backlog`,
+    );
+
+    for (const waId of waIds) {
+      void replyPendingContactAfterBotResume(prisma, waId);
+    }
+  } catch (error) {
+    console.error("[pending-auto-reply] recovery failed", error);
+  }
+};
+
+const startPendingAutoReplyRecovery = (): void => {
+  if (pendingAutoReplyRecoveryInterval) return;
+  pendingAutoReplyRecoveryInterval = setInterval(() => {
+    void runPendingAutoReplyRecovery();
+  }, PENDING_AUTO_REPLY_RECOVERY_INTERVAL_MS);
+  void runPendingAutoReplyRecovery();
+};
+
+const stopPendingAutoReplyRecovery = (): void => {
+  if (!pendingAutoReplyRecoveryInterval) return;
+  clearInterval(pendingAutoReplyRecoveryInterval);
+  pendingAutoReplyRecoveryInterval = null;
 };
 
 const VALID_LEAD_STATUS = new Set(["open", "won", "lost"]);
@@ -7654,6 +7720,7 @@ void invalidateReplyCaches();
 if (config.enableDb) {
   startAlertsBroadcast();
   startHandoffEscalation();
+  startPendingAutoReplyRecovery();
 }
 
 const shutdown = (signal: string) => {
@@ -7661,6 +7728,7 @@ const shutdown = (signal: string) => {
   stopHeartbeat();
   stopAlertsBroadcast();
   stopHandoffEscalation();
+  stopPendingAutoReplyRecovery();
   server.stop(true);
   process.exit(0);
 };
