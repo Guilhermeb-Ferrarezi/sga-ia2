@@ -30,6 +30,17 @@ enum MessageSource {
   SYSTEM
 }
 
+enum ContactChannel {
+  WHATSAPP
+  INSTAGRAM
+}
+
+enum InstagramConnectionStatus {
+  CONNECTED
+  DISCONNECTED
+  ERROR
+}
+
 model User {
   id           String   @id @default(cuid())
   email        String   @unique
@@ -62,6 +73,12 @@ model CustomRole {
 model Contact {
   id                Int            @id @default(autoincrement())
   waId              String         @unique
+  channel           ContactChannel @default(WHATSAPP)
+  externalId        String?
+  externalThreadId  String?
+  platformHandle    String?
+  instagramConnectionId String?
+  instagramConnection InstagramConnection? @relation(fields: [instagramConnectionId], references: [id], onDelete: SetNull)
   name              String?
   email             String?
   tournament        String?
@@ -108,6 +125,8 @@ model Contact {
   @@index([handoffRequested])
   @@index([handoffStatus])
   @@index([handoffAssignedToUserId])
+  @@index([channel])
+  @@unique([channel, externalId])
 }
 
 model Message {
@@ -244,4 +263,23 @@ model AiSettings {
   systemPrompt String?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
+}
+
+model InstagramConnection {
+  id                 String                    @id @default(cuid())
+  pageId             String                    @unique
+  pageName           String
+  instagramAccountId String                    @unique
+  instagramUsername  String?
+  pageAccessToken    String
+  scopes             Json                      @default("[]")
+  status             InstagramConnectionStatus @default(CONNECTED)
+  webhookSubscribed  Boolean                   @default(true)
+  lastSyncedAt       DateTime?
+  createdAt          DateTime                  @default(now())
+  updatedAt          DateTime                  @updatedAt
+  contacts           Contact[]
+
+  @@index([status])
+  @@index([instagramUsername])
 }

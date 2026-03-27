@@ -48,6 +48,18 @@ export const config = {
   whatsappToken: required("WHATSAPP_TOKEN"),
   whatsappPhoneNumberId: required("WHATSAPP_PHONE_NUMBER_ID"),
   whatsappGraphVersion: Bun.env.WHATSAPP_GRAPH_VERSION ?? "v21.0",
+  metaGraphVersion: Bun.env.META_GRAPH_VERSION ?? "v25.0",
+  metaAppId: optional(Bun.env.META_APP_ID ?? Bun.env.WHATSAPP_APP_ID),
+  metaAppSecret: optional(Bun.env.META_APP_SECRET),
+  metaRedirectUri: optional(Bun.env.META_REDIRECT_URI),
+  metaWebhookVerifyToken: optional(
+    Bun.env.META_WEBHOOK_VERIFY_TOKEN ?? Bun.env.WEBHOOK_VERIFY_TOKEN,
+  ),
+  instagramScopes: (Bun.env.INSTAGRAM_SCOPES ??
+    "instagram_business_basic,instagram_business_manage_messages")
+    .split(",")
+    .map((scope) => scope.trim())
+    .filter(Boolean),
   whatsappAppId: optional(Bun.env.WHATSAPP_APP_ID ?? Bun.env.META_APP_ID),
   openaiApiKey: required("OPENAI_API_KEY"),
   openaiModel: Bun.env.OPENAI_MODEL ?? "gpt-4o-mini",

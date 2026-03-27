@@ -228,6 +228,36 @@ export const buildOpenApiDocument = (req?: Request): Doc => ({
         }),
       },
     },
+    "/instagram/connections": {
+      get: {
+        tags: ["Configuracoes"],
+        summary: "Listar conexoes do Instagram",
+        responses: securedResponses({
+          "200": response("Conexoes e checklist", genericObject),
+        }),
+      },
+    },
+    "/instagram/oauth/start": {
+      get: {
+        tags: ["Configuracoes"],
+        summary: "Gerar URL de conexao do Instagram",
+        responses: securedResponses({
+          "200": response("URL do OAuth", genericObject),
+          "400": responseRef("BadRequest"),
+        }),
+      },
+    },
+    "/instagram/connections/{id}": {
+      delete: {
+        tags: ["Configuracoes"],
+        summary: "Desconectar Instagram",
+        parameters: [pathParam("id", "ID da conexao")],
+        responses: securedResponses({
+          "200": response("Conexao removida", ref("OkResponse")),
+          "404": responseRef("NotFound"),
+        }),
+      },
+    },
     "/dashboard/overview": {
       get: {
         tags: ["Dashboard"],
@@ -896,7 +926,7 @@ export const buildOpenApiDocument = (req?: Request): Doc => ({
       },
       post: {
         tags: ["Webhook"],
-        summary: "Receber evento do WhatsApp",
+        summary: "Receber evento do WhatsApp ou Instagram",
         security: [],
         requestBody: jsonBody(genericObject),
         responses: {

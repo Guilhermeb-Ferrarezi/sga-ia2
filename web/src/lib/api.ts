@@ -77,6 +77,43 @@ export interface UpdateWhatsAppProfileInput {
   profilePhoto?: File | null;
 }
 
+export type InstagramChannelStatus = "CONNECTED" | "DISCONNECTED" | "ERROR";
+export type InstagramConnectionMode = "INSTAGRAM_LOGIN" | "MESSENGER_PAGE";
+
+export interface InstagramConnectionSummary {
+  id: string;
+  pageId: string;
+  pageName: string;
+  instagramAccountId: string;
+  instagramUsername: string | null;
+  connectionMode: InstagramConnectionMode;
+  status: InstagramChannelStatus;
+  webhookSubscribed: boolean;
+  contactsCount: number;
+  lastSyncedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface InstagramConnectionsOverview {
+  appConfigured: boolean;
+  graphVersion: string;
+  requiredScopes: string[];
+  callbackUrl: string | null;
+  webhookPath: string;
+  prerequisites: {
+    appIdConfigured: boolean;
+    appSecretConfigured: boolean;
+    redirectUriConfigured: boolean;
+    webhookVerifyTokenConfigured: boolean;
+  };
+  connections: InstagramConnectionSummary[];
+}
+
+export interface ConnectInstagramWithTokenInput {
+  accessToken: string;
+}
+
 export interface CreateUserInput {
   email: string;
   password: string;
@@ -198,6 +235,11 @@ export interface Tag {
 export interface PipelineContact {
   id: number;
   waId: string;
+  channel?: "WHATSAPP" | "INSTAGRAM";
+  externalId?: string | null;
+  externalThreadId?: string | null;
+  platformHandle?: string | null;
+  instagramConnectionId?: string | null;
   name: string | null;
   email?: string | null;
   tournament?: string | null;
@@ -309,6 +351,11 @@ export interface PaginatedResult<T> {
 }
 
 export interface ContactUpdateInput {
+  channel?: "WHATSAPP" | "INSTAGRAM";
+  externalId?: string | null;
+  externalThreadId?: string | null;
+  platformHandle?: string | null;
+  instagramConnectionId?: string | null;
   name?: string | null;
   email?: string | null;
   tournament?: string | null;
@@ -333,6 +380,11 @@ export interface ContactUpdateInput {
 
 export interface ContactCreateInput {
   waId: string;
+  channel?: "WHATSAPP" | "INSTAGRAM";
+  externalId?: string | null;
+  externalThreadId?: string | null;
+  platformHandle?: string | null;
+  instagramConnectionId?: string | null;
   name?: string | null;
   email?: string | null;
   tournament?: string | null;
@@ -672,6 +724,44 @@ export const api = {
     }
 
     return payload as WhatsAppProfileSummary;
+  },
+
+  async instagramConnections(token: string): Promise<InstagramConnectionsOverview> {
+    return request<InstagramConnectionsOverview>(
+      "/instagram/connections",
+      { method: "GET" },
+      token,
+    );
+  },
+
+  async instagramConnectUrl(token: string): Promise<{ url: string }> {
+    return request<{ url: string }>(
+      "/instagram/oauth/start",
+      { method: "GET" },
+      token,
+    );
+  },
+
+  async connectInstagramWithToken(
+    token: string,
+    input: ConnectInstagramWithTokenInput,
+  ): Promise<{ message: string }> {
+    return request<{ message: string }>(
+      "/instagram/connections",
+      {
+        method: "POST",
+        body: JSON.stringify(input),
+      },
+      token,
+    );
+  },
+
+  async deleteInstagramConnection(token: string, connectionId: string): Promise<void> {
+    await request(
+      `/instagram/connections/${encodeURIComponent(connectionId)}`,
+      { method: "DELETE" },
+      token,
+    );
   },
 
   async createUser(token: string, input: CreateUserInput): Promise<AuthUser> {

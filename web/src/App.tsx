@@ -29,6 +29,7 @@ const TagsPage = lazy(() => import("@/pages/TagsPage"));
 const TasksPage = lazy(() => import("@/pages/TasksPage"));
 const AudiosPage = lazy(() => import("@/pages/AudiosPage"));
 const WhatsAppProfilePage = lazy(() => import("@/pages/WhatsAppProfilePage"));
+const InstagramConnectionsPage = lazy(() => import("@/pages/InstagramConnectionsPage"));
 const SettingsPage = lazy(() => import("@/pages/SettingsPage"));
 const ReportsPage = lazy(() => import("@/pages/ReportsPage"));
 
@@ -198,6 +199,14 @@ function AuthGate() {
               element={
                 <PermissionRoute permission={PERMISSIONS.WHATSAPP_PROFILE_VIEW}>
                   <WhatsAppProfilePage />
+                </PermissionRoute>
+              }
+            />
+            <Route
+              path="instagram"
+              element={
+                <PermissionRoute permission={PERMISSIONS.WHATSAPP_PROFILE_VIEW}>
+                  <InstagramConnectionsPage />
                 </PermissionRoute>
               }
             />

@@ -421,6 +421,9 @@ type InstagramOauthCallbackBody = {
   state?: unknown;
   grantedScopes?: unknown;
 };
+type InstagramManualConnectionBody = {
+  accessToken?: unknown;
+};
 
 type MessageDeliveryTarget = {
   waId: string;
@@ -429,6 +432,7 @@ type MessageDeliveryTarget = {
   instagramConnection?: {
     pageId: string;
     pageAccessToken: string;
+    instagramAccountId?: string | null;
   } | null;
 };
 
@@ -571,6 +575,16 @@ const normalizeInstagramGrantedScopes = (value: unknown): string[] => {
     .filter((item): item is string => typeof item === "string")
     .map((item) => item.trim())
     .filter(Boolean);
+};
+
+const normalizeMetaAccessToken = (value: unknown): string => {
+  if (typeof value !== "string") return "";
+
+  return value
+    .trim()
+    .replace(/^Bearer\s+/i, "")
+    .replace(/^['"]+|['"]+$/g, "")
+    .replace(/\s+/g, "");
 };
 
 const buildInstagramDashboardRedirect = (
@@ -771,6 +785,7 @@ const resumedReplyContactSelect = {
     select: {
       pageId: true,
       pageAccessToken: true,
+      instagramAccountId: true,
     },
   },
 } satisfies Prisma.ContactSelect;
@@ -800,6 +815,7 @@ const sendTextToTarget = async (
       target.instagramConnection.pageAccessToken,
       externalId,
       body,
+      target.instagramConnection.instagramAccountId,
       options?.allowHumanAgentTag
         ? {
             messagingType: "MESSAGE_TAG",
@@ -1473,6 +1489,7 @@ const runHandoffEscalation = async (): Promise<void> => {
           select: {
             pageId: true,
             pageAccessToken: true,
+            instagramAccountId: true,
           },
         },
         messages: {
@@ -2775,6 +2792,10 @@ const buildInstagramConnectionsPayload = async (
       const { _count, ...rest } = connection;
       return {
         ...rest,
+        connectionMode:
+          connection.pageId === connection.instagramAccountId
+            ? "INSTAGRAM_LOGIN"
+            : "MESSENGER_PAGE",
         contactsCount: _count.contacts,
         lastSyncedAt: connection.lastSyncedAt?.toISOString() ?? null,
         createdAt: connection.createdAt.toISOString(),
@@ -2785,24 +2806,10 @@ const buildInstagramConnectionsPayload = async (
 };
 
 const finalizeInstagramOauthConnection = async (
+  prisma: PrismaClient,
   userAccessToken: string,
-  state: string,
   scopes: string[],
 ): Promise<string> => {
-  const verifiedState = await verifyInstagramOauthState(state);
-  const prisma = await getPrismaClient();
-  if (!prisma) {
-    throw new Error("Banco desabilitado. Ative ENABLE_DB=true para conectar Instagram.");
-  }
-
-  const existingUser = await prisma.user.findUnique({
-    where: { id: verifiedState.userId },
-    select: { id: true },
-  });
-  if (!existingUser) {
-    throw new Error("Usuario da conexao nao encontrado.");
-  }
-
   const normalizedScopes = scopes.length ? scopes : config.instagramScopes;
   const connection = await instagram.resolveConnection(
     userAccessToken,
@@ -2839,6 +2846,28 @@ const finalizeInstagramOauthConnection = async (
     : "Conta conectada com sucesso.";
 };
 
+const completeInstagramOauthConnection = async (
+  userAccessToken: string,
+  state: string,
+  scopes: string[],
+): Promise<string> => {
+  const verifiedState = await verifyInstagramOauthState(state);
+  const prisma = await getPrismaClient();
+  if (!prisma) {
+    throw new Error("Banco desabilitado. Ative ENABLE_DB=true para conectar Instagram.");
+  }
+
+  const existingUser = await prisma.user.findUnique({
+    where: { id: verifiedState.userId },
+    select: { id: true },
+  });
+  if (!existingUser) {
+    throw new Error("Usuario da conexao nao encontrado.");
+  }
+
+  return finalizeInstagramOauthConnection(prisma, userAccessToken, scopes);
+};
+
 const handleInstagramConnectionsGet = async (req: Request): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
@@ -2847,6 +2876,40 @@ const handleInstagramConnectionsGet = async (req: Request): Promise<Response> =>
 
   const payload = await buildInstagramConnectionsPayload(current.prisma);
   return json(payload, 200, req);
+};
+
+const handleInstagramConnectionsCreate = async (req: Request): Promise<Response> => {
+  const current = await getAuthenticatedUser(req);
+  if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.WHATSAPP_PROFILE_MANAGE);
+  if (denied) return denied;
+
+  let body: InstagramManualConnectionBody;
+  try {
+    body = (await req.json()) as InstagramManualConnectionBody;
+  } catch {
+    return json({ error: "JSON invalido" }, 400, req);
+  }
+
+  const accessToken = normalizeMetaAccessToken(body.accessToken);
+  if (!accessToken) {
+    return json({ error: "accessToken e obrigatorio" }, 400, req);
+  }
+
+  try {
+    const message = await finalizeInstagramOauthConnection(
+      current.prisma,
+      accessToken,
+      config.instagramScopes,
+    );
+    return json({ message }, 200, req);
+  } catch (error) {
+    const parsed = parseInstagramError(
+      error,
+      "Nao foi possivel conectar a conta do Instagram com esse token.",
+    );
+    return json({ error: parsed.message }, parsed.status, req);
+  }
 };
 
 const handleInstagramOauthStart = async (req: Request): Promise<Response> => {
@@ -2888,7 +2951,7 @@ const handleInstagramOauthCallback = async (req: Request): Promise<Response> => 
   const state = url.searchParams.get("state")?.trim();
   if (accessToken && state) {
     try {
-      const message = await finalizeInstagramOauthConnection(
+      const message = await completeInstagramOauthConnection(
         accessToken,
         state,
         config.instagramScopes,
@@ -2915,8 +2978,11 @@ const handleInstagramOauthCallback = async (req: Request): Promise<Response> => 
   }
 
   try {
-    const userToken = await instagram.exchangeCodeForUserToken(code);
-    const message = await finalizeInstagramOauthConnection(
+    const userToken = await instagram.exchangeCodeForUserToken(
+      code,
+      config.instagramScopes,
+    );
+    const message = await completeInstagramOauthConnection(
       userToken,
       state,
       config.instagramScopes,
@@ -2949,8 +3015,7 @@ const handleInstagramOauthCallbackPost = async (
     return json({ error: "Invalid JSON payload" }, 400, req);
   }
 
-  const accessToken =
-    typeof body.accessToken === "string" ? body.accessToken.trim() : "";
+  const accessToken = normalizeMetaAccessToken(body.accessToken);
   const state = typeof body.state === "string" ? body.state.trim() : "";
   const grantedScopes = normalizeInstagramGrantedScopes(body.grantedScopes);
 
@@ -2959,7 +3024,7 @@ const handleInstagramOauthCallbackPost = async (
   }
 
   try {
-    const message = await finalizeInstagramOauthConnection(
+    const message = await completeInstagramOauthConnection(
       accessToken,
       state,
       grantedScopes,
@@ -3874,6 +3939,7 @@ const instagramWebhookEvent = async (
                 id: true,
                 pageId: true,
                 pageAccessToken: true,
+                instagramAccountId: true,
                 status: true,
               },
             })
@@ -3893,6 +3959,7 @@ const instagramWebhookEvent = async (
           instagramConnection: {
             pageId: connection.pageId,
             pageAccessToken: connection.pageAccessToken,
+            instagramAccountId: connection.instagramAccountId,
           },
         };
 
@@ -5754,6 +5821,7 @@ const handleContactSend = async (
         select: {
           pageId: true,
           pageAccessToken: true,
+          instagramAccountId: true,
         },
       },
     },
@@ -7422,8 +7490,9 @@ const server = Bun.serve<WsUserData>({
       if (req.method === "GET") return handleWhatsAppProfileGet(req);
       if (req.method === "PUT") return handleWhatsAppProfileUpdate(req);
     }
-    if (instagramConnectionsPaths.has(url.pathname) && req.method === "GET") {
-      return handleInstagramConnectionsGet(req);
+    if (instagramConnectionsPaths.has(url.pathname)) {
+      if (req.method === "GET") return handleInstagramConnectionsGet(req);
+      if (req.method === "POST") return handleInstagramConnectionsCreate(req);
     }
     if (instagramOauthStartPaths.has(url.pathname) && req.method === "GET") {
       return handleInstagramOauthStart(req);
