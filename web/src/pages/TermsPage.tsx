@@ -70,8 +70,8 @@ export default function TermsPage() {
       description="Este documento define as condicoes de uso da plataforma SG Esports IA, seus canais integrados e o relacionamento digital com usuarios, leads e participantes de eventos."
       lastUpdated="27/03/2026"
       contactLabel="Canal oficial"
-      contactValue="contato@zap.santos-games.com"
-      contactHref="mailto:contato@zap.santos-games.com?subject=Termos%20SG%20Esports%20IA"
+      contactValue="sg.studio.tm@gmail.com"
+      contactHref="mailto:sg.studio.tm@gmail.com?subject=Termos%20SG%20Esports%20IA"
       highlights={[
         { label: "Operacao", value: "Santos Games Arena / SG Esports IA" },
         { label: "Finalidade", value: "Atendimento, triagem, suporte, leads e gestao operacional de eventos" },

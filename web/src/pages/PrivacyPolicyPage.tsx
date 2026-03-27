@@ -69,8 +69,8 @@ export default function PrivacyPolicyPage() {
       description="Esta pagina descreve como a SG Esports IA coleta, usa, compartilha, protege e retira dados tratados durante o atendimento digital da Santos Games Arena."
       lastUpdated="27/03/2026"
       contactLabel="Canal de privacidade"
-      contactValue="contato@zap.santos-games.com"
-      contactHref="mailto:contato@zap.santos-games.com?subject=Privacidade%20SG%20Esports%20IA"
+      contactValue="sg.studio.tm@gmail.com"
+      contactHref="mailto:sg.studio.tm@gmail.com?subject=Privacidade%20SG%20Esports%20IA"
       highlights={[
         { label: "Controlador", value: "Santos Games Arena / SG Esports IA" },
         { label: "Canais abrangidos", value: "Painel web, WhatsApp, Instagram, Facebook e integrações conectadas" },
