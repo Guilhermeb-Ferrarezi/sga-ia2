@@ -509,7 +509,9 @@ const isInstagramWebhookPayload = (
 ): payload is InstagramWebhookPayload =>
   typeof payload === "object" &&
   payload !== null &&
-  (payload as { object?: unknown }).object === "page";
+  ["page", "instagram"].includes(
+    String((payload as { object?: unknown }).object ?? ""),
+  );
 
 const isWhatsAppWebhookPayload = (
   payload: unknown,
