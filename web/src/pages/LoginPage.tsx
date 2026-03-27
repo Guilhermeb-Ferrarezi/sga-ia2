@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
+import { Link } from "react-router-dom";
 import { useAuth } from "@/contexts/AuthContext";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -76,6 +77,15 @@ export default function LoginPage() {
               {authLoading ? "Entrando..." : "Entrar"}
             </Button>
           </form>
+          <div className="mt-5 flex flex-wrap items-center justify-center gap-3 text-xs text-muted-foreground">
+            <Link className="hover:text-foreground" to="/politica-de-privacidade">
+              Politica de Privacidade
+            </Link>
+            <span className="h-1 w-1 rounded-full bg-muted-foreground/60" />
+            <Link className="hover:text-foreground" to="/termos">
+              Termos de Uso
+            </Link>
+          </div>
         </CardContent>
       </Card>
       </motion.div>

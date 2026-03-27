@@ -15,6 +15,8 @@ const isElectronDesktop = (): boolean => {
 const Router = isElectronDesktop() ? HashRouter : BrowserRouter;
 
 const LoginPage = lazy(() => import("@/pages/LoginPage"));
+const PrivacyPolicyPage = lazy(() => import("@/pages/PrivacyPolicyPage"));
+const TermsPage = lazy(() => import("@/pages/TermsPage"));
 const DashboardPage = lazy(() => import("@/pages/DashboardPage"));
 const OverviewTab = lazy(() => import("@/components/dashboard/OverviewTab"));
 const ConversationsTab = lazy(() => import("@/components/dashboard/ConversationsTab"));
@@ -72,6 +74,10 @@ function AuthGate() {
         }
       >
         <Routes>
+          <Route path="/politica-de-privacidade" element={<PrivacyPolicyPage />} />
+          <Route path="/privacy-policy" element={<Navigate to="/politica-de-privacidade" replace />} />
+          <Route path="/termos" element={<TermsPage />} />
+          <Route path="/terms" element={<Navigate to="/termos" replace />} />
           <Route path="/login" element={<LoginPage />} />
           <Route path="*" element={<Navigate to="/login" replace />} />
         </Routes>
@@ -90,6 +96,10 @@ function AuthGate() {
         }
       >
         <Routes>
+          <Route path="/politica-de-privacidade" element={<PrivacyPolicyPage />} />
+          <Route path="/privacy-policy" element={<Navigate to="/politica-de-privacidade" replace />} />
+          <Route path="/termos" element={<TermsPage />} />
+          <Route path="/terms" element={<Navigate to="/termos" replace />} />
           <Route
             path="/dashboard"
             element={
