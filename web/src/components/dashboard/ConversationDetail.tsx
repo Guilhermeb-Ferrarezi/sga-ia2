@@ -36,6 +36,30 @@ const formatDateTime = (value: string): string =>
     timeStyle: "short",
   }).format(new Date(value));
 
+const formatConversationHeading = (
+  phone: string,
+  contactName?: string | null,
+): string => {
+  const normalizedName = contactName?.trim();
+  if (!normalizedName) return phone;
+
+  const normalizedPhone = phone.trim();
+  const isInstagramPhone = normalizedPhone.startsWith("ig:");
+  if (!isInstagramPhone) {
+    return normalizedName === normalizedPhone
+      ? normalizedName
+      : `${normalizedName} (${normalizedPhone})`;
+  }
+
+  const instagramId = normalizedPhone.slice(3).trim();
+  const normalizedNameWithoutAt = normalizedName.replace(/^@/, "").trim();
+  if (instagramId && normalizedNameWithoutAt === instagramId) {
+    return normalizedName.startsWith("@") ? normalizedName : `@${normalizedName}`;
+  }
+
+  return normalizedName;
+};
+
 const getTurnLabel = (turn: DashboardTurn): string => {
   if (turn.source === "AGENT") return turn.sentBy?.name || turn.sentBy?.email || "Equipe";
   if (turn.source === "SYSTEM") return "Equipe";
@@ -267,7 +291,7 @@ export default function ConversationDetail({
         <div className="flex items-center justify-between gap-2">
           <div>
             <CardTitle className="flex items-center gap-2">
-              Conversa com {contactName ? `${contactName} (${phone})` : phone}
+              Conversa com {formatConversationHeading(phone, contactName)}
               {aiProcessing && (
                 <Loader2 className="h-4 w-4 animate-spin text-primary" />
               )}

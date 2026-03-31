@@ -375,7 +375,8 @@ const isGreetingOnlyMessage = (text: string): boolean => {
   return GREETING_ONLY_REGEX.test(normalized);
 };
 
-const buildGreetingReply = (): string => "Fala! Como posso ajudar?";
+const buildGreetingReply = (): string =>
+  "Fala! Antes de tudo, como posso te chamar? Se quiser, ja me envie campeonato, data, categoria e cidade.";
 
 const shouldTriggerHumanHandoff = (
   userText: string,
@@ -812,19 +813,44 @@ const sendTextToTarget = async (
         `Instagram contact ${target.waId} is missing an active connection.`,
       );
     }
-    await instagram.sendTextMessage(
-      target.instagramConnection.pageId,
-      target.instagramConnection.pageAccessToken,
-      externalId,
-      body,
-      target.instagramConnection.instagramAccountId,
-      options?.allowHumanAgentTag
-        ? {
-            messagingType: "MESSAGE_TAG",
-            tag: "HUMAN_AGENT",
-          }
-        : undefined,
-    );
+    const taggedMessageOptions = options?.allowHumanAgentTag
+      ? {
+          messagingType: "MESSAGE_TAG" as const,
+          tag: "HUMAN_AGENT" as const,
+        }
+      : undefined;
+
+    try {
+      await instagram.sendTextMessage(
+        target.instagramConnection.pageId,
+        target.instagramConnection.pageAccessToken,
+        externalId,
+        body,
+        target.instagramConnection.instagramAccountId,
+        taggedMessageOptions,
+      );
+    } catch (error) {
+      const canRetryWithoutTag =
+        options?.allowHumanAgentTag &&
+        error instanceof InstagramApiError &&
+        (error.status === 400 || error.status === 403);
+
+      if (!canRetryWithoutTag) {
+        throw error;
+      }
+
+      console.warn(
+        `[instagram-send] HUMAN_AGENT tag rejected for ${target.waId}; retrying as RESPONSE`,
+      );
+
+      await instagram.sendTextMessage(
+        target.instagramConnection.pageId,
+        target.instagramConnection.pageAccessToken,
+        externalId,
+        body,
+        target.instagramConnection.instagramAccountId,
+      );
+    }
     return;
   }
 
@@ -5836,9 +5862,38 @@ const handleContactSend = async (
   const shouldAdvanceHandoff =
     existingHandoffStatus !== "NONE" && existingHandoffStatus !== "RESOLVED";
 
-  await sendTextToTarget(existing, message, {
-    allowHumanAgentTag: shouldAdvanceHandoff,
-  });
+  try {
+    await sendTextToTarget(existing, message, {
+      allowHumanAgentTag: shouldAdvanceHandoff,
+    });
+  } catch (error) {
+    if (error instanceof InstagramApiError) {
+      console.error(`[contact-send:${waId}] instagram send failed`, error);
+      return json(
+        {
+          error:
+            error.details ??
+            "Nao foi possivel enviar mensagem no Instagram. Verifique token/permissoes da conexao.",
+        },
+        error.status >= 400 && error.status < 600 ? error.status : 502,
+        req,
+      );
+    }
+    if (error instanceof WhatsAppApiError) {
+      console.error(`[contact-send:${waId}] whatsapp send failed`, error);
+      return json(
+        {
+          error:
+            error.details ??
+            "Nao foi possivel enviar mensagem no WhatsApp. Verifique token/permissoes do numero.",
+        },
+        error.status >= 400 && error.status < 600 ? error.status : 502,
+        req,
+      );
+    }
+    console.error(`[contact-send:${waId}] send failed`, error);
+    return json({ error: "Falha ao enviar mensagem para o contato." }, 502, req);
+  }
   await persistTurn(waId, "assistant", message, {
     source: "AGENT",
     sentByUserId: current.user.id,

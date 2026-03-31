@@ -38,6 +38,40 @@ const toPreview = (text: string): string => {
   return `${normalized.slice(0, 100)}...`;
 };
 
+const buildInstagramFallbackName = (externalId: string | null): string | null => {
+  const normalized = externalId?.trim();
+  if (!normalized) return null;
+  const suffix = normalized.slice(-6);
+  return `Instagram ${suffix || normalized}`;
+};
+
+const resolveConversationDisplayName = (contact: {
+  name: string | null;
+  platformHandle: string | null;
+  channel: "WHATSAPP" | "INSTAGRAM";
+  externalId: string | null;
+}): string | null => {
+  const explicitName = contact.name?.trim();
+  if (explicitName) return explicitName;
+
+  const normalizedHandle = contact.platformHandle?.trim();
+  if (normalizedHandle) {
+    return normalizedHandle.startsWith("@")
+      ? normalizedHandle
+      : `@${normalizedHandle}`;
+  }
+
+  if (contact.channel === "INSTAGRAM") {
+    const fallbackLabel = buildInstagramFallbackName(contact.externalId);
+    if (fallbackLabel) return fallbackLabel;
+
+    const fallbackExternalId = contact.externalId?.trim();
+    if (fallbackExternalId) return `@${fallbackExternalId}`;
+  }
+
+  return null;
+};
+
 export class DashboardService {
   async getOverview(prisma: PrismaClient): Promise<DashboardOverview> {
     const [totalMessages, userMessages, assistantMessages, contacts] =
@@ -77,11 +111,22 @@ export class DashboardService {
         id: true,
         waId: true,
         name: true,
+        platformHandle: true,
+        channel: true,
+        externalId: true,
       },
     });
     const contactById = new Map<number, { waId: string; name: string | null }>();
     for (const contact of contacts) {
-      contactById.set(contact.id, { waId: contact.waId, name: contact.name });
+      contactById.set(contact.id, {
+        waId: contact.waId,
+        name: resolveConversationDisplayName({
+          name: contact.name,
+          platformHandle: contact.platformHandle,
+          channel: contact.channel,
+          externalId: contact.externalId,
+        }),
+      });
     }
 
     const latestTurns = await prisma.message.findMany({

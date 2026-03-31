@@ -24,6 +24,30 @@ const formatDateTime = (value: string): string =>
     timeStyle: "short",
   }).format(new Date(value));
 
+const formatConversationHeading = (
+  phone: string,
+  contactName?: string | null,
+): string => {
+  const normalizedName = contactName?.trim();
+  if (!normalizedName) return phone;
+
+  const normalizedPhone = phone.trim();
+  const isInstagramPhone = normalizedPhone.startsWith("ig:");
+  if (!isInstagramPhone) {
+    return normalizedName === normalizedPhone
+      ? normalizedName
+      : `${normalizedName} (${normalizedPhone})`;
+  }
+
+  const instagramId = normalizedPhone.slice(3).trim();
+  const normalizedNameWithoutAt = normalizedName.replace(/^@/, "").trim();
+  if (instagramId && normalizedNameWithoutAt === instagramId) {
+    return normalizedName.startsWith("@") ? normalizedName : `@${normalizedName}`;
+  }
+
+  return normalizedName;
+};
+
 export default function ConversationsTab() {
   const { token, logout } = useAuth();
   const { subscribeFiltered } = useWebSocket();
@@ -156,9 +180,10 @@ export default function ConversationsTab() {
                           >
                             <div className="flex items-center justify-between gap-2">
                               <p className="truncate font-medium">
-                                {conversation.name
-                                  ? `${conversation.name} (${conversation.phone})`
-                                  : conversation.phone}
+                                {formatConversationHeading(
+                                  conversation.phone,
+                                  conversation.name,
+                                )}
                               </p>
                               <Badge variant="secondary">
                                 {conversation.messagesCount}
