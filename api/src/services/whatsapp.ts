@@ -77,6 +77,13 @@ const extensionByMimeType: Record<string, string> = {
   "audio/opus": "opus",
   "audio/wav": "wav",
   "audio/webm": "webm",
+  "image/gif": "gif",
+  "image/heic": "heic",
+  "image/heif": "heif",
+  "image/jpeg": "jpg",
+  "image/jpg": "jpg",
+  "image/png": "png",
+  "image/webp": "webp",
 };
 
 const extensionForMimeType = (mimeType: string): string =>
@@ -508,7 +515,7 @@ export class WhatsAppService {
     return {
       arrayBuffer: await mediaResponse.arrayBuffer(),
       mimeType,
-      fileName: `audio-${mediaId}.${extension}`,
+      fileName: `media-${mediaId}.${extension}`,
     };
   }
 }
@@ -530,6 +537,21 @@ const pickAudioMessage = (
   return {
     mediaId,
     mimeType: message.audio?.mime_type?.trim(),
+  };
+};
+
+const pickImageMessage = (
+  message: WhatsAppMessage,
+): { mediaId: string; mimeType?: string; caption?: string } | null => {
+  if (message.type !== "image") return null;
+
+  const mediaId = message.image?.id?.trim();
+  if (!mediaId) return null;
+
+  return {
+    mediaId,
+    mimeType: message.image?.mime_type?.trim(),
+    caption: message.image?.caption?.trim(),
   };
 };
 
@@ -564,14 +586,28 @@ export const extractInboundMessages = (
         }
 
         const audio = pickAudioMessage(message);
-        if (!audio) continue;
+        if (audio) {
+          inboundMessages.push({
+            type: "audio",
+            from: message.from,
+            messageId: message.id,
+            mediaId: audio.mediaId,
+            mimeType: audio.mimeType,
+            contactName,
+          });
+          continue;
+        }
+
+        const image = pickImageMessage(message);
+        if (!image) continue;
 
         inboundMessages.push({
-          type: "audio",
+          type: "image",
           from: message.from,
           messageId: message.id,
-          mediaId: audio.mediaId,
-          mimeType: audio.mimeType,
+          mediaId: image.mediaId,
+          mimeType: image.mimeType,
+          caption: image.caption,
           contactName,
         });
       }

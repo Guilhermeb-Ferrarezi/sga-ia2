@@ -1,4 +1,5 @@
 import type { PrismaClient } from "@prisma/client";
+import { sanitizeMessageBodyForAi } from "../lib/messageContent";
 import { resolveAiSettings, type AiSettingsSnapshot } from "./aiSettings";
 
 interface OpenAIOutputItem {
@@ -99,6 +100,31 @@ const FAQ_SYNONYM_GROUPS = [
   ["time", "equipe", "elenco"],
   ["regra", "regras", "formato", "md3", "md5", "double", "elimination"],
 ];
+
+const normalizeReplyIntent = (text: string): string =>
+  text
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+const NAME_REQUEST_REGEX =
+  /\b(como posso te chamar|como devo te chamar|qual (?:e|é) seu nome|como voce se chama|como vc se chama|me fala seu nome|me diz seu nome)\b/i;
+
+const ensureNameQuestion = (
+  reply: string,
+  triageMissing?: string[],
+): string => {
+  if (!triageMissing?.includes("nome")) return reply;
+
+  const trimmed = reply.trim();
+  if (!trimmed) return "Como posso te chamar?";
+  if (NAME_REQUEST_REGEX.test(normalizeReplyIntent(trimmed))) return trimmed;
+
+  const separator = /[.!?]$/.test(trimmed) ? " " : ". ";
+  return `${trimmed}${separator}Como posso te chamar?`;
+};
 
 type FaqCandidate = {
   question: string;
@@ -790,7 +816,10 @@ export class OpenAIService {
           .map((m) => ({
             role: (m.direction === "in" ? "user" : "assistant") as "user" | "assistant",
             content: [
-              { type: m.direction === "in" ? "input_text" : "output_text", text: m.body },
+              {
+                type: m.direction === "in" ? "input_text" : "output_text",
+                text: sanitizeMessageBodyForAi(m.body),
+              },
             ],
           }));
 
@@ -856,7 +885,7 @@ export class OpenAIService {
       return "Nao consegui gerar uma resposta agora. Tente novamente em instantes.";
     }
 
-    return trimForWhatsApp(text);
+    return trimForWhatsApp(ensureNameQuestion(text, options?.triageMissing));
   }
 
   async extractLeadData(
@@ -1065,7 +1094,10 @@ export class OpenAIService {
       });
 
       const transcript = messages
-        .map((m) => `${m.direction === "in" ? "Usuario" : "Assistente"}: ${m.body}`)
+        .map(
+          (m) =>
+            `${m.direction === "in" ? "Usuario" : "Assistente"}: ${sanitizeMessageBodyForAi(m.body)}`,
+        )
         .join("\n");
 
       const response = await fetch("https://api.openai.com/v1/responses", {

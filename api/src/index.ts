@@ -5,6 +5,11 @@ import {
   cacheSetJson,
   getCacheMetrics,
 } from "./lib/cache";
+import {
+  buildImageMessageBody,
+  sanitizeMessageBodyForAi,
+  sanitizeMessageBodyForPreview,
+} from "./lib/messageContent";
 import { getPrismaClient } from "./lib/prisma";
 import {
   Prisma,
@@ -34,7 +39,10 @@ import {
   WhatsAppApiError,
   WhatsAppService,
 } from "./services/whatsapp";
-import type { InstagramWebhookPayload } from "./types/instagram";
+import type {
+  InstagramInboundMessage,
+  InstagramWebhookPayload,
+} from "./types/instagram";
 import type { InboundMessage, WhatsAppWebhookPayload } from "./types/whatsapp";
 import {
   HANDOFF_CRITICAL_MINUTES,
@@ -368,11 +376,29 @@ const MAX_RESUME_PENDING_MESSAGES = 10;
 const MAX_RESUME_PENDING_CONTEXT_CHARS = 4000;
 const HUMAN_HANDOFF_REGEX =
   /\b(atendente|humano|pessoa real|suporte humano|falar com alguem|falar com pessoa|time de atendimento)\b/i;
+const HANDOFF_CONFIRMATION_REPLY_REGEX =
+  /^(sim|s|ok|okay|claro|claro que sim|pode|pode sim|pode ser|quero sim|isso|isso mesmo|confirmo|confirmado|blz|beleza|fechado|por favor|favor)$/i;
+const HANDOFF_OFFER_MESSAGE_REGEX =
+  /\b(quer que eu encaminhe|quer que eu passe|posso encaminhar|vou encaminhar|encaminhar sua duvida|encaminhar sua duvida para|encaminhar para (um )?atendente|encaminhar para (a )?equipe|atendente confirmar|equipe confirmar|continuar seu atendimento|atendimento humano)\b/i;
 const GREETING_ONLY_REGEX =
   /^(oi+|ola+|olaa+|opa+|opaa+|e ai+|eae+|iae+|fala+|salve+|bom dia|boa tarde|boa noite|hey+|hello+)[!.?, ]*$/i;
 
 const hasExplicitHumanHandoffRequest = (text: string): boolean =>
   HUMAN_HANDOFF_REGEX.test(text);
+
+const normalizeIntentText = (text: string): string =>
+  text
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+const isHandoffConfirmationReply = (text: string): boolean =>
+  HANDOFF_CONFIRMATION_REPLY_REGEX.test(normalizeIntentText(text));
+
+const didMessageOfferHumanHandoff = (text: string): boolean =>
+  HANDOFF_OFFER_MESSAGE_REGEX.test(normalizeIntentText(text));
 
 const isGreetingOnlyMessage = (text: string): boolean => {
   const normalized = text
@@ -383,8 +409,10 @@ const isGreetingOnlyMessage = (text: string): boolean => {
   return GREETING_ONLY_REGEX.test(normalized);
 };
 
-const buildGreetingReply = (): string =>
-  "Opa! Como posso ajudar?";
+const buildGreetingReply = (contactName?: string | null): string =>
+  contactName?.trim()
+    ? "Opa! Como posso ajudar?"
+    : "Opa! Como posso te chamar?";
 
 const shouldTriggerHumanHandoff = (
   userText: string,
@@ -392,7 +420,43 @@ const shouldTriggerHumanHandoff = (
 ): boolean => {
   const explicitRequest = hasExplicitHumanHandoffRequest(userText);
   if (explicitRequest) return true;
-  return extraction?.wantsHuman === true && explicitRequest;
+  return extraction?.wantsHuman === true;
+};
+
+const didUserConfirmRecentHandoffOffer = async (
+  prisma: PrismaClient,
+  contactId: number,
+  userText: string,
+): Promise<boolean> => {
+  if (!isHandoffConfirmationReply(userText)) return false;
+
+  const latestOutbound = await prisma.message.findFirst({
+    where: {
+      contactId,
+      direction: "out",
+      source: { in: ["AI", "SYSTEM"] },
+    },
+    orderBy: { createdAt: "desc" },
+    select: {
+      body: true,
+      createdAt: true,
+    },
+  });
+
+  if (!latestOutbound) return false;
+  if (Date.now() - latestOutbound.createdAt.getTime() > 15 * 60_000) return false;
+
+  return didMessageOfferHumanHandoff(latestOutbound.body);
+};
+
+const resolveHumanHandoffIntent = async (
+  prisma: PrismaClient,
+  contactId: number,
+  userText: string,
+  extraction?: { wantsHuman?: boolean },
+): Promise<boolean> => {
+  if (shouldTriggerHumanHandoff(userText, extraction)) return true;
+  return didUserConfirmRecentHandoffOffer(prisma, contactId, userText);
 };
 
 type ContactTriageSnapshot = {
@@ -1438,7 +1502,10 @@ const tryAutoSummaryOnStageChange = async (
     });
 
     const transcript = messages
-      .map((m) => `${m.direction === "in" ? "Usuario" : "Assistente"}: ${m.body}`)
+      .map(
+        (m) =>
+          `${m.direction === "in" ? "Usuario" : "Assistente"}: ${sanitizeMessageBodyForAi(m.body)}`,
+      )
       .join("\n");
 
     const response = await fetch("https://api.openai.com/v1/responses", {
@@ -1965,13 +2032,179 @@ const parseAudioTag = (
   };
 };
 
-const resolveInboundText = async (message: InboundMessage): Promise<string> => {
+type ResolvedInboundContent = {
+  storedBody: string;
+  userText: string;
+  previewText: string;
+  kind: "text" | "audio" | "image" | "attachment";
+};
+
+const IMAGE_MIME_TYPE_EXTENSIONS: Record<string, string> = {
+  "image/gif": "gif",
+  "image/heic": "heic",
+  "image/heif": "heif",
+  "image/jpeg": "jpg",
+  "image/jpg": "jpg",
+  "image/png": "png",
+  "image/webp": "webp",
+};
+
+const sanitizeStorageSegment = (value: string): string =>
+  value.replace(/[^a-zA-Z0-9._-]/g, "_");
+
+const describeInboundImage = (caption?: string | null): string => {
+  const normalizedCaption = caption?.trim();
+  return normalizedCaption
+    ? `Imagem recebida: ${normalizedCaption}`
+    : "Imagem recebida";
+};
+
+const imageExtensionForMimeType = (mimeType?: string | null): string => {
+  const normalized = mimeType?.trim().toLowerCase();
+  if (!normalized) return "jpg";
+  return IMAGE_MIME_TYPE_EXTENSIONS[normalized] ?? "jpg";
+};
+
+const buildInboundImageStorageKey = (
+  channel: "whatsapp" | "instagram",
+  messageId: string,
+  fileName: string,
+): string =>
+  [
+    "messages",
+    channel,
+    "images",
+    `${Date.now()}_${sanitizeStorageSegment(messageId)}_${sanitizeStorageSegment(fileName)}`,
+  ].join("/");
+
+const uploadInboundImageToR2 = async (input: {
+  channel: "whatsapp" | "instagram";
+  messageId: string;
+  fileName: string;
+  mimeType: string;
+  bytes: Uint8Array;
+}): Promise<string | null> => {
+  try {
+    const r2Key = buildInboundImageStorageKey(
+      input.channel,
+      input.messageId,
+      input.fileName,
+    );
+    return await uploadFileToR2(r2Key, input.bytes, input.mimeType);
+  } catch (error) {
+    console.warn(
+      `[media:${input.channel}:${input.messageId}] failed to upload inbound image`,
+      error,
+    );
+    return null;
+  }
+};
+
+const resolveWhatsAppInboundContent = async (
+  message: InboundMessage,
+): Promise<ResolvedInboundContent> => {
   if (message.type === "text") {
-    return message.text;
+    return {
+      storedBody: message.text,
+      userText: message.text,
+      previewText: message.text,
+      kind: "text",
+    };
+  }
+
+  if (message.type === "audio") {
+    const media = await whatsapp.downloadMedia(message.mediaId, message.mimeType);
+    const transcript = await openAI.transcribeAudio(media);
+    return {
+      storedBody: transcript,
+      userText: transcript,
+      previewText: transcript,
+      kind: "audio",
+    };
   }
 
   const media = await whatsapp.downloadMedia(message.mediaId, message.mimeType);
-  return openAI.transcribeAudio(media);
+  const imageUrl = await uploadInboundImageToR2({
+    channel: "whatsapp",
+    messageId: message.messageId,
+    fileName: media.fileName,
+    mimeType: media.mimeType,
+    bytes: Buffer.from(media.arrayBuffer),
+  });
+  const storedBody = imageUrl
+    ? buildImageMessageBody(imageUrl, message.caption)
+    : describeInboundImage(message.caption);
+
+  return {
+    storedBody,
+    userText: message.caption?.trim() ?? "",
+    previewText: sanitizeMessageBodyForPreview(storedBody),
+    kind: "image",
+  };
+};
+
+const resolveInstagramInboundContent = async (
+  message: InstagramInboundMessage,
+): Promise<ResolvedInboundContent> => {
+  const rawUserText = message.text?.trim() ?? "";
+  const imageAttachment = message.attachments.find(
+    (attachment) =>
+      Boolean(attachment.url) &&
+      (!attachment.type || attachment.type.toLowerCase() === "image"),
+  );
+
+  if (imageAttachment?.url) {
+    let storedBody = describeInboundImage(rawUserText || imageAttachment.title);
+
+    try {
+      const imageResponse = await fetch(imageAttachment.url);
+      if (!imageResponse.ok) {
+        throw new Error(`download failed (${imageResponse.status})`);
+      }
+
+      const mimeType =
+        imageResponse.headers.get("content-type")?.split(";")[0]?.trim() ||
+        "image/jpeg";
+      const imageBytes = new Uint8Array(await imageResponse.arrayBuffer());
+      const fileName = `instagram-${message.messageId}.${imageExtensionForMimeType(
+        mimeType,
+      )}`;
+      const uploadedImageUrl = await uploadInboundImageToR2({
+        channel: "instagram",
+        messageId: message.messageId,
+        fileName,
+        mimeType,
+        bytes: imageBytes,
+      });
+
+      if (uploadedImageUrl) {
+        storedBody = buildImageMessageBody(
+          uploadedImageUrl,
+          rawUserText || imageAttachment.title,
+        );
+      }
+    } catch (error) {
+      console.warn(
+        `[media:instagram:${message.messageId}] failed to cache inbound image`,
+        error,
+      );
+    }
+
+    return {
+      storedBody,
+      userText: rawUserText,
+      previewText: sanitizeMessageBodyForPreview(storedBody),
+      kind: "image",
+    };
+  }
+
+  const storedBody = rawUserText || (message.hasAttachments ? "Midia recebida" : "");
+  return {
+    storedBody,
+    userText: rawUserText,
+    previewText: sanitizeMessageBodyForPreview(storedBody || "Midia recebida"),
+    kind: message.hasAttachments ? "attachment" : "text",
+  };
 };
 
 const getDb = async (req: Request): Promise<{ prisma: PrismaClient } | Response> => {
@@ -2100,7 +2333,7 @@ const buildResumePendingContext = (
   const normalized = pendingMessages
     .map((message) => ({
       ...message,
-      body: message.body.trim(),
+      body: sanitizeMessageBodyForAi(message.body.trim()),
     }))
     .filter((message) => message.body && message.body !== "[mensagem nao processada]")
     .slice(-MAX_RESUME_PENDING_MESSAGES);
@@ -2228,7 +2461,7 @@ const replyPendingContactAfterBotResume = async (
       return;
     }
     if (resumeBacklog.mergedCount === 1 && isGreetingOnlyMessage(resumeBacklog.latestMessage)) {
-      const greetingReply = buildGreetingReply();
+      const greetingReply = buildGreetingReply(contact.name);
       if (shouldSuppressRecentAutoReply(waId, greetingReply)) {
         broadcast("ai:done", { phone: waId });
         return;
@@ -2270,7 +2503,9 @@ const replyPendingContactAfterBotResume = async (
       console.warn(`[resume-reply:${waId}] extraction failed`, error);
     }
 
-    const wantsHuman = shouldTriggerHumanHandoff(
+    const wantsHuman = await resolveHumanHandoffIntent(
+      prisma,
+      contact.id,
       resumeBacklog.latestMessage,
       extraction,
     );
@@ -3629,10 +3864,10 @@ const whatsappWebhookEvent = async (
 
 
       try {
+        let skipProcessing = false;
         try {
           // Only mark as read if bot is still active for this contact
           const prismaForRead = await getPrismaClient();
-          let skipProcessing = false;
           if (prismaForRead) {
             const contactForRead = await prismaForRead.contact.findUnique({
               where: { waId: message.from },
@@ -3649,26 +3884,6 @@ const whatsappWebhookEvent = async (
             await whatsapp.markAsRead(message.messageId);
             await whatsapp.sendTypingIndicator(message.messageId, "text");
           }
-          if (skipProcessing) {
-            // Still persist the message for history
-            await persistTurn(
-              message.from,
-              "user",
-              (await resolveInboundText(message)).trim() || "[mensagem nao processada]",
-              {
-                externalMessageId: message.messageId,
-                contactName: message.contactName,
-                source: "USER",
-              },
-            );
-            broadcast("message:new", {
-              phone: message.from,
-              role: "user",
-              source: "USER",
-              content: (await resolveInboundText(message)).trim() || "[mensagem nao processada]",
-            });
-            continue;
-          }
         } catch (error) {
           console.warn(
             `[message:${message.messageId}] could not mark as read`,
@@ -3676,19 +3891,56 @@ const whatsappWebhookEvent = async (
           );
         }
 
-        const userText = (await resolveInboundText(message)).trim();
+        const inboundContent = await resolveWhatsAppInboundContent(message);
+        const storedBody = inboundContent.storedBody.trim() || "[mensagem nao processada]";
+        const userText = inboundContent.userText.trim();
+
+        if (skipProcessing) {
+          await persistTurn(
+            message.from,
+            "user",
+            storedBody,
+            {
+              externalMessageId: message.messageId,
+              contactName: message.contactName,
+              source: "USER",
+            },
+          );
+          broadcast("message:new", {
+            phone: message.from,
+            role: "user",
+            source: "USER",
+            content: storedBody,
+          });
+          continue;
+        }
+
         if (!userText) {
+          const fallbackReply =
+            inboundContent.kind === "image"
+              ? "Recebi sua imagem. Se puder, me explica em texto o que voce precisa para eu te ajudar melhor."
+              : "Nao consegui entender o audio. Pode enviar novamente ou mandar em texto?";
           await whatsapp.sendTextMessage(
             message.from,
-            "Nao consegui entender o audio. Pode enviar novamente ou mandar em texto?",
+            fallbackReply,
           );
+          await persistTurn(message.from, "assistant", fallbackReply, {
+            source: "SYSTEM",
+          });
+          broadcast("message:new", {
+            phone: message.from,
+            role: "assistant",
+            source: "SYSTEM",
+            content: fallbackReply,
+          });
+          broadcast("ai:done", { phone: message.from });
           continue;
         }
 
         await persistTurn(
           message.from,
           "user",
-          userText,
+          storedBody,
           {
             externalMessageId: message.messageId,
             contactName: message.contactName,
@@ -3708,7 +3960,7 @@ const whatsappWebhookEvent = async (
           phone: message.from,
           name: message.contactName ?? null,
           messageId: message.messageId,
-          preview: userText.slice(0, 120),
+          preview: inboundContent.previewText.slice(0, 120),
         });
 
         if (isGreetingOnlyMessage(userText)) {
@@ -3717,9 +3969,29 @@ const whatsappWebhookEvent = async (
           if (prismaForGreeting) {
             const latestContact = await prismaForGreeting.contact.findUnique({
               where: { waId: message.from },
-              select: { botEnabled: true },
+              select: { botEnabled: true, name: true },
             });
             if (latestContact && !latestContact.botEnabled) {
+              broadcast("ai:done", { phone: message.from });
+              continue;
+            }
+            if (latestContact) {
+              const personalizedGreetingReply = buildGreetingReply(latestContact.name);
+              if (shouldSuppressRecentAutoReply(message.from, personalizedGreetingReply)) {
+                broadcast("ai:done", { phone: message.from });
+                continue;
+              }
+
+              await sleep(computeReplyDelayMs(personalizedGreetingReply));
+              await whatsapp.sendTextMessage(message.from, personalizedGreetingReply);
+              rememberRecentAutoReply(message.from, personalizedGreetingReply);
+              await persistTurn(message.from, "assistant", personalizedGreetingReply, { source: "AI" });
+              broadcast("message:new", {
+                phone: message.from,
+                role: "assistant",
+                source: "AI",
+                content: personalizedGreetingReply,
+              });
               broadcast("ai:done", { phone: message.from });
               continue;
             }
@@ -3778,6 +4050,11 @@ const whatsappWebhookEvent = async (
             broadcast("ai:done", { phone: message.from });
             continue;
           }
+          if (!contact) {
+            console.warn(`[phone:${message.from}] contact not found after inbound persist`);
+            broadcast("ai:done", { phone: message.from });
+            continue;
+          }
 
           let extraction: Awaited<ReturnType<OpenAIService["extractLeadData"]>> = {};
           try {
@@ -3786,7 +4063,12 @@ const whatsappWebhookEvent = async (
             console.warn(`[phone:${message.from}] extraction failed`, error);
           }
 
-          const wantsHuman = shouldTriggerHumanHandoff(userText, extraction);
+          const wantsHuman = await resolveHumanHandoffIntent(
+            prisma,
+            contact.id,
+            userText,
+            extraction,
+          );
 
           const updateData = buildContactUpdateFromExtraction(extraction);
           if (wantsHuman) {
@@ -4080,14 +4362,15 @@ const instagramWebhookEvent = async (
           },
         };
 
-        const rawUserText = message.text?.trim() ?? "";
-        const userText = rawUserText || (message.hasAttachments ? "[midia recebida]" : "");
+        const inboundContent = await resolveInstagramInboundContent(message);
+        const rawUserText = inboundContent.userText.trim();
+        const storedBody = inboundContent.storedBody.trim();
 
-        if (!userText) {
+        if (!storedBody) {
           continue;
         }
 
-        await persistTurn(contactKey, "user", userText, {
+        await persistTurn(contactKey, "user", storedBody, {
           externalMessageId: message.messageId,
           source: "USER",
           channel: "INSTAGRAM",
@@ -4100,19 +4383,21 @@ const instagramWebhookEvent = async (
           phone: contactKey,
           role: "user",
           source: "USER",
-          content: userText,
+          content: storedBody,
         });
         broadcast("ai:processing", { phone: contactKey });
         broadcast("notification", {
           phone: contactKey,
           name: null,
           messageId: message.messageId,
-          preview: userText.slice(0, 120),
+          preview: inboundContent.previewText.slice(0, 120),
         });
 
         if (!rawUserText) {
           const fallbackReply =
-            "No momento eu consigo te atender melhor por texto. Pode me mandar sua duvida escrita?";
+            inboundContent.kind === "image"
+              ? "Recebi sua imagem. Se puder, me conta em texto o que voce quer que eu confira nela."
+              : "No momento eu consigo te atender melhor por texto. Pode me mandar sua duvida escrita?";
           await sendTextToTarget(deliveryTarget, fallbackReply);
           await persistTurn(contactKey, "assistant", fallbackReply, {
             source: "SYSTEM",
@@ -4136,9 +4421,35 @@ const instagramWebhookEvent = async (
           if (prisma) {
             const latestContact = await prisma.contact.findUnique({
               where: { waId: contactKey },
-              select: { botEnabled: true },
+              select: { botEnabled: true, name: true },
             });
             if (latestContact && !latestContact.botEnabled) {
+              broadcast("ai:done", { phone: contactKey });
+              continue;
+            }
+            if (latestContact) {
+              const personalizedGreetingReply = buildGreetingReply(latestContact.name);
+              if (shouldSuppressRecentAutoReply(contactKey, personalizedGreetingReply)) {
+                broadcast("ai:done", { phone: contactKey });
+                continue;
+              }
+
+              await sleep(computeReplyDelayMs(personalizedGreetingReply));
+              await sendTextToTarget(deliveryTarget, personalizedGreetingReply);
+              rememberRecentAutoReply(contactKey, personalizedGreetingReply);
+              await persistTurn(contactKey, "assistant", personalizedGreetingReply, {
+                source: "AI",
+                channel: "INSTAGRAM",
+                externalId: message.from,
+                externalThreadId: message.pageId,
+                instagramConnectionId: connection.id,
+              });
+              broadcast("message:new", {
+                phone: contactKey,
+                role: "assistant",
+                source: "AI",
+                content: personalizedGreetingReply,
+              });
               broadcast("ai:done", { phone: contactKey });
               continue;
             }
@@ -4215,6 +4526,13 @@ const instagramWebhookEvent = async (
             broadcast("ai:done", { phone: contactKey });
             continue;
           }
+          if (!contact) {
+            console.warn(
+              `[instagram:${contactKey}] contact not found after inbound persist`,
+            );
+            broadcast("ai:done", { phone: contactKey });
+            continue;
+          }
 
           let extraction: Awaited<ReturnType<OpenAIService["extractLeadData"]>> = {};
           try {
@@ -4223,7 +4541,12 @@ const instagramWebhookEvent = async (
             console.warn(`[instagram:${contactKey}] extraction failed`, error);
           }
 
-          const wantsHuman = shouldTriggerHumanHandoff(rawUserText, extraction);
+          const wantsHuman = await resolveHumanHandoffIntent(
+            prisma,
+            contact.id,
+            rawUserText,
+            extraction,
+          );
           const updateData = buildContactUpdateFromExtraction(extraction);
 
           if (wantsHuman) {

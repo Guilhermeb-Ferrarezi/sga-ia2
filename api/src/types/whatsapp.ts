@@ -38,6 +38,11 @@ export interface WhatsAppMessage {
     id?: string;
     mime_type?: string;
   };
+  image?: {
+    id?: string;
+    mime_type?: string;
+    caption?: string;
+  };
 }
 
 export interface InboundTextMessage {
@@ -55,6 +60,16 @@ export interface InboundAudioMessage {
   contactName?: string;
 }
 
+export interface InboundImageMessage {
+  from: string;
+  messageId: string;
+  mediaId: string;
+  mimeType?: string;
+  caption?: string;
+  contactName?: string;
+}
+
 export type InboundMessage =
   | (InboundTextMessage & { type: "text" })
-  | (InboundAudioMessage & { type: "audio" });
+  | (InboundAudioMessage & { type: "audio" })
+  | (InboundImageMessage & { type: "image" });

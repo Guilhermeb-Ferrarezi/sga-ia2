@@ -534,7 +534,16 @@ export const extractInstagramInboundMessages = (
       if (!senderId || !recipientId || !messageId || isEcho) continue;
 
       const text = normalizeOptionalText(event.message?.text);
-      const hasAttachments = (event.message?.attachments?.length ?? 0) > 0;
+      const attachments = (event.message?.attachments ?? [])
+        .map((attachment) => ({
+          type: normalizeOptionalText(attachment.type),
+          url: normalizeOptionalText(attachment.payload?.url),
+          title: normalizeOptionalText(attachment.payload?.title),
+        }))
+        .filter(
+          (attachment) => attachment.type || attachment.url || attachment.title,
+        );
+      const hasAttachments = attachments.length > 0;
 
       inbound.push({
         pageId,
@@ -543,6 +552,7 @@ export const extractInstagramInboundMessages = (
         messageId,
         text,
         hasAttachments,
+        attachments,
         timestamp: typeof event.timestamp === "number" ? event.timestamp : null,
       });
     }

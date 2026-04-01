@@ -1,4 +1,5 @@
 import type { PrismaClient } from "@prisma/client";
+import { sanitizeMessageBodyForPreview } from "../lib/messageContent";
 
 export interface DashboardOverview {
   totalMessages: number;
@@ -33,7 +34,7 @@ export interface ConversationTurnsPage {
 }
 
 const toPreview = (text: string): string => {
-  const normalized = text.replace(/\s+/g, " ").trim();
+  const normalized = sanitizeMessageBodyForPreview(text);
   if (normalized.length <= 100) return normalized;
   return `${normalized.slice(0, 100)}...`;
 };

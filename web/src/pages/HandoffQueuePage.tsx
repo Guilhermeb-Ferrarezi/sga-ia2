@@ -14,6 +14,7 @@ import { useToast } from "@/contexts/ToastContext";
 import { useOperationalAlerts } from "@/contexts/OperationalAlertsContext";
 import { useWebSocket } from "@/contexts/WebSocketContext";
 import { api, type HandoffQueueItem } from "@/lib/api";
+import { getMessagePreviewText } from "@/lib/messageContent";
 import { PERMISSIONS, hasPermission } from "@/lib/rbac";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
@@ -336,7 +337,7 @@ export default function HandoffQueuePage() {
                               : "Cliente"}
                       :{" "}
                     </span>
-                    "{item.latestMessage.body}"
+                    "{getMessagePreviewText(item.latestMessage.body)}"
                   </p>
                 )}
                 {item.openTasks.length > 0 && (

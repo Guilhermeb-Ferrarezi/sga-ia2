@@ -21,9 +21,23 @@ export type InstagramWebhookMessagingEvent = {
     mid?: string;
     text?: string;
     is_echo?: boolean;
-    attachments?: Array<Record<string, unknown>>;
+    attachments?: InstagramWebhookAttachment[];
   };
 };
+
+export type InstagramWebhookAttachment = {
+  type?: string;
+  payload?: {
+    url?: string;
+    title?: string;
+  } & Record<string, unknown>;
+};
+
+export interface InstagramInboundAttachment {
+  type: string | null;
+  url: string | null;
+  title: string | null;
+}
 
 export interface InstagramInboundMessage {
   pageId: string;
@@ -32,5 +46,6 @@ export interface InstagramInboundMessage {
   messageId: string;
   text: string | null;
   hasAttachments: boolean;
+  attachments: InstagramInboundAttachment[];
   timestamp: number | null;
 }

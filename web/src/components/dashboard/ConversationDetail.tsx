@@ -3,6 +3,10 @@ import { Bot, BotOff, Loader2, Send } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { useWebSocket, type WsEventPayload } from "@/contexts/WebSocketContext";
 import { api, type DashboardTurn } from "@/lib/api";
+import {
+  parseAudioMessageContent,
+  parseImageMessageContent,
+} from "@/lib/messageContent";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import {
@@ -22,16 +26,6 @@ import {
 } from "@/components/dashboard/LeadOriginBadge";
 
 const TURNS_PAGE_SIZE = 40;
-
-const AUDIO_TAG_RE = /\[AUDIO:(.+?)\|(.+?)\]/;
-
-const parseAudioContent = (
-  content: string,
-): { url: string; title: string } | null => {
-  const match = AUDIO_TAG_RE.exec(content.trim());
-  if (!match) return null;
-  return { url: match[1], title: match[2] };
-};
 
 const formatDateTime = (value: string): string =>
   new Intl.DateTimeFormat("pt-BR", {
@@ -367,7 +361,8 @@ export default function ConversationDetail({
               </p>
             )}
             {!loading && turns.map((turn) => {
-              const audio = parseAudioContent(turn.content);
+              const audio = parseAudioMessageContent(turn.content);
+              const image = parseImageMessageContent(turn.content);
               return (
                 <div
                   key={turn.id}
@@ -394,6 +389,27 @@ export default function ConversationDetail({
                         )}
                       />
                       <p className="text-xs font-medium truncate">{audio.title}</p>
+                    </div>
+                  ) : image ? (
+                    <div className="space-y-2">
+                      <a
+                        href={image.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="block overflow-hidden rounded-lg border border-white/10"
+                      >
+                        <img
+                          src={image.url}
+                          alt={image.caption ?? "Imagem recebida"}
+                          loading="lazy"
+                          className="max-h-[320px] w-full rounded-lg object-cover"
+                        />
+                      </a>
+                      {image.caption && (
+                        <p className="text-xs leading-relaxed opacity-90">
+                          {image.caption}
+                        </p>
+                      )}
                     </div>
                   ) : (
                     <p className="whitespace-pre-wrap text-sm">{turn.content}</p>

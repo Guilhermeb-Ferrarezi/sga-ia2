@@ -31,6 +31,7 @@ import {
   type PipelineStage,
   type Tag,
 } from "@/lib/api";
+import { getMessagePreviewText } from "@/lib/messageContent";
 import { PERMISSIONS, hasAnyPermission } from "@/lib/rbac";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
@@ -1114,7 +1115,7 @@ export default function PipelineBoardView() {
         contact.source,
         contact.platformHandle,
         resolvedChannel === "INSTAGRAM" ? "instagram" : "whatsapp",
-        contact.messages[0]?.body,
+        contact.messages[0] ? getMessagePreviewText(contact.messages[0].body) : null,
       ]
         .filter((value): value is string => Boolean(value))
         .join(" ")
@@ -1214,7 +1215,7 @@ export default function PipelineBoardView() {
             </p>
             {contact.messages[0] && (
               <p className="mt-1 line-clamp-2 break-words text-xs text-muted-foreground">
-                {contact.messages[0].body.slice(0, 80)}
+                {getMessagePreviewText(contact.messages[0].body).slice(0, 80)}
               </p>
             )}
             {contact.tags.length > 0 && (
@@ -2391,7 +2392,7 @@ export default function PipelineBoardView() {
                     Ultima mensagem
                   </p>
                   <p className="mt-1 text-sm text-foreground/90">
-                    {detailsContact.messages[0].body}
+                    {getMessagePreviewText(detailsContact.messages[0].body)}
                   </p>
                 </div>
               )}
