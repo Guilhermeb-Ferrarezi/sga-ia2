@@ -762,11 +762,12 @@ export class OpenAIService {
                 {
                   type: "input_text",
                   text: [
-                    "Descreva a imagem em portugues do Brasil.",
-                    "Responda em uma frase curta, com no maximo 18 palavras.",
+                    "Resuma a imagem em portugues do Brasil para um atendimento de campeonatos.",
+                    "Responda em uma frase curta, com no maximo 24 palavras.",
+                    "Priorize nome do campeonato, jogo, data, cidade, categoria e qualquer texto grande claramente legivel.",
                     "Cite apenas o que for visivel ou texto claramente legivel.",
-                    "Nao invente contexto, identidade, local ou intencao.",
-                    "Se a imagem estiver pouco clara, responda: imagem recebida sem detalhes claros.",
+                    "Nao use aspas, nao enumere e nao invente contexto, identidade, local ou intencao.",
+                    "Se a imagem estiver pouco clara, responda exatamente: imagem recebida sem detalhes claros",
                   ].join(" "),
                 },
               ],
@@ -1002,7 +1003,7 @@ export class OpenAIService {
                 text: [
                   "Extraia dados estruturados de lead para atendimento de campeonato de esports.",
                   "Retorne APENAS JSON valido (sem markdown, sem texto extra).",
-                  "Campos permitidos: name, email, tournament, category, city, teamName, playersCount, wantsHuman, handoffReason.",
+                  "Campos permitidos: name, email, tournament, eventDate, category, city, teamName, playersCount, wantsHuman, handoffReason.",
                   "Use null para campos desconhecidos.",
                   "wantsHuman=true somente se o usuario pedir atendimento humano explicitamente.",
                   "Perguntas sobre preco, valor, custo, inscricao, ticket, horario, data, local, regras, formato, edicao e funcionamento NAO sao pedido de humano.",

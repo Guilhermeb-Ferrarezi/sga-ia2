@@ -2077,6 +2077,51 @@ const buildImageFallbackReply = (
   return `Recebi sua imagem.${summaryPart} Se puder, me explica em texto o que voce precisa para eu te ajudar melhor.`;
 };
 
+const hasUsableImageSummary = (value?: string | null): boolean => {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized) return false;
+  return !/^imagem recebida sem detalhes claros[.!]?$/i.test(normalized);
+};
+
+const buildInboundImageUserText = (
+  caption?: string | null,
+  imageSummary?: string | null,
+): string => {
+  const normalizedCaption = caption?.trim() ?? "";
+  const normalizedSummary = imageSummary?.trim() ?? "";
+  const usableSummary = hasUsableImageSummary(normalizedSummary)
+    ? normalizedSummary
+    : "";
+
+  if (normalizedCaption && usableSummary) {
+    return [
+      `Mensagem do usuario sobre a imagem: ${normalizedCaption}`,
+      `Conteudo visivel na imagem: ${usableSummary}`,
+    ].join("\n");
+  }
+
+  if (normalizedCaption) return normalizedCaption;
+  if (usableSummary) return `Imagem enviada pelo usuario. Conteudo visivel: ${usableSummary}`;
+  return "";
+};
+
+const buildInboundImageLabel = (
+  caption?: string | null,
+  imageSummary?: string | null,
+): string => {
+  const normalizedCaption = caption?.trim() ?? "";
+  const normalizedSummary = imageSummary?.trim() ?? "";
+  const usableSummary = hasUsableImageSummary(normalizedSummary)
+    ? normalizedSummary
+    : "";
+
+  if (normalizedCaption && usableSummary) {
+    return `Legenda: ${normalizedCaption} | Conteudo visivel: ${usableSummary}`;
+  }
+
+  return normalizedCaption || usableSummary;
+};
+
 const imageExtensionForMimeType = (mimeType?: string | null): string => {
   const normalized = mimeType?.trim().toLowerCase();
   if (!normalized) return "jpg";
@@ -2145,16 +2190,16 @@ const resolveWhatsAppInboundContent = async (
   const media = await whatsapp.downloadMedia(message.mediaId, message.mimeType);
   const mediaBytes = new Uint8Array(media.arrayBuffer);
   const normalizedCaption = message.caption?.trim() ?? "";
-  const imageSummary = normalizedCaption
-    ? ""
-    : await openAI.summarizeInboundImage(
-        {
-          bytes: mediaBytes,
-          mimeType: media.mimeType,
-        },
-        prisma,
-      );
-  const imageLabel = normalizedCaption || imageSummary;
+  const imageSummary = await openAI.summarizeInboundImage(
+    {
+      bytes: mediaBytes,
+      mimeType: media.mimeType,
+      caption: normalizedCaption,
+    },
+    prisma,
+  );
+  const imageLabel = buildInboundImageLabel(normalizedCaption, imageSummary);
+  const userText = buildInboundImageUserText(normalizedCaption, imageSummary);
   const imageUrl = await uploadInboundImageToR2({
     channel: "whatsapp",
     messageId: message.messageId,
@@ -2168,7 +2213,7 @@ const resolveWhatsAppInboundContent = async (
 
   return {
     storedBody,
-    userText: normalizedCaption,
+    userText,
     previewText: sanitizeMessageBodyForPreview(storedBody),
     kind: "image",
     imageSummary,
@@ -2189,8 +2234,9 @@ const resolveInstagramInboundContent = async (
   if (imageAttachment?.url) {
     const attachmentTitle = imageAttachment.title?.trim() ?? "";
     let imageSummary = "";
-    let imageLabel = rawUserText || attachmentTitle;
+    let imageLabel = buildInboundImageLabel(rawUserText, attachmentTitle);
     let storedBody = describeInboundImage(imageLabel);
+    let userText = rawUserText;
 
     try {
       const imageResponse = await fetch(imageAttachment.url);
@@ -2202,17 +2248,17 @@ const resolveInstagramInboundContent = async (
         imageResponse.headers.get("content-type")?.split(";")[0]?.trim() ||
         "image/jpeg";
       const imageBytes = new Uint8Array(await imageResponse.arrayBuffer());
-      if (!imageLabel) {
-        imageSummary = await openAI.summarizeInboundImage(
-          {
-            bytes: imageBytes,
-            mimeType,
-          },
-          prisma,
-        );
-        imageLabel = imageSummary;
-        storedBody = describeInboundImage(imageLabel);
-      }
+      imageSummary = await openAI.summarizeInboundImage(
+        {
+          bytes: imageBytes,
+          mimeType,
+          caption: rawUserText || attachmentTitle,
+        },
+        prisma,
+      );
+      imageLabel = buildInboundImageLabel(rawUserText || attachmentTitle, imageSummary);
+      userText = buildInboundImageUserText(rawUserText || attachmentTitle, imageSummary);
+      storedBody = describeInboundImage(imageLabel);
       const fileName = `instagram-${message.messageId}.${imageExtensionForMimeType(
         mimeType,
       )}`;
@@ -2236,7 +2282,7 @@ const resolveInstagramInboundContent = async (
 
     return {
       storedBody,
-      userText: rawUserText,
+      userText,
       previewText: sanitizeMessageBodyForPreview(storedBody),
       kind: "image",
       imageSummary,
