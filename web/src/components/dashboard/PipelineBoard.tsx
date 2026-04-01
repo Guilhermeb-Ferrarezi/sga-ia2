@@ -326,7 +326,8 @@ function VirtualizedContactList({
   const rowVirtualizer = useVirtualizer({
     count: contacts.length,
     getScrollElement: () => parentRef.current,
-    estimateSize: () => 132,
+    estimateSize: () => 172,
+    measureElement: (element) => element?.getBoundingClientRect().height ?? 0,
     overscan: 8,
   });
 
@@ -351,6 +352,8 @@ function VirtualizedContactList({
           return (
             <div
               key={contact.waId}
+              data-index={virtualRow.index}
+              ref={rowVirtualizer.measureElement}
               className="absolute left-0 top-0 w-full"
               style={{ transform: `translateY(${virtualRow.start}px)` }}
             >

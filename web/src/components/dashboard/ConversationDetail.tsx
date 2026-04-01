@@ -17,6 +17,9 @@ import { Separator } from "@/components/ui/separator";
 import LoadingScreen from "@/components/ui/loading-screen";
 import { AudioPlayer } from "@/components/ui/audio-player";
 import { useAudioPlayer } from "@/hooks/useAudioPlayer";
+import {
+  LeadOriginBadge,
+} from "@/components/dashboard/LeadOriginBadge";
 
 const TURNS_PAGE_SIZE = 40;
 
@@ -299,6 +302,7 @@ export default function ConversationDetail({
             <CardDescription>
               {loadedTurnsCount} de {totalTurns} mensagem(ns) carregada(s)
             </CardDescription>
+            <LeadOriginBadge waId={phone} showHint className="pt-2" />
           </div>
           <Button
             variant={botEnabled ? "secondary" : "destructive"}

@@ -1,5 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { useVirtualizer } from "@tanstack/react-virtual";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Loader2, RefreshCcw } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
 import { useAuth } from "@/contexts/AuthContext";
@@ -15,8 +14,17 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
+import {
+  LeadOriginBadge,
+  getLeadOriginMeta,
+  resolveLeadOriginChannel,
+  type LeadOriginChannel,
+} from "@/components/dashboard/LeadOriginBadge";
 import ConversationDetail from "./ConversationDetail";
+
+type ChannelFilter = "all" | LeadOriginChannel;
 
 const formatDateTime = (value: string): string =>
   new Intl.DateTimeFormat("pt-BR", {
@@ -53,18 +61,50 @@ export default function ConversationsTab() {
   const { subscribeFiltered } = useWebSocket();
   const [searchParams, setSearchParams] = useSearchParams();
   const [conversations, setConversations] = useState<DashboardConversation[]>([]);
+  const [channelFilter, setChannelFilter] = useState<ChannelFilter>("all");
+  const [searchTerm, setSearchTerm] = useState("");
   const [selectedPhone, setSelectedPhone] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const selectedFromQuery = searchParams.get("phone");
   const listRef = useRef<HTMLDivElement | null>(null);
 
-  const rowVirtualizer = useVirtualizer({
-    count: conversations.length,
-    getScrollElement: () => listRef.current,
-    estimateSize: () => 110,
-    overscan: 8,
-  });
+  const filteredConversations = useMemo(
+    () =>
+      conversations.filter((conversation) => {
+        const resolvedChannel = resolveLeadOriginChannel(undefined, conversation.phone);
+        if (channelFilter !== "all" && resolvedChannel !== channelFilter) return false;
+
+        const query = searchTerm.trim().toLowerCase();
+        if (!query) return true;
+
+        const haystack = [
+          conversation.name,
+          conversation.phone,
+          conversation.lastMessagePreview,
+          resolvedChannel === "INSTAGRAM" ? "instagram" : "whatsapp",
+        ]
+          .filter((value): value is string => Boolean(value))
+          .join(" ")
+          .toLowerCase();
+
+        return haystack.includes(query);
+      }),
+    [conversations, channelFilter, searchTerm],
+  );
+
+  const conversationOriginCounts = useMemo(
+    () =>
+      conversations.reduce(
+        (summary, conversation) => {
+          summary.total += 1;
+          summary[resolveLeadOriginChannel(undefined, conversation.phone)] += 1;
+          return summary;
+        },
+        { total: 0, WHATSAPP: 0, INSTAGRAM: 0 },
+      ),
+    [conversations],
+  );
 
   const load = useCallback(async () => {
     if (!token) return;
@@ -139,13 +179,34 @@ export default function ConversationsTab() {
             <CardDescription>
               {loading
                 ? "Carregando conversas..."
-                : `${conversations.length} conversa(s) registradas.`}
+                : `${filteredConversations.length} de ${conversations.length} conversa(s) registradas.`}
             </CardDescription>
           </CardHeader>
           <Separator />
           <CardContent className="min-h-0 flex-1 p-0">
             <div ref={listRef} className="h-full overflow-y-auto">
               <div className="p-3">
+                <div className="mb-3 flex flex-col gap-2 sm:flex-row">
+                  <Input
+                    value={searchTerm}
+                    onChange={(event) => setSearchTerm(event.target.value)}
+                    placeholder="Buscar por nome, numero ou mensagem..."
+                    className="sm:flex-1"
+                  />
+                  <select
+                    value={channelFilter}
+                    onChange={(event) => setChannelFilter(event.target.value as ChannelFilter)}
+                    className="h-10 rounded-lg border border-input bg-background px-3 text-sm sm:w-[180px]"
+                  >
+                    <option value="all">Todos os canais</option>
+                    <option value="WHATSAPP">
+                      WhatsApp ({conversationOriginCounts.WHATSAPP})
+                    </option>
+                    <option value="INSTAGRAM">
+                      Instagram ({conversationOriginCounts.INSTAGRAM})
+                    </option>
+                  </select>
+                </div>
                 {loading && (
                   <div className="space-y-2 p-1">
                     {Array.from({ length: 6 }).map((_, i) => (
@@ -156,54 +217,62 @@ export default function ConversationsTab() {
                     ))}
                   </div>
                 )}
-                {!loading && conversations.length > 0 && (
-                  <div className="relative" style={{ height: `${rowVirtualizer.getTotalSize()}px` }}>
-                    {rowVirtualizer.getVirtualItems().map((virtualRow) => {
-                      const conversation = conversations[virtualRow.index];
-                      if (!conversation) return null;
+                {!loading && filteredConversations.length > 0 && (
+                  <div className="space-y-2">
+                    {filteredConversations.map((conversation) => {
+                      const originMeta = getLeadOriginMeta(undefined, conversation.phone);
 
                       return (
-                        <div
+                        <button
                           key={conversation.phone}
-                          className="absolute left-0 top-0 w-full"
-                          style={{ transform: `translateY(${virtualRow.start}px)` }}
+                          type="button"
+                          onClick={() => handleSelectPhone(conversation.phone)}
+                          className={cn(
+                            "relative w-full overflow-hidden rounded-xl border px-3 py-2 text-left transition",
+                            originMeta.panelClass,
+                            selectedPhone === conversation.phone
+                              ? "border-primary bg-primary/10 ring-1 ring-primary/40"
+                              : "border-border bg-background/50 hover:bg-muted/70",
+                          )}
                         >
-                          <button
-                            type="button"
-                            onClick={() => handleSelectPhone(conversation.phone)}
+                          <div
                             className={cn(
-                              "w-full rounded-lg border px-3 py-2 text-left transition",
-                              selectedPhone === conversation.phone
-                                ? "border-primary bg-primary/10"
-                                : "border-border bg-background/50 hover:bg-muted/70",
+                              "absolute inset-y-0 left-0 w-1.5 bg-gradient-to-b",
+                              originMeta.railClass,
                             )}
-                          >
-                            <div className="flex items-center justify-between gap-2">
-                              <p className="truncate font-medium">
-                                {formatConversationHeading(
-                                  conversation.phone,
-                                  conversation.name,
-                                )}
-                              </p>
-                              <Badge variant="secondary">
-                                {conversation.messagesCount}
-                              </Badge>
-                            </div>
-                            <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
-                              {conversation.lastMessagePreview}
+                          />
+                          <div className="flex items-center justify-between gap-2">
+                            <p className="truncate font-medium">
+                              {formatConversationHeading(
+                                conversation.phone,
+                                conversation.name,
+                              )}
                             </p>
-                            <p className="mt-1 text-[11px] text-muted-foreground">
-                              {formatDateTime(conversation.lastMessageAt)}
-                            </p>
-                          </button>
-                        </div>
+                            <Badge variant="secondary">
+                              {conversation.messagesCount}
+                            </Badge>
+                          </div>
+                          <LeadOriginBadge
+                            waId={conversation.phone}
+                            compact
+                            className="mt-1"
+                          />
+                          <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
+                            {conversation.lastMessagePreview}
+                          </p>
+                          <p className="mt-1 text-[11px] text-muted-foreground">
+                            {formatDateTime(conversation.lastMessageAt)}
+                          </p>
+                        </button>
                       );
                     })}
                   </div>
                 )}
-                {!loading && !conversations.length && (
+                {!loading && !filteredConversations.length && (
                   <p className="px-1 py-4 text-sm text-muted-foreground">
-                    Nenhuma conversa registrada ainda.
+                    {conversations.length
+                      ? "Nenhuma conversa neste canal."
+                      : "Nenhuma conversa registrada ainda."}
                   </p>
                 )}
               </div>
