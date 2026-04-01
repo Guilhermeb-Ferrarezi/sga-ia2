@@ -101,6 +101,11 @@ export interface InstagramConnectionsOverview {
   requiredScopes: string[];
   callbackUrl: string | null;
   webhookPath: string;
+  webhookPaths: {
+    instagram: string;
+    whatsapp: string;
+    legacy: string;
+  };
   prerequisites: {
     appIdConfigured: boolean;
     appSecretConfigured: boolean;

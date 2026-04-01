@@ -912,7 +912,7 @@ export const buildOpenApiDocument = (req?: Request): Doc => ({
     "/webhook": {
       get: {
         tags: ["Webhook"],
-        summary: "Verificacao do webhook",
+        summary: "Verificacao do webhook legado",
         security: [],
         parameters: [
           queryParam("hub.mode", "Modo da verificacao"),
@@ -926,7 +926,59 @@ export const buildOpenApiDocument = (req?: Request): Doc => ({
       },
       post: {
         tags: ["Webhook"],
-        summary: "Receber evento do WhatsApp ou Instagram",
+        summary: "Receber evento do WhatsApp ou Instagram pelo endpoint legado",
+        security: [],
+        requestBody: jsonBody(genericObject),
+        responses: {
+          "200": textResponse("EVENT_RECEIVED"),
+          "400": responseRef("BadRequest"),
+        },
+      },
+    },
+    "/webhook/whatsapp": {
+      get: {
+        tags: ["Webhook"],
+        summary: "Verificacao do webhook do WhatsApp",
+        security: [],
+        parameters: [
+          queryParam("hub.mode", "Modo da verificacao"),
+          queryParam("hub.verify_token", "Token de verificacao"),
+          queryParam("hub.challenge", "Desafio retornado pela Meta"),
+        ],
+        responses: {
+          "200": textResponse("Webhook validado"),
+          "403": textResponse("Token invalido"),
+        },
+      },
+      post: {
+        tags: ["Webhook"],
+        summary: "Receber evento do WhatsApp",
+        security: [],
+        requestBody: jsonBody(genericObject),
+        responses: {
+          "200": textResponse("EVENT_RECEIVED"),
+          "400": responseRef("BadRequest"),
+        },
+      },
+    },
+    "/webhook/instagram": {
+      get: {
+        tags: ["Webhook"],
+        summary: "Verificacao do webhook do Instagram",
+        security: [],
+        parameters: [
+          queryParam("hub.mode", "Modo da verificacao"),
+          queryParam("hub.verify_token", "Token de verificacao"),
+          queryParam("hub.challenge", "Desafio retornado pela Meta"),
+        ],
+        responses: {
+          "200": textResponse("Webhook validado"),
+          "403": textResponse("Token invalido"),
+        },
+      },
+      post: {
+        tags: ["Webhook"],
+        summary: "Receber evento do Instagram",
         security: [],
         requestBody: jsonBody(genericObject),
         responses: {

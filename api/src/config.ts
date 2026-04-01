@@ -25,6 +25,14 @@ const required = (name: string): string => {
   return value;
 };
 
+const requiredValue = (value: string | undefined, name: string): string => {
+  const normalized = value?.trim();
+  if (!normalized) {
+    throw new Error(`Missing required config: ${name}`);
+  }
+  return normalized;
+};
+
 const normalizeBasePath = (value: string | undefined): string => {
   const trimmed = value?.trim();
   if (!trimmed || trimmed === "/") return "/api";
@@ -49,18 +57,28 @@ export const config = {
   whatsappPhoneNumberId: required("WHATSAPP_PHONE_NUMBER_ID"),
   whatsappGraphVersion: Bun.env.WHATSAPP_GRAPH_VERSION ?? "v21.0",
   metaGraphVersion: Bun.env.META_GRAPH_VERSION ?? "v25.0",
-  metaAppId: optional(Bun.env.META_APP_ID ?? Bun.env.WHATSAPP_APP_ID),
+  metaAppId: optional(Bun.env.META_APP_ID),
   metaAppSecret: optional(Bun.env.META_APP_SECRET),
   metaRedirectUri: optional(Bun.env.META_REDIRECT_URI),
-  metaWebhookVerifyToken: optional(
-    Bun.env.META_WEBHOOK_VERIFY_TOKEN ?? Bun.env.WEBHOOK_VERIFY_TOKEN,
+  metaWebhookVerifyToken: optional(Bun.env.META_WEBHOOK_VERIFY_TOKEN),
+  whatsappWebhookVerifyToken: requiredValue(
+    Bun.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN ?? Bun.env.WEBHOOK_VERIFY_TOKEN,
+    "WHATSAPP_WEBHOOK_VERIFY_TOKEN or WEBHOOK_VERIFY_TOKEN",
+  ),
+  whatsappAppId: optional(Bun.env.WHATSAPP_APP_ID ?? Bun.env.META_APP_ID),
+  whatsappAppSecret: optional(Bun.env.WHATSAPP_APP_SECRET ?? Bun.env.META_APP_SECRET),
+  instagramAppId: optional(Bun.env.INSTAGRAM_APP_ID ?? Bun.env.META_APP_ID),
+  instagramAppSecret: optional(Bun.env.INSTAGRAM_APP_SECRET ?? Bun.env.META_APP_SECRET),
+  instagramWebhookVerifyToken: optional(
+    Bun.env.INSTAGRAM_WEBHOOK_VERIFY_TOKEN ??
+      Bun.env.META_WEBHOOK_VERIFY_TOKEN ??
+      Bun.env.WEBHOOK_VERIFY_TOKEN,
   ),
   instagramScopes: (Bun.env.INSTAGRAM_SCOPES ??
     "instagram_business_basic,instagram_business_manage_messages")
     .split(",")
     .map((scope) => scope.trim())
     .filter(Boolean),
-  whatsappAppId: optional(Bun.env.WHATSAPP_APP_ID ?? Bun.env.META_APP_ID),
   openaiApiKey: required("OPENAI_API_KEY"),
   openaiModel: Bun.env.OPENAI_MODEL ?? "gpt-4o-mini",
   openaiTranscriptionModel:

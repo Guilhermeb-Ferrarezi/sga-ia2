@@ -132,7 +132,7 @@ export class InstagramService {
   }
 
   buildOAuthUrl(state: string, scopes: string[]): string {
-    const appId = requireValue(this.appId, "META_APP_ID");
+    const appId = requireValue(this.appId, "INSTAGRAM_APP_ID");
     const redirectUri = requireValue(this.redirectUri, "META_REDIRECT_URI");
     const normalizedScopes = scopes.filter(Boolean);
 
@@ -166,8 +166,8 @@ export class InstagramService {
   }
 
   async exchangeCodeForUserToken(code: string, scopes: string[] = []): Promise<string> {
-    const appId = requireValue(this.appId, "META_APP_ID");
-    const appSecret = requireValue(this.appSecret, "META_APP_SECRET");
+    const appId = requireValue(this.appId, "INSTAGRAM_APP_ID");
+    const appSecret = requireValue(this.appSecret, "INSTAGRAM_APP_SECRET");
     const redirectUri = requireValue(this.redirectUri, "META_REDIRECT_URI");
 
     if (this.usesInstagramLoginScopes(scopes)) {
@@ -487,7 +487,7 @@ export class InstagramService {
   private async exchangeForLongLivedInstagramToken(
     shortLivedToken: string,
   ): Promise<string | null> {
-    const appSecret = requireValue(this.appSecret, "META_APP_SECRET");
+    const appSecret = requireValue(this.appSecret, "INSTAGRAM_APP_SECRET");
     const params = new URLSearchParams({
       grant_type: "ig_exchange_token",
       client_secret: appSecret,

@@ -36,10 +36,13 @@ const prerequisiteLabels: Array<{
   key: keyof InstagramConnectionsOverview["prerequisites"];
   label: string;
 }> = [
-  { key: "appIdConfigured", label: "META_APP_ID" },
-  { key: "appSecretConfigured", label: "META_APP_SECRET" },
+  { key: "appIdConfigured", label: "INSTAGRAM_APP_ID ou META_APP_ID" },
+  { key: "appSecretConfigured", label: "INSTAGRAM_APP_SECRET ou META_APP_SECRET" },
   { key: "redirectUriConfigured", label: "META_REDIRECT_URI" },
-  { key: "webhookVerifyTokenConfigured", label: "META_WEBHOOK_VERIFY_TOKEN" },
+  {
+    key: "webhookVerifyTokenConfigured",
+    label: "INSTAGRAM_WEBHOOK_VERIFY_TOKEN ou META_WEBHOOK_VERIFY_TOKEN",
+  },
 ];
 
 const formatDate = (value: string | null): string =>
@@ -281,12 +284,28 @@ export default function InstagramConnectionsPage() {
                 <div className="rounded-2xl border border-border/60 bg-background/60 p-4">
                   <div className="mb-2 flex items-center gap-2 text-sm font-medium">
                     <Webhook className="h-4 w-4 text-primary" />
-                    Webhook
+                    Webhook Instagram
                   </div>
                   <p className="break-all text-sm text-muted-foreground">
-                    {overview ? `${window.location.origin}${overview.webhookPath}` : "Carregando..."}
+                    {overview
+                      ? `${window.location.origin}${overview.webhookPaths.instagram}`
+                      : "Carregando..."}
                   </p>
                 </div>
+                <div className="rounded-2xl border border-border/60 bg-background/60 p-4">
+                  <div className="mb-2 flex items-center gap-2 text-sm font-medium">
+                    <Webhook className="h-4 w-4 text-primary" />
+                    Webhook WhatsApp
+                  </div>
+                  <p className="break-all text-sm text-muted-foreground">
+                    {overview
+                      ? `${window.location.origin}${overview.webhookPaths.whatsapp}`
+                      : "Carregando..."}
+                  </p>
+                </div>
+              </div>
+
+              <div className="grid gap-3 md:grid-cols-2">
                 <div className="rounded-2xl border border-border/60 bg-background/60 p-4">
                   <div className="mb-2 flex items-center gap-2 text-sm font-medium">
                     <Link2 className="h-4 w-4 text-primary" />
@@ -294,6 +313,17 @@ export default function InstagramConnectionsPage() {
                   </div>
                   <p className="break-all text-sm text-muted-foreground">
                     {overview?.callbackUrl ?? "Defina META_REDIRECT_URI"}
+                  </p>
+                </div>
+                <div className="rounded-2xl border border-border/60 bg-background/60 p-4">
+                  <div className="mb-2 flex items-center gap-2 text-sm font-medium">
+                    <Webhook className="h-4 w-4 text-primary" />
+                    Webhook Legado
+                  </div>
+                  <p className="break-all text-sm text-muted-foreground">
+                    {overview
+                      ? `${window.location.origin}${overview.webhookPaths.legacy}`
+                      : "Carregando..."}
                   </p>
                 </div>
               </div>

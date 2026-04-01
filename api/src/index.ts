@@ -107,8 +107,8 @@ const whatsapp = new WhatsAppService(
 );
 const instagram = new InstagramService(
   config.metaGraphVersion,
-  config.metaAppId,
-  config.metaAppSecret,
+  config.instagramAppId,
+  config.instagramAppSecret,
   config.metaRedirectUri,
 );
 
@@ -178,9 +178,17 @@ const healthPaths = new Set<string>([
   "/health",
   "/",
 ]);
-const webhookPaths = new Set<string>([
+const legacyWebhookPaths = new Set<string>([
   `${config.apiBasePath}/webhook`,
   "/webhook",
+]);
+const whatsappWebhookPaths = new Set<string>([
+  `${config.apiBasePath}/webhook/whatsapp`,
+  "/webhook/whatsapp",
+]);
+const instagramWebhookPaths = new Set<string>([
+  `${config.apiBasePath}/webhook/instagram`,
+  "/webhook/instagram",
 ]);
 const authLoginPaths = new Set<string>([
   `${config.apiBasePath}/auth/login`,
@@ -521,6 +529,41 @@ const isWhatsAppWebhookPayload = (
   payload !== null &&
   (payload as { object?: unknown }).object === "whatsapp_business_account";
 
+type WebhookChannel = "whatsapp" | "instagram";
+type WebhookRouteChannel = WebhookChannel | "generic";
+
+const resolveWebhookRouteChannel = (pathname: string): WebhookRouteChannel | null => {
+  if (whatsappWebhookPaths.has(pathname)) return "whatsapp";
+  if (instagramWebhookPaths.has(pathname)) return "instagram";
+  if (legacyWebhookPaths.has(pathname)) return "generic";
+  return null;
+};
+
+const resolveWebhookPayloadChannel = (payload: unknown): WebhookChannel | null => {
+  if (isWhatsAppWebhookPayload(payload)) return "whatsapp";
+  if (isInstagramWebhookPayload(payload)) return "instagram";
+  return null;
+};
+
+const resolveWebhookAppSecret = (channel: WebhookChannel): string | undefined =>
+  channel === "whatsapp" ? config.whatsappAppSecret : config.instagramAppSecret;
+
+const resolveWebhookVerifyTokens = (channel: WebhookRouteChannel): string[] => {
+  const tokens =
+    channel === "whatsapp"
+      ? [config.whatsappWebhookVerifyToken]
+      : channel === "instagram"
+        ? [config.instagramWebhookVerifyToken]
+        : [
+            config.whatsappWebhookVerifyToken,
+            config.instagramWebhookVerifyToken,
+            config.metaWebhookVerifyToken,
+            config.webhookVerifyToken,
+          ];
+
+  return tokens.filter((token): token is string => Boolean(token?.trim()));
+};
+
 const resolveAppOrigin = (req?: Request): string => {
   const configuredOrigin = config.allowedOrigins.find(
     (origin) => origin !== "*" && /^https?:\/\//i.test(origin),
@@ -725,24 +768,25 @@ const renderInstagramOauthCallbackBridge = (req: Request): Response => {
 };
 
 const verifyMetaWebhookSignature = async (
-  req: Request,
+  signatureHeader: string | null | undefined,
   rawBody: string,
+  appSecret?: string,
 ): Promise<boolean> => {
-  const appSecret = config.metaAppSecret?.trim();
-  const signatureHeader = req.headers.get("x-hub-signature-256")?.trim();
+  const normalizedAppSecret = appSecret?.trim();
+  const normalizedSignature = signatureHeader?.trim();
 
-  if (!appSecret || !signatureHeader) {
+  if (!normalizedAppSecret || !normalizedSignature) {
     return true;
   }
 
-  if (!signatureHeader.startsWith("sha256=")) {
+  if (!normalizedSignature.startsWith("sha256=")) {
     return false;
   }
 
-  const expected = signatureHeader.slice("sha256=".length);
+  const expected = normalizedSignature.slice("sha256=".length);
   const key = await crypto.subtle.importKey(
     "raw",
-    new TextEncoder().encode(appSecret),
+    new TextEncoder().encode(normalizedAppSecret),
     { name: "HMAC", hash: "SHA-256" },
     false,
     ["sign"],
@@ -2518,14 +2562,19 @@ const buildContactUpdateFromExtraction = (
   return data;
 };
 
-const webhookVerify = (req: Request): Response => {
+const webhookVerify = (req: Request, routeChannel: WebhookRouteChannel): Response => {
   const url = new URL(req.url);
   const mode = url.searchParams.get("hub.mode");
   const token = url.searchParams.get("hub.verify_token");
   const challenge = url.searchParams.get("hub.challenge");
-  const expectedToken = config.metaWebhookVerifyToken ?? config.webhookVerifyToken;
+  const expectedTokens = resolveWebhookVerifyTokens(routeChannel);
 
-  if (mode !== "subscribe" || token !== expectedToken || !challenge) {
+  if (
+    mode !== "subscribe" ||
+    !challenge ||
+    !token ||
+    !expectedTokens.includes(token)
+  ) {
     return new Response("Forbidden", { status: 403 });
   }
 
@@ -2809,12 +2858,17 @@ const buildInstagramConnectionsPayload = async (
     graphVersion: config.metaGraphVersion,
     requiredScopes: config.instagramScopes,
     callbackUrl: config.metaRedirectUri ?? null,
-    webhookPath: `${config.apiBasePath}/webhook`,
+    webhookPath: `${config.apiBasePath}/webhook/instagram`,
+    webhookPaths: {
+      instagram: `${config.apiBasePath}/webhook/instagram`,
+      whatsapp: `${config.apiBasePath}/webhook/whatsapp`,
+      legacy: `${config.apiBasePath}/webhook`,
+    },
     prerequisites: {
-      appIdConfigured: Boolean(config.metaAppId),
-      appSecretConfigured: Boolean(config.metaAppSecret),
+      appIdConfigured: Boolean(config.instagramAppId),
+      appSecretConfigured: Boolean(config.instagramAppSecret),
       redirectUriConfigured: Boolean(config.metaRedirectUri),
-      webhookVerifyTokenConfigured: Boolean(config.metaWebhookVerifyToken),
+      webhookVerifyTokenConfigured: Boolean(config.instagramWebhookVerifyToken),
     },
     connections: connections.map((connection) => {
       const { _count, ...rest } = connection;
@@ -2950,7 +3004,7 @@ const handleInstagramOauthStart = async (req: Request): Promise<Response> => {
     return json(
       {
         error:
-          "Integracao da Meta incompleta. Configure META_APP_ID, META_APP_SECRET e META_REDIRECT_URI.",
+          "Integracao da Meta incompleta. Configure INSTAGRAM_APP_ID, INSTAGRAM_APP_SECRET e META_REDIRECT_URI.",
       },
       400,
       req,
@@ -4290,12 +4344,11 @@ const instagramWebhookEvent = async (
   return new Response("EVENT_RECEIVED", { status: 200 });
 };
 
-const webhookEvent = async (req: Request): Promise<Response> => {
+const webhookEvent = async (
+  req: Request,
+  routeChannel: WebhookRouteChannel,
+): Promise<Response> => {
   const rawBody = await req.text();
-  const isSignatureValid = await verifyMetaWebhookSignature(req, rawBody);
-  if (!isSignatureValid) {
-    return json({ error: "Invalid webhook signature" }, 403, req);
-  }
 
   let payload: unknown;
   try {
@@ -4304,12 +4357,30 @@ const webhookEvent = async (req: Request): Promise<Response> => {
     return json({ error: "Invalid JSON payload" }, 400, req);
   }
 
-  if (isWhatsAppWebhookPayload(payload)) {
-    return whatsappWebhookEvent(payload);
+  const payloadChannel = resolveWebhookPayloadChannel(payload);
+  if (!payloadChannel) {
+    return json({ error: "Unsupported webhook payload" }, 400, req);
   }
 
-  if (isInstagramWebhookPayload(payload)) {
-    return instagramWebhookEvent(payload);
+  if (routeChannel !== "generic" && payloadChannel !== routeChannel) {
+    return json({ error: "Webhook payload routed to the wrong channel endpoint" }, 400, req);
+  }
+
+  const isSignatureValid = await verifyMetaWebhookSignature(
+    req.headers.get("x-hub-signature-256"),
+    rawBody,
+    resolveWebhookAppSecret(payloadChannel),
+  );
+  if (!isSignatureValid) {
+    return json({ error: "Invalid webhook signature" }, 403, req);
+  }
+
+  if (payloadChannel === "whatsapp") {
+    return whatsappWebhookEvent(payload as WhatsAppWebhookPayload);
+  }
+
+  if (payloadChannel === "instagram") {
+    return instagramWebhookEvent(payload as InstagramWebhookPayload);
   }
 
   return json({ error: "Unsupported webhook payload" }, 400, req);
@@ -7817,12 +7888,13 @@ const server = Bun.serve<WsUserData>({
       }
     }
 
-    if (!webhookPaths.has(url.pathname)) {
+    const webhookRouteChannel = resolveWebhookRouteChannel(url.pathname);
+    if (!webhookRouteChannel) {
       return textResponse("Not found", 404, req);
     }
 
-    if (req.method === "GET") return webhookVerify(req);
-    if (req.method === "POST") return webhookEvent(req);
+    if (req.method === "GET") return webhookVerify(req, webhookRouteChannel);
+    if (req.method === "POST") return webhookEvent(req, webhookRouteChannel);
 
     return textResponse("Method Not Allowed", 405, req);
   },
@@ -7863,5 +7935,5 @@ process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
 
 console.log(
-  `Server running on http://localhost:${server.port}${config.apiBasePath} (webhook: ${config.apiBasePath}/webhook)`,
+  `Server running on http://localhost:${server.port}${config.apiBasePath} (webhooks: ${config.apiBasePath}/webhook/whatsapp, ${config.apiBasePath}/webhook/instagram)`,
 );
