@@ -384,7 +384,7 @@ const isGreetingOnlyMessage = (text: string): boolean => {
 };
 
 const buildGreetingReply = (): string =>
-  "Fala! Antes de tudo, como posso te chamar? Se quiser, ja me envie campeonato, data, categoria e cidade.";
+  "Opa! Como posso ajudar?";
 
 const shouldTriggerHumanHandoff = (
   userText: string,
@@ -2229,6 +2229,10 @@ const replyPendingContactAfterBotResume = async (
     }
     if (resumeBacklog.mergedCount === 1 && isGreetingOnlyMessage(resumeBacklog.latestMessage)) {
       const greetingReply = buildGreetingReply();
+      if (shouldSuppressRecentAutoReply(waId, greetingReply)) {
+        broadcast("ai:done", { phone: waId });
+        return;
+      }
       if (await hasOutboundAfter(prisma, contact.id, resumeBacklog.latestCreatedAt)) {
         broadcast("ai:done", { phone: waId });
         return;
@@ -2236,6 +2240,7 @@ const replyPendingContactAfterBotResume = async (
       await sendTypingIndicatorToTarget(contact, resumeBacklog.latestMessageId, "text");
       await sleep(computeReplyDelayMs(greetingReply));
       await sendTextToTarget(contact, greetingReply);
+      rememberRecentAutoReply(waId, greetingReply);
       await persistTurn(waId, "assistant", greetingReply, {
         source: "AI",
         channel: inferContactChannel(contact.channel, waId),
@@ -2541,6 +2546,31 @@ const shouldProcessMessage = (messageId: string): boolean => {
 
   processedMessageIds.set(messageId, now);
   return true;
+};
+
+const RECENT_AUTOREPLY_TTL_MS = 30_000;
+const recentAutoReplies = new Map<string, { body: string; sentAt: number }>();
+
+const shouldSuppressRecentAutoReply = (contactKey: string, body: string): boolean => {
+  const now = Date.now();
+
+  for (const [key, entry] of recentAutoReplies) {
+    if (now - entry.sentAt > RECENT_AUTOREPLY_TTL_MS) {
+      recentAutoReplies.delete(key);
+    }
+  }
+
+  const recent = recentAutoReplies.get(contactKey);
+  if (!recent) return false;
+
+  return recent.body === body && now - recent.sentAt <= RECENT_AUTOREPLY_TTL_MS;
+};
+
+const rememberRecentAutoReply = (contactKey: string, body: string): void => {
+  recentAutoReplies.set(contactKey, {
+    body,
+    sentAt: Date.now(),
+  });
 };
 
 const buildContactUpdateFromExtraction = (
@@ -3694,9 +3724,14 @@ const whatsappWebhookEvent = async (
               continue;
             }
           }
+          if (shouldSuppressRecentAutoReply(message.from, greetingReply)) {
+            broadcast("ai:done", { phone: message.from });
+            continue;
+          }
 
           await sleep(computeReplyDelayMs(greetingReply));
           await whatsapp.sendTextMessage(message.from, greetingReply);
+          rememberRecentAutoReply(message.from, greetingReply);
           await persistTurn(message.from, "assistant", greetingReply, { source: "AI" });
           broadcast("message:new", {
             phone: message.from,
@@ -4108,9 +4143,14 @@ const instagramWebhookEvent = async (
               continue;
             }
           }
+          if (shouldSuppressRecentAutoReply(contactKey, greetingReply)) {
+            broadcast("ai:done", { phone: contactKey });
+            continue;
+          }
 
           await sleep(computeReplyDelayMs(greetingReply));
           await sendTextToTarget(deliveryTarget, greetingReply);
+          rememberRecentAutoReply(contactKey, greetingReply);
           await persistTurn(contactKey, "assistant", greetingReply, {
             source: "AI",
             channel: "INSTAGRAM",
