@@ -183,13 +183,43 @@ const FAQ_STOP_WORDS = new Set([
   "qual",
   "quais",
   "que",
+  "queria",
+  "quero",
   "se",
   "sem",
+  "saber",
+  "sobre",
+  "esse",
+  "essa",
+  "esses",
+  "essas",
+  "desse",
+  "dessa",
+  "disso",
+  "isso",
+  "isto",
+  "fala",
+  "falar",
+  "conta",
+  "contar",
+  "manda",
+  "mostrar",
+  "mostra",
+  "ver",
+  "detalhes",
+  "detalhe",
+  "informacao",
+  "informacoes",
+  "info",
+  "infos",
   "uma",
   "umas",
   "um",
   "uns",
 ]);
+
+const GENERIC_OVERVIEW_REQUEST_REGEX =
+  /\b(queria saber|quero saber|me fala|me conta|sobre esse|sobre essa|mais sobre|quais as infos|quais as informacoes|me passa os detalhes)\b/i;
 
 const normalizeFaqText = (value: string): string =>
   value
@@ -252,6 +282,7 @@ const extractRelevantFaqSnippet = (
   faq: FaqCandidate,
   directQueryTokens: Set<string>,
   expandedQueryTokens: Set<string>,
+  directQueryText: string,
 ): string => {
   const baseSources = [faq.content ?? "", faq.answer ?? ""]
     .map((value) => value.trim())
@@ -276,7 +307,7 @@ const extractRelevantFaqSnippet = (
     !asksForDate &&
     !asksForTime &&
     !asksForLocation &&
-    directQueryTokens.size <= 2;
+    (directQueryTokens.size <= 2 || GENERIC_OVERVIEW_REQUEST_REGEX.test(directQueryText));
 
   const rankedParagraphs = paragraphs
     .map((paragraph, index) => {
@@ -337,6 +368,12 @@ const extractRelevantFaqSnippet = (
 
   if (prefersOverview) {
     addParagraph(selectedParagraphs, introParagraph);
+    addParagraph(
+      selectedParagraphs,
+      rankedParagraphs.find(
+        (item) => item.hasDate || item.hasTime || item.hasLocation,
+      )?.paragraph,
+    );
   }
 
   if (asksForPrice) {
@@ -361,14 +398,13 @@ const extractRelevantFaqSnippet = (
   if (prefersOverview) {
     addParagraph(
       selectedParagraphs,
-      rankedParagraphs.find(
-        (item) => item.hasPrice || item.hasDate || item.hasTime || item.hasLocation,
-      )?.paragraph,
+      rankedParagraphs.find((item) => item.hasPrice)?.paragraph,
     );
   }
 
+  const maxParagraphs = prefersOverview ? 3 : 2;
   for (const item of rankedParagraphs) {
-    if (selectedParagraphs.length >= 2) break;
+    if (selectedParagraphs.length >= maxParagraphs) break;
     addParagraph(selectedParagraphs, item.paragraph);
   }
 
@@ -396,7 +432,10 @@ const buildRelevantFaqContext = (
     .join(" ")
     .trim();
   const normalizedQuery = normalizeFaqText(query);
-  const directQueryTokens = new Set(tokenizeFaqText([userMessage, recentHistory].filter(Boolean).join(" ").trim()));
+  const directQueryText = normalizeFaqText(userMessage);
+  const directQueryTokens = new Set(
+    tokenizeFaqText([userMessage, recentHistory].filter(Boolean).join(" ").trim()),
+  );
   const queryTokens = expandQueryTokens(new Set(tokenizeFaqText(query)));
 
   const rankedFaqs = faqs
@@ -458,7 +497,12 @@ const buildRelevantFaqContext = (
         ...faq,
         question: normalizedQuestion,
         score,
-        snippet: extractRelevantFaqSnippet(faq, directQueryTokens, queryTokens),
+        snippet: extractRelevantFaqSnippet(
+          faq,
+          directQueryTokens,
+          queryTokens,
+          directQueryText,
+        ),
       };
     })
     .filter((faq) => faq.score > 0)
@@ -639,6 +683,7 @@ export class OpenAIService {
         "- Use no maximo 1 pergunta curta no final, e apenas se isso ajudar a avancar o atendimento.",
         "- Faca perguntas objetivas quando faltar contexto.",
         "- Evite texto longo, enrolacao e respostas sem proximo passo.",
+        "- Triagem e secundaria a resposta principal: nunca peca um dado que ja esteja claro nas FAQs, na imagem ou na conversa atual.",
         "- Nao invente informacoes, valores, datas, regras, links ou edicoes.",
         "- Priorize triagem de lead para campeonato: nome, campeonato, data, categoria, cidade e time ou quantidade de jogadores.",
         "- Se o nome ainda nao estiver preenchido, cumprimente e peca primeiro como deve chamar o usuario antes de pedir os demais dados.",
@@ -681,7 +726,9 @@ export class OpenAIService {
         [
           "\n--- Campos de triagem ainda faltando ---",
           extras.triageMissing.map((item) => `- ${item}`).join("\n"),
-          "Pergunte apenas o necessario para fechar os campos faltantes, sem repetir o que ja foi informado.",
+          "Esses campos faltantes servem para qualificar o lead, mas nunca bloqueiam a resposta principal.",
+          "Se a FAQ recuperada, a imagem ou a conversa atual ja trouxer um desses dados, use essa informacao e nao peca para o usuario repetir.",
+          "Pergunte apenas o necessario para fechar os campos realmente faltantes, sem repetir o que ja foi informado.",
         ].join("\n"),
       );
     }
