@@ -114,6 +114,9 @@ const normalizeReplyIntent = (text: string): string =>
 const NAME_REQUEST_REGEX =
   /\b(como posso te chamar|como devo te chamar|qual (?:e|é) seu nome|como voce se chama|como vc se chama|me fala seu nome|me diz seu nome)\b/i;
 
+const NATURAL_CITY_REQUEST_REGEX =
+  /\b(de qual cidade voce e|de qual cidade voce eh|de qual cidade vc e|de qual cidade vc eh)\b/i;
+
 const ensureNameQuestion = (
   reply: string,
   triageMissing?: string[],
@@ -127,6 +130,43 @@ const ensureNameQuestion = (
   const separator = /[.!?]$/.test(trimmed) ? " " : ". ";
   return `${trimmed}${separator}Como posso te chamar?`;
 };
+
+const ensureNaturalCityQuestion = (
+  reply: string,
+  triageMissing?: string[],
+): string => {
+  if (!triageMissing?.includes("cidade")) return reply;
+
+  const trimmed = reply.trim();
+  if (!trimmed) return "De qual cidade voce e?";
+
+  const normalized = normalizeReplyIntent(trimmed);
+  if (!normalized.includes("cidade")) return trimmed;
+  if (NATURAL_CITY_REQUEST_REGEX.test(normalized)) return trimmed;
+
+  const replacements: Array<[RegExp, string]> = [
+    [/\bqual sua cidade\b/i, "de qual cidade voce e"],
+    [/\bqual a sua cidade\b/i, "de qual cidade voce e"],
+    [/\bqual cidade voce e\b/i, "de qual cidade voce e"],
+    [/\bqual cidade vc e\b/i, "de qual cidade voce e"],
+    [/\bme fala a cidade\b/i, "me fala de qual cidade voce e"],
+    [/\bme passa a cidade\b/i, "me passa de qual cidade voce e"],
+    [/\bcidade\?\s*$/i, "de qual cidade voce e?"],
+  ];
+
+  let updated = trimmed;
+  for (const [pattern, replacement] of replacements) {
+    if (!pattern.test(updated)) continue;
+    updated = updated.replace(pattern, replacement);
+  }
+
+  return updated;
+};
+
+const ensureNaturalTriageQuestions = (
+  reply: string,
+  triageMissing?: string[],
+): string => ensureNaturalCityQuestion(ensureNameQuestion(reply, triageMissing), triageMissing);
 
 const normalizeImageSummary = (value: string): string => {
   const normalized = value
@@ -687,6 +727,7 @@ export class OpenAIService {
         "- Nao invente informacoes, valores, datas, regras, links ou edicoes.",
         "- Priorize triagem de lead para campeonato: nome, campeonato, data, categoria, cidade e time ou quantidade de jogadores.",
         "- Se o nome ainda nao estiver preenchido, cumprimente e peca primeiro como deve chamar o usuario antes de pedir os demais dados.",
+        "- Quando precisar pedir a cidade do lead, pergunte de forma natural: 'De qual cidade voce e?'.",
         "- E-mail e opcional: so solicite se fizer sentido, sem travar o atendimento.",
         "- Se o usuario pedir humano, confirme o encaminhamento e nao insista na automacao.",
       ].join("\n"),
@@ -729,6 +770,7 @@ export class OpenAIService {
           "Esses campos faltantes servem para qualificar o lead, mas nunca bloqueiam a resposta principal.",
           "Se a FAQ recuperada, a imagem ou a conversa atual ja trouxer um desses dados, use essa informacao e nao peca para o usuario repetir.",
           "Pergunte apenas o necessario para fechar os campos realmente faltantes, sem repetir o que ja foi informado.",
+          "Se precisar pedir cidade, prefira exatamente a formulacao: De qual cidade voce e?",
         ].join("\n"),
       );
     }
@@ -1025,7 +1067,9 @@ export class OpenAIService {
       return "Nao consegui gerar uma resposta agora. Tente novamente em instantes.";
     }
 
-    return trimForWhatsApp(ensureNameQuestion(text, options?.triageMissing));
+    return trimForWhatsApp(
+      ensureNaturalTriageQuestions(text, options?.triageMissing),
+    );
   }
 
   async extractLeadData(
