@@ -30,10 +30,18 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
+import {
+  LeadOriginBadge,
+  getLeadOriginHint,
+  getLeadOriginMeta,
+  resolveLeadOriginChannel,
+  type LeadOriginChannel,
+} from "@/components/dashboard/LeadOriginBadge";
 import TagBadge from "@/components/dashboard/TagBadge";
 import { SkeletonContactCard } from "@/components/ui/skeleton";
 
 type LeadStatus = "open" | "won" | "lost";
+type ChannelFilter = "all" | LeadOriginChannel;
 
 type DetailsFormState = {
   name: string;
@@ -65,6 +73,12 @@ const leadStatusMeta: Record<LeadStatus, { label: string; badgeClass: string }> 
     label: "Perdido",
     badgeClass: "border-rose-500/50 bg-rose-500/10 text-rose-200",
   },
+};
+
+const channelFilterLabel: Record<ChannelFilter, string> = {
+  all: "todos",
+  WHATSAPP: "WhatsApp",
+  INSTAGRAM: "Instagram",
 };
 
 const normalizeLeadStatus = (value: string | null | undefined): LeadStatus => {
@@ -124,9 +138,10 @@ export default function ContactsPage() {
     statusFilter: "all" as "all" | LeadStatus,
     botFilter: "all" as "all" | "on" | "off",
     handoffFilter: "all" as "all" | "yes" | "no",
+    channelFilter: "all" as ChannelFilter,
   };
   const [filters, setFilter] = useSavedFilters("contacts", contactFilterDefaults);
-  const { search, statusFilter, botFilter, handoffFilter } = filters;
+  const { search, statusFilter, botFilter, handoffFilter, channelFilter } = filters;
 
   const [detailsContact, setDetailsContact] = useState<PipelineContact | null>(null);
   const [detailsForm, setDetailsForm] = useState<DetailsFormState | null>(null);
@@ -241,7 +256,9 @@ export default function ContactsPage() {
 
     return contacts.filter((contact) => {
       const leadStatus = normalizeLeadStatus(contact.leadStatus);
+      const resolvedChannel = resolveLeadOriginChannel(contact.channel, contact.waId);
       if (statusFilter !== "all" && leadStatus !== statusFilter) return false;
+      if (channelFilter !== "all" && resolvedChannel !== channelFilter) return false;
 
       if (botFilter === "on" && !contact.botEnabled) return false;
       if (botFilter === "off" && contact.botEnabled) return false;
@@ -260,6 +277,9 @@ export default function ContactsPage() {
         contact.tournament,
         contact.category,
         contact.teamName,
+        contact.source,
+        contact.platformHandle,
+        resolvedChannel === "INSTAGRAM" ? "instagram" : "whatsapp",
         stageName,
       ]
         .filter((value): value is string => Boolean(value))
@@ -268,11 +288,25 @@ export default function ContactsPage() {
 
       return haystack.includes(term);
     });
-  }, [contacts, search, statusFilter, botFilter, handoffFilter]);
+  }, [contacts, search, statusFilter, botFilter, handoffFilter, channelFilter]);
+
+  const contactOriginCounts = useMemo(
+    () =>
+      contacts.reduce(
+        (summary, contact) => {
+          summary.total += 1;
+          const resolvedChannel = resolveLeadOriginChannel(contact.channel, contact.waId);
+          summary[resolvedChannel] += 1;
+          return summary;
+        },
+        { total: 0, WHATSAPP: 0, INSTAGRAM: 0 },
+      ),
+    [contacts],
+  );
 
   useEffect(() => {
     setVisibleContactsCount(CONTACTS_PAGE_SIZE);
-  }, [search, statusFilter, botFilter, handoffFilter]);
+  }, [search, statusFilter, botFilter, handoffFilter, channelFilter]);
 
   const displayedContacts = useMemo(
     () => filteredContacts.slice(0, visibleContactsCount),
@@ -453,7 +487,7 @@ export default function ContactsPage() {
         <CardHeader className="pb-3">
           <CardTitle className="text-base">Filtros</CardTitle>
         </CardHeader>
-        <CardContent className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+        <CardContent className="grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
           <Input
             value={search}
             onChange={(event) => setFilter("search", event.target.value)}
@@ -489,6 +523,76 @@ export default function ContactsPage() {
             <option value="yes">Handoff: sim</option>
             <option value="no">Handoff: nao</option>
           </select>
+          <select
+            value={channelFilter}
+            onChange={(event) => setFilter("channelFilter", event.target.value as ChannelFilter)}
+            className="h-10 w-full rounded-lg border border-input bg-background px-3 text-sm"
+          >
+            <option value="all">Origem: todas</option>
+            <option value="WHATSAPP">Origem: WhatsApp</option>
+            <option value="INSTAGRAM">Origem: Instagram</option>
+          </select>
+        </CardContent>
+      </Card>
+
+      <Card className="overflow-hidden border-border/70">
+        <CardContent className="grid gap-3 p-3 md:grid-cols-3">
+          <button
+            type="button"
+            onClick={() => setFilter("channelFilter", "all")}
+            className={cn(
+              "rounded-2xl border border-white/10 bg-[linear-gradient(135deg,rgba(255,255,255,0.08),rgba(255,255,255,0.02))] p-4 text-left transition hover:-translate-y-0.5 hover:border-white/20",
+              channelFilter === "all" && "ring-1 ring-white/20",
+            )}
+          >
+            <p className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Todos os leads</p>
+            <p className="mt-3 text-3xl font-semibold tracking-tight">{contactOriginCounts.total}</p>
+            <p className="mt-2 text-xs text-muted-foreground">
+              {channelFilter === "all" ? "Exibindo todos os canais" : "Clique para limpar o filtro"}
+            </p>
+          </button>
+          {(["WHATSAPP", "INSTAGRAM"] as const).map((originChannel) => {
+            const originMeta = getLeadOriginMeta(originChannel);
+            const OriginIcon = originMeta.Icon;
+            const isActive = channelFilter === originChannel;
+            return (
+              <button
+                key={originChannel}
+                type="button"
+                onClick={() =>
+                  setFilter("channelFilter", isActive ? "all" : originChannel)
+                }
+                className={cn(
+                  "rounded-2xl border p-4 text-left transition hover:-translate-y-0.5",
+                  originMeta.panelClass,
+                  isActive && "ring-1 ring-white/20",
+                )}
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
+                      Origem
+                    </p>
+                    <p className="mt-2 text-lg font-semibold">{originMeta.label}</p>
+                  </div>
+                  <div
+                    className={cn(
+                      "flex h-11 w-11 items-center justify-center rounded-2xl backdrop-blur",
+                      originMeta.iconWrapClass,
+                    )}
+                  >
+                    <OriginIcon className="h-5 w-5" />
+                  </div>
+                </div>
+                <p className="mt-4 text-3xl font-semibold tracking-tight">
+                  {contactOriginCounts[originChannel]}
+                </p>
+                <p className="mt-2 text-xs text-muted-foreground">
+                  {isActive ? "Filtro ativo neste canal" : "Clique para separar os leads deste canal"}
+                </p>
+              </button>
+            );
+          })}
         </CardContent>
       </Card>
 
@@ -648,6 +752,7 @@ export default function ContactsPage() {
                 const contact = displayedContacts[virtualRow.index];
                 if (!contact) return null;
                 const status = normalizeLeadStatus(contact.leadStatus);
+                const originMeta = getLeadOriginMeta(contact.channel, contact.waId);
                 const isDeleting = deletingWaId === contact.waId;
                 const isSelected = selectedWaIds.has(contact.waId);
                 return (
@@ -658,12 +763,19 @@ export default function ContactsPage() {
                   >
                     <Card
                       className={cn(
-                        "animate-fade-up border-border/70",
+                        "animate-fade-up relative overflow-hidden border-border/70 transition hover:-translate-y-0.5",
+                        originMeta.panelClass,
                         isDeleting && "pointer-events-none opacity-70",
                         isSelected && "ring-1 ring-primary/50",
                       )}
                     >
-                      <CardContent className="space-y-3 p-3">
+                      <div
+                        className={cn(
+                          "absolute inset-y-0 left-0 w-1.5 bg-gradient-to-b",
+                          originMeta.railClass,
+                        )}
+                      />
+                      <CardContent className="space-y-3 p-3 pl-4">
                         <div className="flex flex-wrap items-start justify-between gap-2">
                           <div className="flex min-w-0 items-start gap-2">
                             <Checkbox
@@ -680,6 +792,15 @@ export default function ContactsPage() {
                             />
                             <div className="min-w-0">
                               <p className="truncate text-sm font-semibold">{contact.name || "Sem nome"}</p>
+                              <LeadOriginBadge
+                                channel={contact.channel}
+                                waId={contact.waId}
+                                source={contact.source}
+                                platformHandle={contact.platformHandle}
+                                showHint
+                                compact
+                                className="mt-1"
+                              />
                               <p className="truncate text-xs text-muted-foreground">{contact.waId}</p>
                               <p className="text-xs text-muted-foreground">
                                 Ultima interacao: {formatDate(contact.lastInteractionAt)}
@@ -808,6 +929,39 @@ export default function ContactsPage() {
                 <div className="rounded-lg border border-border/70 bg-background/40 p-3">
                   <p className="text-[11px] uppercase tracking-[0.12em] text-muted-foreground">Criado em</p>
                   <p className="mt-1 text-sm font-medium">{formatDate(detailsContact.createdAt)}</p>
+                </div>
+              </div>
+
+              <div
+                className={cn(
+                  "rounded-2xl border p-4",
+                  getLeadOriginMeta(detailsContact.channel, detailsContact.waId).panelClass,
+                )}
+              >
+                <p className="text-[11px] uppercase tracking-[0.16em] text-muted-foreground">
+                  Origem do lead
+                </p>
+                <div className="mt-3 flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <LeadOriginBadge
+                      channel={detailsContact.channel}
+                      waId={detailsContact.waId}
+                      source={detailsContact.source}
+                      platformHandle={detailsContact.platformHandle}
+                      showHint
+                    />
+                    <p className="mt-2 text-xs text-muted-foreground">
+                      Identificado como {channelFilterLabel[resolveLeadOriginChannel(detailsContact.channel, detailsContact.waId)]}
+                    </p>
+                  </div>
+                  <div className="max-w-sm text-right text-xs text-muted-foreground">
+                    {getLeadOriginHint({
+                      channel: detailsContact.channel,
+                      waId: detailsContact.waId,
+                      source: detailsContact.source,
+                      platformHandle: detailsContact.platformHandle,
+                    })}
+                  </div>
                 </div>
               </div>
 

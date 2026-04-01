@@ -40,9 +40,17 @@ import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Switch } from "@/components/ui/switch";
+import {
+  LeadOriginBadge,
+  getLeadOriginHint,
+  getLeadOriginMeta,
+  resolveLeadOriginChannel,
+  type LeadOriginChannel,
+} from "@/components/dashboard/LeadOriginBadge";
 import TagBadge from "@/components/dashboard/TagBadge";
 
 type LeadStatus = "open" | "won" | "lost";
+type ChannelFilter = "all" | LeadOriginChannel;
 type ColumnKey = "unassigned" | `stage:${number}`;
 type ColumnPaginationState = {
   page: number;
@@ -91,6 +99,12 @@ const triageFilterLabel: Record<"all" | "done" | "pending", string> = {
   all: "todos",
   done: "concluida",
   pending: "pendente",
+};
+
+const channelFilterLabel: Record<ChannelFilter, string> = {
+  all: "todos",
+  WHATSAPP: "WhatsApp",
+  INSTAGRAM: "Instagram",
 };
 
 const colorPresets = [
@@ -382,9 +396,17 @@ export default function PipelineBoardView() {
     handoffFilter: "all" as "all" | "yes" | "no",
     botFilter: "all" as "all" | "on" | "off",
     triageFilter: "all" as "all" | "done" | "pending",
+    channelFilter: "all" as ChannelFilter,
   };
   const [pFilters, setPFilter] = useSavedFilters("pipeline", pipelineFilterDefaults);
-  const { searchTerm, statusFilter, handoffFilter, botFilter, triageFilter } = pFilters;
+  const {
+    searchTerm,
+    statusFilter,
+    handoffFilter,
+    botFilter,
+    triageFilter,
+    channelFilter,
+  } = pFilters;
 
   const [deletingStageId, setDeletingStageId] = useState<number | null>(null);
   const [deletingLeadWaId, setDeletingLeadWaId] = useState<string | null>(null);
@@ -1062,7 +1084,9 @@ export default function PipelineBoardView() {
   const applyContactFilters = (contacts: PipelineContact[]): PipelineContact[] => {
     return contacts.filter((contact) => {
       const normalizedStatus = normalizeLeadStatus(contact.leadStatus);
+      const resolvedChannel = resolveLeadOriginChannel(contact.channel, contact.waId);
       if (statusFilter !== "all" && normalizedStatus !== statusFilter) return false;
+      if (channelFilter !== "all" && resolvedChannel !== channelFilter) return false;
 
       if (handoffFilter === "yes" && !contact.handoffRequested) return false;
       if (handoffFilter === "no" && contact.handoffRequested) return false;
@@ -1084,6 +1108,9 @@ export default function PipelineBoardView() {
         contact.city,
         contact.category,
         contact.teamName,
+        contact.source,
+        contact.platformHandle,
+        resolvedChannel === "INSTAGRAM" ? "instagram" : "whatsapp",
         contact.messages[0]?.body,
       ]
         .filter((value): value is string => Boolean(value))
@@ -1094,8 +1121,23 @@ export default function PipelineBoardView() {
     });
   };
 
+  const boardOriginCounts = useMemo(() => {
+    const summary = { WHATSAPP: 0, INSTAGRAM: 0 };
+    if (!board) return summary;
+
+    for (const contact of [
+      ...board.unassigned.items,
+      ...board.stages.flatMap((stage) => stage.items),
+    ]) {
+      summary[resolveLeadOriginChannel(contact.channel, contact.waId)] += 1;
+    }
+
+    return summary;
+  }, [board]);
+
   const renderContactCard = (contact: PipelineContact, stageId: number | null) => {
     const status = normalizeLeadStatus(contact.leadStatus);
+    const originMeta = getLeadOriginMeta(contact.channel, contact.waId);
 
     return (
       <div
@@ -1114,12 +1156,19 @@ export default function PipelineBoardView() {
           });
         }}
         className={cn(
-          "overflow-hidden rounded-xl border border-border/80 bg-background/55 p-3 transition hover:border-primary/40",
+          "relative overflow-hidden rounded-xl border border-border/80 bg-background/55 p-3 transition hover:border-primary/40",
+          originMeta.panelClass,
           canManageLeads ? "cursor-grab active:cursor-grabbing" : "cursor-default",
           deletingLeadWaId === contact.waId && "anim-remove pointer-events-none opacity-70",
         )}
         title="Clique com o botao direito para abrir o menu de acoes"
       >
+        <div
+          className={cn(
+            "absolute inset-y-0 left-0 w-1.5 bg-gradient-to-b",
+            originMeta.railClass,
+          )}
+        />
         <div className="flex items-start gap-2">
           <GripVertical className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground/50" />
           <div className="min-w-0 flex-1">
@@ -1148,6 +1197,15 @@ export default function PipelineBoardView() {
                 </Badge>
               </div>
             </div>
+            <LeadOriginBadge
+              channel={contact.channel}
+              waId={contact.waId}
+              source={contact.source}
+              platformHandle={contact.platformHandle}
+              showHint
+              compact
+              className="mt-1"
+            />
             <p className="mt-0.5 break-all text-xs text-muted-foreground">
               {contact.waId}
             </p>
@@ -1690,8 +1748,70 @@ export default function PipelineBoardView() {
             <Badge variant="outline">Handoff: {handoffFilterLabel[handoffFilter]}</Badge>
             <Badge variant="outline">Bot: {botFilterLabel[botFilter]}</Badge>
             <Badge variant="outline">Triagem: {triageFilterLabel[triageFilter]}</Badge>
+            <Badge variant="outline">Origem: {channelFilterLabel[channelFilter]}</Badge>
           </div>
-          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
+          <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+            {(["WHATSAPP", "INSTAGRAM"] as const).map((originChannel) => {
+              const originMeta = getLeadOriginMeta(originChannel);
+              const OriginIcon = originMeta.Icon;
+              const isActive = channelFilter === originChannel;
+              return (
+                <button
+                  key={originChannel}
+                  type="button"
+                  onClick={() => setPFilter("channelFilter", isActive ? "all" : originChannel)}
+                  className={cn(
+                    "rounded-2xl border p-3 text-left transition hover:-translate-y-0.5",
+                    originMeta.panelClass,
+                    isActive && "ring-1 ring-white/20",
+                  )}
+                >
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-[11px] uppercase tracking-[0.16em] text-muted-foreground">
+                        Origem
+                      </p>
+                      <p className="mt-1 text-sm font-semibold">{originMeta.label}</p>
+                    </div>
+                    <div
+                      className={cn(
+                        "flex h-10 w-10 items-center justify-center rounded-2xl backdrop-blur",
+                        originMeta.iconWrapClass,
+                      )}
+                    >
+                      <OriginIcon className="h-4 w-4" />
+                    </div>
+                  </div>
+                  <p className="mt-3 text-2xl font-semibold tracking-tight">
+                    {boardOriginCounts[originChannel]}
+                  </p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {isActive ? "Filtro ativo" : "Clique para isolar este canal"}
+                  </p>
+                </button>
+              );
+            })}
+            <button
+              type="button"
+              onClick={() => setPFilter("channelFilter", "all")}
+              className={cn(
+                "rounded-2xl border border-white/10 bg-[linear-gradient(135deg,rgba(255,255,255,0.08),rgba(255,255,255,0.02))] p-3 text-left transition hover:-translate-y-0.5 hover:border-white/20",
+                channelFilter === "all" && "ring-1 ring-white/20",
+              )}
+            >
+              <p className="text-[11px] uppercase tracking-[0.16em] text-muted-foreground">
+                Separacao
+              </p>
+              <p className="mt-1 text-sm font-semibold">Todos os canais</p>
+              <p className="mt-3 text-2xl font-semibold tracking-tight">
+                {boardOriginCounts.WHATSAPP + boardOriginCounts.INSTAGRAM}
+              </p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                {channelFilter === "all" ? "Misturando os canais" : "Clique para voltar ao mix completo"}
+              </p>
+            </button>
+          </div>
+          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-6">
             <div className="space-y-1">
               <label className="text-xs text-muted-foreground">Busca</label>
               <Input
@@ -1749,6 +1869,18 @@ export default function PipelineBoardView() {
                 <option value="pending">Pendente</option>
               </select>
             </div>
+            <div className="space-y-1">
+              <label className="text-xs text-muted-foreground">Origem</label>
+              <select
+                value={channelFilter}
+                onChange={(event) => setPFilter("channelFilter", event.target.value as ChannelFilter)}
+                className="h-10 w-full rounded-lg border border-input bg-background px-3 text-sm"
+              >
+                <option value="all">Todos</option>
+                <option value="WHATSAPP">WhatsApp</option>
+                <option value="INSTAGRAM">Instagram</option>
+              </select>
+            </div>
           </div>
         </CardContent>
       </Card>
@@ -1774,6 +1906,15 @@ export default function PipelineBoardView() {
                 {contextMenu.contact.name || contextMenu.contact.waId}
               </CardTitle>
               <p className="text-xs text-muted-foreground">{contextMenu.contact.waId}</p>
+              <LeadOriginBadge
+                channel={contextMenu.contact.channel}
+                waId={contextMenu.contact.waId}
+                source={contextMenu.contact.source}
+                platformHandle={contextMenu.contact.platformHandle}
+                showHint
+                compact
+                className="pt-1"
+              />
             </CardHeader>
             <CardContent className="space-y-2 p-3 pt-0">
               <button
@@ -1925,6 +2066,14 @@ export default function PipelineBoardView() {
                 <div>
                   <CardTitle>{detailsContact.name || detailsContact.waId}</CardTitle>
                   <p className="text-xs text-muted-foreground">{detailsContact.waId}</p>
+                  <LeadOriginBadge
+                    channel={detailsContact.channel}
+                    waId={detailsContact.waId}
+                    source={detailsContact.source}
+                    platformHandle={detailsContact.platformHandle}
+                    showHint
+                    className="pt-2"
+                  />
                 </div>
                 <Button
                   variant="ghost"
@@ -1959,6 +2108,39 @@ export default function PipelineBoardView() {
                 <div className="rounded-lg border border-border/70 bg-background/40 p-3">
                   <p className="text-[11px] uppercase tracking-[0.12em] text-muted-foreground">Criado em</p>
                   <p className="mt-1 text-sm font-medium">{formatDate(detailsContact.createdAt)}</p>
+                </div>
+              </div>
+
+              <div
+                className={cn(
+                  "rounded-2xl border p-4",
+                  getLeadOriginMeta(detailsContact.channel, detailsContact.waId).panelClass,
+                )}
+              >
+                <p className="text-[11px] uppercase tracking-[0.16em] text-muted-foreground">
+                  Origem do lead
+                </p>
+                <div className="mt-3 flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <LeadOriginBadge
+                      channel={detailsContact.channel}
+                      waId={detailsContact.waId}
+                      source={detailsContact.source}
+                      platformHandle={detailsContact.platformHandle}
+                      showHint
+                    />
+                    <p className="mt-2 text-xs text-muted-foreground">
+                      Separado como {channelFilterLabel[resolveLeadOriginChannel(detailsContact.channel, detailsContact.waId)]}
+                    </p>
+                  </div>
+                  <div className="max-w-sm text-right text-xs text-muted-foreground">
+                    {getLeadOriginHint({
+                      channel: detailsContact.channel,
+                      waId: detailsContact.waId,
+                      source: detailsContact.source,
+                      platformHandle: detailsContact.platformHandle,
+                    })}
+                  </div>
                 </div>
               </div>
 
