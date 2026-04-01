@@ -1,8 +1,18 @@
+import { API_BASE } from "./api";
+
 const AUDIO_TAG_RE = /^\[AUDIO:(.+?)\|(.+?)\]$/;
 const IMAGE_TAG_RE = /^\[IMAGE:(.+?)\|(.*?)\]$/;
 
 const collapseWhitespace = (value: string): string =>
   value.replace(/\s+/g, " ").trim();
+
+const buildImageAssetUrl = (url: string): string => {
+  const trimmed = url.trim();
+  if (!trimmed) return trimmed;
+  if (trimmed.startsWith("/")) return trimmed;
+  if (trimmed.includes("/media/image?")) return trimmed;
+  return `${API_BASE}/media/image?url=${encodeURIComponent(trimmed)}`;
+};
 
 export const parseAudioMessageContent = (
   content: string,
@@ -20,7 +30,7 @@ export const parseImageMessageContent = (
 
   const caption = collapseWhitespace(match[2]);
   return {
-    url: match[1],
+    url: buildImageAssetUrl(match[1]),
     caption: caption || null,
   };
 };

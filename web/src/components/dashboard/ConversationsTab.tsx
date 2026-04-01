@@ -4,6 +4,10 @@ import { useSearchParams } from "react-router-dom";
 import { useAuth } from "@/contexts/AuthContext";
 import { useWebSocket } from "@/contexts/WebSocketContext";
 import { api, type DashboardConversation } from "@/lib/api";
+import {
+  getMessagePreviewText,
+  parseImageMessageContent,
+} from "@/lib/messageContent";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -221,6 +225,9 @@ export default function ConversationsTab() {
                   <div className="space-y-2">
                     {filteredConversations.map((conversation) => {
                       const originMeta = getLeadOriginMeta(undefined, conversation.phone);
+                      const previewImage = parseImageMessageContent(
+                        conversation.lastMessageBody,
+                      );
 
                       return (
                         <button
@@ -257,8 +264,18 @@ export default function ConversationsTab() {
                             compact
                             className="mt-1"
                           />
+                          {previewImage && (
+                            <div className="mt-2 overflow-hidden rounded-lg border border-border/70 bg-background/60">
+                              <img
+                                src={previewImage.url}
+                                alt={previewImage.caption ?? "Imagem recebida"}
+                                loading="lazy"
+                                className="h-24 w-full object-cover"
+                              />
+                            </div>
+                          )}
                           <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
-                            {conversation.lastMessagePreview}
+                            {getMessagePreviewText(conversation.lastMessageBody)}
                           </p>
                           <p className="mt-1 text-[11px] text-muted-foreground">
                             {formatDateTime(conversation.lastMessageAt)}

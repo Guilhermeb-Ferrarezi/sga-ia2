@@ -7899,6 +7899,60 @@ const extractPathSuffix = (pathname: string, prefixes: string[]): string | null 
   return null;
 };
 
+const imageProxyPaths = new Set([
+  `${config.apiBasePath}/media/image`,
+  "/media/image",
+]);
+
+const resolveR2KeyFromPublicUrl = (rawUrl: string): string | null => {
+  const normalizedUrl = rawUrl.trim();
+  if (!normalizedUrl) return null;
+
+  const normalizedPublicUrl = config.cloudflarePublicUrl?.replace(/\/+$/, "");
+  if (normalizedPublicUrl && normalizedUrl.startsWith(`${normalizedPublicUrl}/`)) {
+    return normalizedUrl.slice(normalizedPublicUrl.length + 1);
+  }
+
+  if (config.cloudflareAccountId && config.cloudflareBucketName) {
+    const r2BaseUrl =
+      `https://${config.cloudflareAccountId}.r2.cloudflarestorage.com/${config.cloudflareBucketName}`;
+    if (normalizedUrl.startsWith(`${r2BaseUrl}/`)) {
+      return normalizedUrl.slice(r2BaseUrl.length + 1);
+    }
+  }
+
+  return null;
+};
+
+const handleInboundImageProxy = async (req: Request): Promise<Response> => {
+  try {
+    const requestUrl = new URL(req.url);
+    const rawUrl = requestUrl.searchParams.get("url")?.trim();
+    const key = requestUrl.searchParams.get("key")?.trim() || (rawUrl ? resolveR2KeyFromPublicUrl(rawUrl) : null);
+
+    if (!key) {
+      return json({ error: "Parametro url ou key obrigatorio" }, 400, req);
+    }
+
+    const r2 = await getStreamFromR2(key);
+    const headers = new Headers({
+      "Content-Type": r2.contentType !== "application/octet-stream" ? r2.contentType : "image/jpeg",
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, OPTIONS",
+      "Cache-Control": "public, max-age=3600",
+    });
+
+    if (r2.contentLength != null) {
+      headers.set("Content-Length", String(r2.contentLength));
+    }
+
+    return new Response(r2.body, { status: 200, headers });
+  } catch (error) {
+    console.error("[image-stream] error:", error);
+    return json({ error: "Erro ao acessar a imagem" }, 500, req);
+  }
+};
+
 if (config.enableDb) {
   void (async () => {
     const prisma = await getPrismaClient();
@@ -7953,6 +8007,11 @@ const server = Bun.serve<WsUserData>({
         200,
         req,
       );
+    }
+
+    if (imageProxyPaths.has(url.pathname)) {
+      if (req.method === "GET") return handleInboundImageProxy(req);
+      return json({ error: "Method not allowed" }, 405, req);
     }
 
     if (openApiJsonPaths.has(url.pathname) && req.method === "GET") {

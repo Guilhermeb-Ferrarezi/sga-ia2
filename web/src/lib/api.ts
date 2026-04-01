@@ -180,6 +180,7 @@ export interface DashboardConversation {
   messagesCount: number;
   lastMessageAt: string;
   lastMessagePreview: string;
+  lastMessageBody: string;
 }
 
 export interface DashboardTurn {

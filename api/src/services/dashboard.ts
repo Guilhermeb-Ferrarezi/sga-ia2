@@ -14,6 +14,7 @@ export interface DashboardConversation {
   messagesCount: number;
   lastMessageAt: string;
   lastMessagePreview: string;
+  lastMessageBody: string;
 }
 
 export interface ConversationTurnView {
@@ -140,9 +141,11 @@ export class DashboardService {
     });
 
     const previewMap = new Map<number, string>();
+    const bodyMap = new Map<number, string>();
     for (const turn of latestTurns) {
       if (!previewMap.has(turn.contactId)) {
         previewMap.set(turn.contactId, toPreview(turn.body));
+        bodyMap.set(turn.contactId, turn.body);
       }
     }
 
@@ -157,6 +160,7 @@ export class DashboardService {
           messagesCount: item._count._all,
           lastMessageAt: (item._max.createdAt ?? new Date(0)).toISOString(),
           lastMessagePreview: previewMap.get(item.contactId) ?? "",
+          lastMessageBody: bodyMap.get(item.contactId) ?? "",
         },
       ];
     });
