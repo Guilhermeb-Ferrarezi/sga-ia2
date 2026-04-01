@@ -3894,6 +3894,8 @@ const whatsappWebhookEvent = async (
         const inboundContent = await resolveWhatsAppInboundContent(message);
         const storedBody = inboundContent.storedBody.trim() || "[mensagem nao processada]";
         const userText = inboundContent.userText.trim();
+        const shouldPersistInboundMessage =
+          Boolean(userText) || inboundContent.kind === "image" || inboundContent.kind === "attachment";
 
         if (skipProcessing) {
           await persistTurn(
@@ -3913,6 +3915,33 @@ const whatsappWebhookEvent = async (
             content: storedBody,
           });
           continue;
+        }
+
+        if (shouldPersistInboundMessage) {
+          await persistTurn(
+            message.from,
+            "user",
+            storedBody,
+            {
+              externalMessageId: message.messageId,
+              contactName: message.contactName,
+              source: "USER",
+            },
+          );
+
+          broadcast("message:new", {
+            phone: message.from,
+            role: "user",
+            source: "USER",
+            content: storedBody,
+          });
+
+          broadcast("notification", {
+            phone: message.from,
+            name: message.contactName ?? null,
+            messageId: message.messageId,
+            preview: inboundContent.previewText.slice(0, 120),
+          });
         }
 
         if (!userText) {
@@ -3937,31 +3966,8 @@ const whatsappWebhookEvent = async (
           continue;
         }
 
-        await persistTurn(
-          message.from,
-          "user",
-          storedBody,
-          {
-            externalMessageId: message.messageId,
-            contactName: message.contactName,
-            source: "USER",
-          },
-        );
-
         // Emit WS events: new user message + AI processing
-        broadcast("message:new", {
-          phone: message.from,
-          role: "user",
-          source: "USER",
-          content: userText,
-        });
         broadcast("ai:processing", { phone: message.from });
-        broadcast("notification", {
-          phone: message.from,
-          name: message.contactName ?? null,
-          messageId: message.messageId,
-          preview: inboundContent.previewText.slice(0, 120),
-        });
 
         if (isGreetingOnlyMessage(userText)) {
           const greetingReply = buildGreetingReply();
