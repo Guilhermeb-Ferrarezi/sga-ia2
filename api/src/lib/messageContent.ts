@@ -1,5 +1,6 @@
 const AUDIO_MESSAGE_BODY_REGEX = /\[AUDIO:[^\]|]+\|([^\]]*)\]/g;
 const IMAGE_MESSAGE_BODY_REGEX = /\[IMAGE:[^\]|]+\|([^\]]*)\]/g;
+const IMAGE_MESSAGE_URL_REGEX = /\[IMAGE:([^\]|]+)\|[^\]]*\]/g;
 
 const collapseWhitespace = (value: string): string =>
   value.replace(/\s+/g, " ").trim();
@@ -47,4 +48,10 @@ export const sanitizeMessageBodyForAi = (body: string): string => {
     replaceImageMarkers(replaceAudioMarkers(body, "Audio enviado")),
   );
   return normalized || "Midia recebida";
+};
+
+export const extractImageMessageUrls = (body: string): string[] => {
+  const matches = body.matchAll(IMAGE_MESSAGE_URL_REGEX);
+  const urls = Array.from(matches, (match) => match[1]?.trim() ?? "").filter(Boolean);
+  return Array.from(new Set(urls));
 };

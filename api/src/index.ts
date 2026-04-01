@@ -7,6 +7,7 @@ import {
 } from "./lib/cache";
 import {
   buildImageMessageBody,
+  extractImageMessageUrls,
   sanitizeMessageBodyForAi,
   sanitizeMessageBodyForPreview,
 } from "./lib/messageContent";
@@ -5899,10 +5900,56 @@ const handleContactDelete = async (
   const denied = requirePermission(current, req, PERMISSIONS.LEADS_DELETE);
   if (denied) return denied;
 
+  let imageKeys: string[] = [];
   try {
-    await current.prisma.contact.delete({ where: { waId } });
-  } catch {
-    return json({ error: "Contact not found" }, 404, req);
+    await current.prisma.$transaction(async (tx) => {
+      const contact = await tx.contact.findUnique({
+        where: { waId },
+        select: {
+          id: true,
+          messages: {
+            select: { body: true },
+          },
+        },
+      });
+
+      if (!contact) {
+        throw new Error("CONTACT_NOT_FOUND");
+      }
+
+      imageKeys = Array.from(
+        new Set(
+          contact.messages
+            .flatMap((message) => extractImageMessageUrls(message.body))
+            .map((url) => resolveR2KeyFromPublicUrl(url))
+            .filter((key): key is string => Boolean(key)),
+        ),
+      );
+
+      await tx.contact.delete({ where: { waId } });
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message === "CONTACT_NOT_FOUND") {
+      return json({ error: "Contact not found" }, 404, req);
+    }
+    console.error("[contact-delete] failed to delete contact", { waId, error });
+    return json({ error: "Erro ao excluir contato" }, 500, req);
+  }
+
+  if (imageKeys.length) {
+    const cleanupResults = await Promise.allSettled(
+      imageKeys.map((key) => deleteFromR2(key)),
+    );
+    const failedKeys = cleanupResults.flatMap((result, index) =>
+      result.status === "rejected" ? [imageKeys[index]] : [],
+    );
+
+    if (failedKeys.length) {
+      console.warn("[contact-delete] failed to remove message media from R2", {
+        waId,
+        failedKeys,
+      });
+    }
   }
   broadcast("contact:deleted", { waId });
   void invalidateDashboardCaches();

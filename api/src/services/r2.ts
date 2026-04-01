@@ -8,8 +8,9 @@ import { config } from "../config";
 
 let client: S3Client | null = null;
 
-const normalizeAudioKey = (key: string): string => {
+const normalizeR2Key = (key: string): string => {
   const cleaned = key.replace(/^\/+/, "");
+  if (cleaned.includes("/")) return cleaned;
   return cleaned.startsWith("audios/") ? cleaned : `audios/${cleaned}`;
 };
 
@@ -43,7 +44,7 @@ export async function uploadToR2(
 ): Promise<string> {
   const bucket = config.cloudflareBucketName;
   if (!bucket) throw new Error("CLOUDFLARE_BUCKET_NAME not configured");
-  const normalizedKey = normalizeAudioKey(key);
+  const normalizedKey = normalizeR2Key(key);
 
   try {
     await getClient().send(
@@ -157,7 +158,7 @@ export async function getObjectFromR2(key: string): Promise<R2ObjectResult> {
 export async function deleteFromR2(key: string): Promise<void> {
   const bucket = config.cloudflareBucketName;
   if (!bucket) throw new Error("CLOUDFLARE_BUCKET_NAME not configured");
-  const normalizedKey = normalizeAudioKey(key);
+  const normalizedKey = normalizeR2Key(key);
 
   await getClient().send(
     new DeleteObjectCommand({
