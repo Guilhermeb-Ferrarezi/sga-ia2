@@ -69,6 +69,8 @@ export interface GenerateReplyOptions {
   mode?: "webhook" | "resume";
 }
 
+const MAX_IMAGE_SUMMARY_SIZE = 180;
+
 const allowedExtractionKeys = new Set<keyof LeadExtraction>([
   "name",
   "email",
@@ -125,6 +127,26 @@ const ensureNameQuestion = (
   const separator = /[.!?]$/.test(trimmed) ? " " : ". ";
   return `${trimmed}${separator}Como posso te chamar?`;
 };
+
+const normalizeImageSummary = (value: string): string => {
+  const normalized = value
+    .replace(/\r/g, "")
+    .replace(/\s+/g, " ")
+    .replace(/^["'`]+|["'`]+$/g, "")
+    .trim();
+  if (!normalized) return "";
+
+  const withoutPrefix = normalized.replace(
+    /^(resumo|descricao|descricao curta|resumo rapido|resumo breve)\s*:?\s*/i,
+    "",
+  );
+  const cleaned = withoutPrefix.trim() || normalized;
+  if (cleaned.length <= MAX_IMAGE_SUMMARY_SIZE) return cleaned;
+  return `${cleaned.slice(0, MAX_IMAGE_SUMMARY_SIZE - 3).trimEnd()}...`;
+};
+
+const buildImageDataUrl = (bytes: Uint8Array, mimeType: string): string =>
+  `data:${mimeType || "image/jpeg"};base64,${Buffer.from(bytes).toString("base64")}`;
 
 type FaqCandidate = {
   question: string;
@@ -712,6 +734,76 @@ export class OpenAIService {
 
     const payload = (await response.json()) as OpenAITranscriptionBody;
     return payload.text?.trim() ?? "";
+  }
+
+  async summarizeInboundImage(
+    image: {
+      bytes: Uint8Array;
+      mimeType: string;
+      caption?: string | null;
+    },
+    prisma?: PrismaClient,
+  ): Promise<string> {
+    try {
+      const settings = await this.getRuntimeSettings(prisma);
+      const caption = image.caption?.trim();
+      const response = await fetch("https://api.openai.com/v1/responses", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${this.apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: settings.model,
+          input: [
+            {
+              role: "system",
+              content: [
+                {
+                  type: "input_text",
+                  text: [
+                    "Descreva a imagem em portugues do Brasil.",
+                    "Responda em uma frase curta, com no maximo 18 palavras.",
+                    "Cite apenas o que for visivel ou texto claramente legivel.",
+                    "Nao invente contexto, identidade, local ou intencao.",
+                    "Se a imagem estiver pouco clara, responda: imagem recebida sem detalhes claros.",
+                  ].join(" "),
+                },
+              ],
+            },
+            {
+              role: "user",
+              content: [
+                {
+                  type: "input_text",
+                  text: caption
+                    ? `Texto enviado junto com a imagem: ${caption}`
+                    : "A imagem chegou sem texto do usuario.",
+                },
+                {
+                  type: "input_image",
+                  image_url: buildImageDataUrl(image.bytes, image.mimeType),
+                },
+              ],
+            },
+          ],
+          max_output_tokens: 120,
+        }),
+      });
+
+      if (!response.ok) {
+        const details = await response.text();
+        throw new Error(
+          `OpenAI image summary failed (${response.status}): ${details || "no details"}`,
+        );
+      }
+
+      const payload = (await response.json()) as OpenAIResponseBody;
+      return normalizeImageSummary(safeParseText(payload));
+    } catch (error) {
+      console.warn("[openai:image-summary] failed", error);
+      return "";
+    }
   }
 
   /**

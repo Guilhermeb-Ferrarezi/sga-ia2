@@ -405,11 +405,9 @@ export default function ConversationDetail({
                           className="max-h-[320px] w-full rounded-lg object-cover"
                         />
                       </a>
-                      {image.caption && (
-                        <p className="text-xs leading-relaxed opacity-90">
-                          {image.caption}
-                        </p>
-                      )}
+                      <p className="text-xs leading-relaxed opacity-90">
+                        {image.caption ?? "Imagem recebida"}
+                      </p>
                     </div>
                   ) : (
                     <p className="whitespace-pre-wrap text-sm">{turn.content}</p>

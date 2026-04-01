@@ -2037,6 +2037,7 @@ type ResolvedInboundContent = {
   userText: string;
   previewText: string;
   kind: "text" | "audio" | "image" | "attachment";
+  imageSummary?: string;
 };
 
 const IMAGE_MIME_TYPE_EXTENSIONS: Record<string, string> = {
@@ -2057,6 +2058,22 @@ const describeInboundImage = (caption?: string | null): string => {
   return normalizedCaption
     ? `Imagem recebida: ${normalizedCaption}`
     : "Imagem recebida";
+};
+
+const buildImageFallbackReply = (
+  channel: "whatsapp" | "instagram",
+  imageSummary?: string,
+): string => {
+  const normalizedSummary = imageSummary?.trim();
+  const summaryPart = normalizedSummary
+    ? ` Resumo rapido: ${normalizedSummary}.`
+    : "";
+
+  if (channel === "instagram") {
+    return `Recebi sua imagem.${summaryPart} Se puder, me conta em texto o que voce quer que eu confira nela.`;
+  }
+
+  return `Recebi sua imagem.${summaryPart} Se puder, me explica em texto o que voce precisa para eu te ajudar melhor.`;
 };
 
 const imageExtensionForMimeType = (mimeType?: string | null): string => {
@@ -2102,6 +2119,7 @@ const uploadInboundImageToR2 = async (input: {
 
 const resolveWhatsAppInboundContent = async (
   message: InboundMessage,
+  prisma?: PrismaClient,
 ): Promise<ResolvedInboundContent> => {
   if (message.type === "text") {
     return {
@@ -2124,27 +2142,41 @@ const resolveWhatsAppInboundContent = async (
   }
 
   const media = await whatsapp.downloadMedia(message.mediaId, message.mimeType);
+  const mediaBytes = new Uint8Array(media.arrayBuffer);
+  const normalizedCaption = message.caption?.trim() ?? "";
+  const imageSummary = normalizedCaption
+    ? ""
+    : await openAI.summarizeInboundImage(
+        {
+          bytes: mediaBytes,
+          mimeType: media.mimeType,
+        },
+        prisma,
+      );
+  const imageLabel = normalizedCaption || imageSummary;
   const imageUrl = await uploadInboundImageToR2({
     channel: "whatsapp",
     messageId: message.messageId,
     fileName: media.fileName,
     mimeType: media.mimeType,
-    bytes: Buffer.from(media.arrayBuffer),
+    bytes: mediaBytes,
   });
   const storedBody = imageUrl
-    ? buildImageMessageBody(imageUrl, message.caption)
-    : describeInboundImage(message.caption);
+    ? buildImageMessageBody(imageUrl, imageLabel)
+    : describeInboundImage(imageLabel);
 
   return {
     storedBody,
-    userText: message.caption?.trim() ?? "",
+    userText: normalizedCaption,
     previewText: sanitizeMessageBodyForPreview(storedBody),
     kind: "image",
+    imageSummary,
   };
 };
 
 const resolveInstagramInboundContent = async (
   message: InstagramInboundMessage,
+  prisma?: PrismaClient,
 ): Promise<ResolvedInboundContent> => {
   const rawUserText = message.text?.trim() ?? "";
   const imageAttachment = message.attachments.find(
@@ -2154,7 +2186,10 @@ const resolveInstagramInboundContent = async (
   );
 
   if (imageAttachment?.url) {
-    let storedBody = describeInboundImage(rawUserText || imageAttachment.title);
+    const attachmentTitle = imageAttachment.title?.trim() ?? "";
+    let imageSummary = "";
+    let imageLabel = rawUserText || attachmentTitle;
+    let storedBody = describeInboundImage(imageLabel);
 
     try {
       const imageResponse = await fetch(imageAttachment.url);
@@ -2166,6 +2201,17 @@ const resolveInstagramInboundContent = async (
         imageResponse.headers.get("content-type")?.split(";")[0]?.trim() ||
         "image/jpeg";
       const imageBytes = new Uint8Array(await imageResponse.arrayBuffer());
+      if (!imageLabel) {
+        imageSummary = await openAI.summarizeInboundImage(
+          {
+            bytes: imageBytes,
+            mimeType,
+          },
+          prisma,
+        );
+        imageLabel = imageSummary;
+        storedBody = describeInboundImage(imageLabel);
+      }
       const fileName = `instagram-${message.messageId}.${imageExtensionForMimeType(
         mimeType,
       )}`;
@@ -2178,10 +2224,7 @@ const resolveInstagramInboundContent = async (
       });
 
       if (uploadedImageUrl) {
-        storedBody = buildImageMessageBody(
-          uploadedImageUrl,
-          rawUserText || imageAttachment.title,
-        );
+        storedBody = buildImageMessageBody(uploadedImageUrl, imageLabel);
       }
     } catch (error) {
       console.warn(
@@ -2195,6 +2238,7 @@ const resolveInstagramInboundContent = async (
       userText: rawUserText,
       previewText: sanitizeMessageBodyForPreview(storedBody),
       kind: "image",
+      imageSummary,
     };
   }
 
@@ -3865,6 +3909,7 @@ const whatsappWebhookEvent = async (
 
       try {
         let skipProcessing = false;
+        const prisma = (await getPrismaClient()) ?? undefined;
         try {
           // Only mark as read if bot is still active for this contact
           const prismaForRead = await getPrismaClient();
@@ -3891,7 +3936,7 @@ const whatsappWebhookEvent = async (
           );
         }
 
-        const inboundContent = await resolveWhatsAppInboundContent(message);
+        const inboundContent = await resolveWhatsAppInboundContent(message, prisma);
         const storedBody = inboundContent.storedBody.trim() || "[mensagem nao processada]";
         const userText = inboundContent.userText.trim();
         const shouldPersistInboundMessage =
@@ -3947,7 +3992,7 @@ const whatsappWebhookEvent = async (
         if (!userText) {
           const fallbackReply =
             inboundContent.kind === "image"
-              ? "Recebi sua imagem. Se puder, me explica em texto o que voce precisa para eu te ajudar melhor."
+              ? buildImageFallbackReply("whatsapp", inboundContent.imageSummary)
               : "Nao consegui entender o audio. Pode enviar novamente ou mandar em texto?";
           await whatsapp.sendTextMessage(
             message.from,
@@ -4021,7 +4066,6 @@ const whatsappWebhookEvent = async (
           continue;
         }
 
-        const prisma = await getPrismaClient();
         let aiReply: string;
 
         // FAQ Feedback Loop + Semantic Reply Cache: check for repeated/similar question
@@ -4368,7 +4412,10 @@ const instagramWebhookEvent = async (
           },
         };
 
-        const inboundContent = await resolveInstagramInboundContent(message);
+        const inboundContent = await resolveInstagramInboundContent(
+          message,
+          prisma ?? undefined,
+        );
         const rawUserText = inboundContent.userText.trim();
         const storedBody = inboundContent.storedBody.trim();
 
@@ -4402,7 +4449,7 @@ const instagramWebhookEvent = async (
         if (!rawUserText) {
           const fallbackReply =
             inboundContent.kind === "image"
-              ? "Recebi sua imagem. Se puder, me conta em texto o que voce quer que eu confira nela."
+              ? buildImageFallbackReply("instagram", inboundContent.imageSummary)
               : "No momento eu consigo te atender melhor por texto. Pode me mandar sua duvida escrita?";
           await sendTextToTarget(deliveryTarget, fallbackReply);
           await persistTurn(contactKey, "assistant", fallbackReply, {
