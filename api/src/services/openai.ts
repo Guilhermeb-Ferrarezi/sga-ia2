@@ -709,6 +709,9 @@ export class OpenAIService {
           "- Se o nome ainda nao estiver preenchido, cumprimente e peca primeiro como deve chamar o usuario antes de pedir os demais dados.",
           "- E-mail é opcional: so solicite se fizer sentido, sem travar o atendimento.",
           "- Se o usuario pedir humano, confirme o encaminhamento e nao insista na automacao.",
+          "- Nunca use saudacao, despedida, nova confirmacao ou frase de transicao quando a proxima acao for encaminhar para humano.",
+          "- Se oferecer verificacao com a equipe ou encaminhamento humano, use linguagem explicita como 'Quer que eu encaminhe para a equipe confirmar?'.",
+          "- Se o usuario responder com confirmacao curta apos uma oferta de encaminhamento ou verificacao com a equipe, nao gere nova mensagem dizendo que vai encaminhar.",
         ].join("\n"),
       );
     }
@@ -730,6 +733,9 @@ export class OpenAIService {
         "- Quando precisar pedir a cidade do lead, pergunte de forma natural: 'De qual cidade voce e?'.",
         "- E-mail e opcional: so solicite se fizer sentido, sem travar o atendimento.",
         "- Se o usuario pedir humano, confirme o encaminhamento e nao insista na automacao.",
+        "- Nunca use saudacao, despedida, nova confirmacao ou frase de transicao quando a proxima acao for encaminhar para humano.",
+        "- Se oferecer verificacao com a equipe ou encaminhamento humano, use linguagem explicita como 'Quer que eu encaminhe para a equipe confirmar?'.",
+        "- Se o usuario responder com confirmacao curta apos uma oferta de encaminhamento ou verificacao com a equipe, nao gere nova mensagem dizendo que vai encaminhar.",
       ].join("\n"),
     );
 

@@ -51,6 +51,11 @@ import {
   computeHandoffWaitMinutes,
 } from "./lib/operationalAlerts";
 import {
+  didMessageOfferHumanHandoff,
+  hasExplicitHumanHandoffRequest,
+  isHandoffConfirmationReply,
+} from "./lib/handoffIntent";
+import {
   uploadToR2,
   uploadFileToR2,
   deleteFromR2,
@@ -375,31 +380,8 @@ const resumedBotReplyLocks = new Set<string>();
 const MESSAGE_ID_TTL_MS = 10 * 60 * 1000;
 const MAX_RESUME_PENDING_MESSAGES = 10;
 const MAX_RESUME_PENDING_CONTEXT_CHARS = 4000;
-const HUMAN_HANDOFF_REGEX =
-  /\b(atendente|humano|pessoa real|suporte humano|falar com alguem|falar com pessoa|time de atendimento)\b/i;
-const HANDOFF_CONFIRMATION_REPLY_REGEX =
-  /^(sim|s|ok|okay|claro|claro que sim|pode|pode sim|pode ser|quero sim|isso|isso mesmo|confirmo|confirmado|blz|beleza|fechado|por favor|favor)$/i;
-const HANDOFF_OFFER_MESSAGE_REGEX =
-  /\b(quer que eu encaminhe|quer que eu passe|posso encaminhar|vou encaminhar|encaminhar sua duvida|encaminhar sua duvida para|encaminhar para (um )?atendente|encaminhar para (a )?equipe|atendente confirmar|equipe confirmar|continuar seu atendimento|atendimento humano)\b/i;
 const GREETING_ONLY_REGEX =
   /^(oi+|ola+|olaa+|opa+|opaa+|e ai+|eae+|iae+|fala+|salve+|bom dia|boa tarde|boa noite|hey+|hello+)[!.?, ]*$/i;
-
-const hasExplicitHumanHandoffRequest = (text: string): boolean =>
-  HUMAN_HANDOFF_REGEX.test(text);
-
-const normalizeIntentText = (text: string): string =>
-  text
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-
-const isHandoffConfirmationReply = (text: string): boolean =>
-  HANDOFF_CONFIRMATION_REPLY_REGEX.test(normalizeIntentText(text));
-
-const didMessageOfferHumanHandoff = (text: string): boolean =>
-  HANDOFF_OFFER_MESSAGE_REGEX.test(normalizeIntentText(text));
 
 const isGreetingOnlyMessage = (text: string): boolean => {
   const normalized = text
