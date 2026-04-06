@@ -1588,7 +1588,9 @@ const runHandoffEscalation = async (): Promise<void> => {
       Date.now() - HANDOFF_ESCALATION_WARN_MINUTES * 60_000,
     );
 
-    // Find contacts waiting for handoff > 15 min that still have no human response
+    // Find contacts waiting for handoff > 15 min that still have no human response.
+    // We only log the stale state internally and avoid sending automatic wait-time
+    // follow-ups to the customer.
     const staleHandoffs = await prisma.contact.findMany({
       where: {
         AND: [
@@ -1614,12 +1616,6 @@ const runHandoffEscalation = async (): Promise<void> => {
             instagramAccountId: true,
           },
         },
-        messages: {
-          where: { direction: "out", source: "SYSTEM" },
-          orderBy: { createdAt: "desc" },
-          take: 1,
-          select: { createdAt: true, body: true },
-        },
       },
     });
 
@@ -1641,46 +1637,16 @@ const runHandoffEscalation = async (): Promise<void> => {
     }
 
     for (const contact of staleHandoffs) {
-      const lastSystemOut = contact.messages[0];
       const latestAgentReply = latestAgentReplyByContact.get(contact.id);
       const handoffTime = contact.handoffAt?.getTime() ?? 0;
 
       // Skip if a human already replied after handoff.
       if ((latestAgentReply?.getTime() ?? 0) > handoffTime) continue;
 
-      // Skip if we already sent an escalation follow-up (check body pattern)
-      if (lastSystemOut?.body?.includes("nosso time segue analisando")) continue;
-
       const waitMin = Math.floor((Date.now() - handoffTime) / 60_000);
-      const followUp = `Oi${contact.name ? ` ${contact.name}` : ""}, nosso time segue analisando sua solicitacao. Tempo de espera atual: ${waitMin} min. Obrigado pela paciencia!`;
-
-      try {
-        await sendTextToTarget(contact, followUp, { allowHumanAgentTag: true });
-        await persistTurn(contact.waId, "assistant", followUp, {
-          source: "SYSTEM",
-          channel: inferContactChannel(contact.channel, contact.waId),
-          externalId: contact.externalId,
-        });
-        broadcast("message:new", {
-          phone: contact.waId,
-          role: "assistant",
-          source: "SYSTEM",
-          content: followUp,
-        });
-        broadcast("handoff:escalation", {
-          contactId: contact.id,
-          waId: contact.waId,
-          waitMinutes: waitMin,
-        });
-        console.log(
-          `[handoff-escalation] sent follow-up to ${contact.waId} (${waitMin}min wait)`,
-        );
-      } catch (err) {
-        console.error(
-          `[handoff-escalation] failed to send to ${contact.waId}`,
-          err,
-        );
-      }
+      console.log(
+        `[handoff-escalation] stale handoff ${contact.waId} (${waitMin}min wait)`,
+      );
     }
   } catch (error) {
     console.error("[handoff-escalation] check failed", error);
