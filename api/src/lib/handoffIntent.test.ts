@@ -44,4 +44,12 @@ describe("didMessageOfferHumanHandoff", () => {
       ),
     ).toBe(false);
   });
+
+  it("does not treat forwarding details to the user as human handoff", () => {
+    expect(
+      didMessageOfferHumanHandoff(
+        "Voce precisa formar seu time e fazer a inscricao com a SGA. Quer que eu encaminhe os detalhes para voce?",
+      ),
+    ).toBe(false);
+  });
 });
