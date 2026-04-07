@@ -93,15 +93,61 @@ const FAQ_SNIPPET_MAX_CHARS = 900;
 const FAQ_CONTENT_ONLY_PREFIX = "__content__:";
 const FAQ_RELEVANCE_RATIO_THRESHOLD = 0.55;
 const FAQ_SYNONYM_GROUPS = [
-  ["preco", "valor", "custa", "custo", "ticket", "ingresso", "inscricao"],
+  ["preco", "valor", "custa", "custo", "ticket", "ingresso", "inscricao", "participar", "participacao", "jogador", "individual", "vaga", "comprar", "pagamento"],
   ["campeonato", "torneio", "camp"],
   ["edicao", "temporada"],
-  ["data", "dia", "quando"],
-  ["horario", "hora", "horas"],
+  ["data", "dia", "quando", "inicio", "comeco", "previsto"],
+  ["horario", "hora", "horas", "inicio", "comeco", "previsto"],
   ["local", "endereco", "cidade", "onde"],
   ["time", "equipe", "elenco"],
   ["regra", "regras", "formato", "md3", "md5", "double", "elimination"],
+  ["valorant", "valorante", "valarante", "vava", "vct"],
+  ["corujao", "corujão", "madrugada"],
 ];
+
+const FAQ_TOKEN_CANONICAL_MAP = new Map<string, string>([
+  ["preco", "preco"],
+  ["valor", "preco"],
+  ["custa", "preco"],
+  ["custo", "preco"],
+  ["ticket", "inscricao"],
+  ["ingresso", "inscricao"],
+  ["inscricao", "inscricao"],
+  ["participar", "inscricao"],
+  ["participacao", "inscricao"],
+  ["jogador", "inscricao"],
+  ["individual", "inscricao"],
+  ["vaga", "inscricao"],
+  ["comprar", "inscricao"],
+  ["pagamento", "inscricao"],
+  ["campeonato", "campeonato"],
+  ["torneio", "campeonato"],
+  ["camp", "campeonato"],
+  ["data", "data"],
+  ["dia", "data"],
+  ["quando", "data"],
+  ["horario", "horario"],
+  ["hora", "horario"],
+  ["horas", "horario"],
+  ["inicio", "inicio"],
+  ["comeco", "inicio"],
+  ["previsto", "inicio"],
+  ["comeca", "inicio"],
+  ["local", "local"],
+  ["endereco", "local"],
+  ["cidade", "local"],
+  ["onde", "local"],
+  ["time", "time"],
+  ["equipe", "time"],
+  ["elenco", "time"],
+  ["valorant", "valorant"],
+  ["valorante", "valorant"],
+  ["valarante", "valorant"],
+  ["vava", "valorant"],
+  ["vct", "valorant"],
+  ["corujao", "corujao"],
+  ["madrugada", "corujao"],
+]);
 
 const normalizeReplyIntent = (text: string): string =>
   text
@@ -270,10 +316,14 @@ const normalizeFaqText = (value: string): string =>
     .replace(/\s+/g, " ")
     .trim();
 
+const canonicalizeFaqToken = (token: string): string =>
+  FAQ_TOKEN_CANONICAL_MAP.get(token) ?? token;
+
 const tokenizeFaqText = (value: string): string[] =>
   normalizeFaqText(value)
     .split(" ")
-    .filter((token) => token.length >= 3 && !FAQ_STOP_WORDS.has(token));
+    .filter((token) => token.length >= 3 && !FAQ_STOP_WORDS.has(token))
+    .map(canonicalizeFaqToken);
 
 const buildFaqTokenSet = (value: string): Set<string> =>
   new Set(tokenizeFaqText(value));
@@ -473,9 +523,8 @@ const buildRelevantFaqContext = (
     .trim();
   const normalizedQuery = normalizeFaqText(query);
   const directQueryText = normalizeFaqText(userMessage);
-  const directQueryTokens = new Set(
-    tokenizeFaqText([userMessage, recentHistory].filter(Boolean).join(" ").trim()),
-  );
+  const directQueryTokens = new Set(tokenizeFaqText(userMessage));
+  const historyTokens = new Set(tokenizeFaqText(recentHistory));
   const queryTokens = expandQueryTokens(new Set(tokenizeFaqText(query)));
 
   const rankedFaqs = faqs
@@ -511,8 +560,17 @@ const buildRelevantFaqContext = (
         else if (answerTokens.has(token)) score += 7;
       }
 
-      for (const token of queryTokens) {
+      for (const token of historyTokens) {
         if (directQueryTokens.has(token)) continue;
+        if (subjectTokens.has(token)) score += 7;
+        else if (editionTokens.has(token)) score += 5;
+        else if (questionTokens.has(token)) score += 4;
+        else if (contentTokens.has(token)) score += 3;
+        else if (answerTokens.has(token)) score += 2;
+      }
+
+      for (const token of queryTokens) {
+        if (directQueryTokens.has(token) || historyTokens.has(token)) continue;
         if (subjectTokens.has(token)) score += 5;
         else if (editionTokens.has(token)) score += 4;
         else if (questionTokens.has(token)) score += 3;
@@ -531,6 +589,31 @@ const buildRelevantFaqContext = (
         (queryTokens.has("campeonato") || queryTokens.has("torneio"))
       ) {
         score += 2;
+      }
+
+      if (directQueryTokens.has("inscricao") && combinedTokens.has("preco")) {
+        score += 14;
+      }
+      if (directQueryTokens.has("preco") && combinedTokens.has("inscricao")) {
+        score += 10;
+      }
+      if (
+        directQueryTokens.has("inicio") &&
+        (combinedTokens.has("data") || combinedTokens.has("horario"))
+      ) {
+        score += 14;
+      }
+      if (
+        directQueryTokens.has("valorant") &&
+        (subjectTokens.has("valorant") || combinedTokens.has("valorant"))
+      ) {
+        score += 24;
+      }
+      if (
+        directQueryTokens.has("corujao") &&
+        (subjectTokens.has("corujao") || combinedTokens.has("corujao"))
+      ) {
+        score += 24;
       }
 
       return {
