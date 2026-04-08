@@ -10,6 +10,12 @@ describe("hasExplicitHumanHandoffRequest", () => {
     expect(hasExplicitHumanHandoffRequest("quero falar com um atendente")).toBe(true);
     expect(hasExplicitHumanHandoffRequest("preciso de ajuda com horario")).toBe(false);
   });
+
+  it("does not treat a generic help request as a human handoff", () => {
+    expect(
+      hasExplicitHumanHandoffRequest("ola, preciso de ajuda com algumas informacoes"),
+    ).toBe(false);
+  });
 });
 
 describe("isHandoffConfirmationReply", () => {

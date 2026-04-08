@@ -1,5 +1,5 @@
 const HUMAN_HANDOFF_REGEX =
-  /\b(atendente|humano|pessoa real|suporte humano|falar com alguem|falar com pessoa|time de atendimento)\b/i;
+  /\b(atendente|atendimento humano|humano|pessoa real|suporte humano|falar com alguem|falar com pessoa|falar com um atendente|falar com o suporte|quero um atendente|quero falar com alguem|quero falar com uma pessoa|me passa para (?:um )?atendente|me encaminha para (?:um )?atendente|time de atendimento)\b/i;
 
 const HANDOFF_CONFIRMATION_REPLY_REGEX =
   /^(sim|s|ok|okay|claro|claro que sim|pode|pode sim|pode ser|quero sim|isso|isso mesmo|confirmo|confirmado|blz|beleza|fechado|por favor|favor)$/i;

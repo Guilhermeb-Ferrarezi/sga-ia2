@@ -399,11 +399,13 @@ const buildGreetingReply = (contactName?: string | null): string =>
 
 const shouldTriggerHumanHandoff = (
   userText: string,
-  extraction?: { wantsHuman?: boolean },
+  extraction?: { wantsHuman?: boolean; handoffReason?: string | null },
 ): boolean => {
   const explicitRequest = hasExplicitHumanHandoffRequest(userText);
   if (explicitRequest) return true;
-  return extraction?.wantsHuman === true;
+  if (extraction?.wantsHuman !== true) return false;
+  if (!extraction.handoffReason?.trim()) return false;
+  return hasExplicitHumanHandoffRequest(extraction.handoffReason);
 };
 
 const didUserConfirmRecentHandoffOffer = async (
@@ -436,7 +438,7 @@ const resolveHumanHandoffIntent = async (
   prisma: PrismaClient,
   contactId: number,
   userText: string,
-  extraction?: { wantsHuman?: boolean },
+  extraction?: { wantsHuman?: boolean; handoffReason?: string | null },
 ): Promise<boolean> => {
   if (shouldTriggerHumanHandoff(userText, extraction)) return true;
   return didUserConfirmRecentHandoffOffer(prisma, contactId, userText);
