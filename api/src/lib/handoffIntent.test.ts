@@ -9,12 +9,20 @@ describe("hasExplicitHumanHandoffRequest", () => {
   it("detects direct requests for a human", () => {
     expect(hasExplicitHumanHandoffRequest("quero falar com um atendente")).toBe(true);
     expect(hasExplicitHumanHandoffRequest("preciso de ajuda com horario")).toBe(false);
+    expect(hasExplicitHumanHandoffRequest("me transfere para um humano")).toBe(true);
   });
 
   it("does not treat a generic help request as a human handoff", () => {
     expect(
       hasExplicitHumanHandoffRequest("ola, preciso de ajuda com algumas informacoes"),
     ).toBe(false);
+    expect(hasExplicitHumanHandoffRequest("preciso de suporte para inscricao")).toBe(
+      false,
+    );
+    expect(hasExplicitHumanHandoffRequest("como funciona o atendimento humano ai?")).toBe(
+      false,
+    );
+    expect(hasExplicitHumanHandoffRequest("quero ajuda com as regras")).toBe(false);
   });
 });
 

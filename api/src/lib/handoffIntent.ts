@@ -1,5 +1,24 @@
-const HUMAN_HANDOFF_REGEX =
-  /\b(atendente|atendimento humano|humano|pessoa real|suporte humano|falar com alguem|falar com pessoa|falar com um atendente|falar com o suporte|quero um atendente|quero falar com alguem|quero falar com uma pessoa|me passa para (?:um )?atendente|me encaminha para (?:um )?atendente|time de atendimento)\b/i;
+const HUMAN_HANDOFF_REQUEST_PATTERNS = [
+  /\bquero falar com (?:um )?atendente\b/i,
+  /\bquero falar com (?:uma )?pessoa\b/i,
+  /\bquero falar com alguem\b/i,
+  /\bquero atendimento humano\b/i,
+  /\bquero suporte humano\b/i,
+  /\bquero um atendente\b/i,
+  /\bpreciso falar com (?:um )?atendente\b/i,
+  /\bpreciso de atendimento humano\b/i,
+  /\bpreciso de suporte humano\b/i,
+  /\bfalar com (?:um )?atendente\b/i,
+  /\bfalar com o suporte\b/i,
+  /\bfalar com (?:uma )?pessoa real\b/i,
+  /\bfalar com alguem do atendimento\b/i,
+  /\bme passa para (?:um )?atendente\b/i,
+  /\bme encaminha para (?:um )?atendente\b/i,
+  /\bme transfere para (?:um )?atendente\b/i,
+  /\bpassa para (?:um )?humano\b/i,
+  /\bencaminha para (?:um )?humano\b/i,
+  /\btransfere para (?:um )?humano\b/i,
+];
 
 const HANDOFF_CONFIRMATION_REPLY_REGEX =
   /^(sim|s|ok|okay|claro|claro que sim|pode|pode sim|pode ser|quero sim|isso|isso mesmo|confirmo|confirmado|blz|beleza|fechado|por favor|favor)$/i;
@@ -23,8 +42,10 @@ export const normalizeIntentText = (text: string): string =>
     .replace(/\s+/g, " ")
     .trim();
 
-export const hasExplicitHumanHandoffRequest = (text: string): boolean =>
-  HUMAN_HANDOFF_REGEX.test(text);
+export const hasExplicitHumanHandoffRequest = (text: string): boolean => {
+  const normalized = normalizeIntentText(text);
+  return HUMAN_HANDOFF_REQUEST_PATTERNS.some((pattern) => pattern.test(normalized));
+};
 
 export const isHandoffConfirmationReply = (text: string): boolean =>
   HANDOFF_CONFIRMATION_REPLY_REGEX.test(normalizeIntentText(text));
