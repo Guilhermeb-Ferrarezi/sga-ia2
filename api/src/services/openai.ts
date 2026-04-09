@@ -713,6 +713,9 @@ const buildRelevantFaqContext = (
       if (queryDomain && faqDomain) {
         if (queryDomain === faqDomain) score += 70;
         else score -= 90;
+      } else if (queryDomain && !faqDomain) {
+        // Mild penalty: prefer domain-tagged FAQs when we know the domain from context
+        score -= 15;
       }
 
       for (const token of directQueryTokens) {
