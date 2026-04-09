@@ -485,6 +485,29 @@ const trimFaqSnippet = (value: string, maxChars = FAQ_SNIPPET_MAX_CHARS): string
   return `${normalized.slice(0, maxChars - 3).trimEnd()}...`;
 };
 
+const FAQ_INSTRUCTION_HEADING_REGEX =
+  /^(regras de resposta|fluxo de atendimento|importante|se o usuario|quando o usuario|sempre responda|se preferir|se nao tiver|se o usuario ja tiver)\b/i;
+
+const FAQ_FACTUAL_HEADING_REGEX =
+  /^(sobre o campeonato|local|data|inicio|encerramento|formato|inscricao|pagamento|times|estrutura|experiencia)\b/i;
+
+const isInstructionalFaqParagraph = (paragraph: string): boolean => {
+  const normalized = normalizeFaqText(paragraph);
+  if (!normalized) return true;
+  if (normalized.startsWith("voce e um assistente de atendimento")) return true;
+  if (FAQ_INSTRUCTION_HEADING_REGEX.test(normalized)) return true;
+  return false;
+};
+
+const isFactualFaqParagraph = (paragraph: string): boolean => {
+  const normalized = normalizeFaqText(paragraph);
+  if (!normalized) return false;
+  if (FAQ_FACTUAL_HEADING_REGEX.test(normalized)) return true;
+  return /\b(r\$\s*\d|\d{1,2}\/\d{1,2}(?:\/\d{2,4})?|pix|cartao|presencial|ribeirao|arena|domingo|winner|lower|time|times)\b/i.test(
+    paragraph,
+  );
+};
+
 const extractRelevantFaqSnippet = (
   faq: FaqCandidate,
   directQueryTokens: Set<string>,
@@ -504,6 +527,10 @@ const extractRelevantFaqSnippet = (
       ),
     ),
   );
+  const factualParagraphs = paragraphs.filter(
+    (paragraph) => !isInstructionalFaqParagraph(paragraph),
+  );
+  const preferredParagraphs = factualParagraphs.length > 0 ? factualParagraphs : paragraphs;
 
   const asksForPrice = textContainsAnyFaqToken(directQueryTokens, FAQ_SYNONYM_GROUPS[0] ?? []);
   const asksForDate = textContainsAnyFaqToken(directQueryTokens, FAQ_SYNONYM_GROUPS[3] ?? []);
@@ -516,7 +543,7 @@ const extractRelevantFaqSnippet = (
     !asksForLocation &&
     (directQueryTokens.size <= 2 || GENERIC_OVERVIEW_REQUEST_REGEX.test(directQueryText));
 
-  const rankedParagraphs = paragraphs
+  const rankedParagraphs = preferredParagraphs
     .map((paragraph, index) => {
       const paragraphTokens = buildFaqTokenSet(paragraph);
       const hasPrice = /r\$\s*\d|valor|preco|desconto/i.test(paragraph);
@@ -537,6 +564,7 @@ const extractRelevantFaqSnippet = (
       if (asksForDate && hasDate) score += 20;
       if (asksForTime && hasTime) score += 20;
       if (asksForLocation && hasLocation) score += 20;
+      if (isFactualFaqParagraph(paragraph)) score += 10;
 
       if (prefersOverview && (hasPrice || hasDate || hasTime || hasLocation)) {
         score += 10;
@@ -559,11 +587,12 @@ const extractRelevantFaqSnippet = (
     .sort((left, right) => right.score - left.score);
 
   const introParagraph =
-    paragraphs.find(
+    preferredParagraphs.find(
       (paragraph) =>
         paragraph.length >= 80 &&
-        !/r\$\s*\d|valor|preco|desconto/i.test(paragraph),
-    ) ?? paragraphs[0];
+        !/r\$\s*\d|valor|preco|desconto/i.test(paragraph) &&
+        !isInstructionalFaqParagraph(paragraph),
+    ) ?? preferredParagraphs[0] ?? paragraphs[0];
 
   const addParagraph = (target: string[], paragraph: string | undefined): void => {
     if (!paragraph) return;
@@ -616,7 +645,7 @@ const extractRelevantFaqSnippet = (
   }
 
   if (selectedParagraphs.length === 0) {
-    addParagraph(selectedParagraphs, paragraphs[0]);
+    addParagraph(selectedParagraphs, preferredParagraphs[0] ?? paragraphs[0]);
   }
 
   return trimFaqSnippet(selectedParagraphs.join("\n\n"));
