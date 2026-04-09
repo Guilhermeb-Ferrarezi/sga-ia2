@@ -2531,6 +2531,10 @@ const replyPendingContactAfterBotResume = async (
         broadcast("ai:done", { phone: waId });
         return;
       }
+      if (await hasRecentPersistedAutoReply(prisma, waId, greetingReply)) {
+        broadcast("ai:done", { phone: waId });
+        return;
+      }
       if (await hasOutboundAfter(prisma, contact.id, resumeBacklog.latestCreatedAt)) {
         broadcast("ai:done", { phone: waId });
         return;
@@ -2871,6 +2875,30 @@ const rememberRecentAutoReply = (contactKey: string, body: string): void => {
     body,
     sentAt: Date.now(),
   });
+};
+
+const hasRecentPersistedAutoReply = async (
+  prisma: PrismaClient,
+  waId: string,
+  body: string,
+  withinMs = 45_000,
+): Promise<boolean> => {
+  const normalizedBody = body.trim();
+  if (!normalizedBody) return false;
+
+  const since = new Date(Date.now() - withinMs);
+  const recentReply = await prisma.message.findFirst({
+    where: {
+      contact: { waId },
+      direction: "out",
+      source: "AI",
+      body: normalizedBody,
+      createdAt: { gte: since },
+    },
+    select: { id: true },
+  });
+
+  return Boolean(recentReply);
 };
 
 const buildContactUpdateFromExtraction = (
@@ -4053,6 +4081,16 @@ const whatsappWebhookEvent = async (
                 broadcast("ai:done", { phone: message.from });
                 continue;
               }
+              if (
+                await hasRecentPersistedAutoReply(
+                  prismaForGreeting,
+                  message.from,
+                  personalizedGreetingReply,
+                )
+              ) {
+                broadcast("ai:done", { phone: message.from });
+                continue;
+              }
 
               await sleep(computeReplyDelayMs(personalizedGreetingReply));
               await whatsapp.sendTextMessage(message.from, personalizedGreetingReply);
@@ -4069,6 +4107,13 @@ const whatsappWebhookEvent = async (
             }
           }
           if (shouldSuppressRecentAutoReply(message.from, greetingReply)) {
+            broadcast("ai:done", { phone: message.from });
+            continue;
+          }
+          if (
+            prismaForGreeting &&
+            await hasRecentPersistedAutoReply(prismaForGreeting, message.from, greetingReply)
+          ) {
             broadcast("ai:done", { phone: message.from });
             continue;
           }
@@ -4507,6 +4552,16 @@ const instagramWebhookEvent = async (
                 broadcast("ai:done", { phone: contactKey });
                 continue;
               }
+              if (
+                await hasRecentPersistedAutoReply(
+                  prisma,
+                  contactKey,
+                  personalizedGreetingReply,
+                )
+              ) {
+                broadcast("ai:done", { phone: contactKey });
+                continue;
+              }
 
               await sleep(computeReplyDelayMs(personalizedGreetingReply));
               await sendTextToTarget(deliveryTarget, personalizedGreetingReply);
@@ -4529,6 +4584,13 @@ const instagramWebhookEvent = async (
             }
           }
           if (shouldSuppressRecentAutoReply(contactKey, greetingReply)) {
+            broadcast("ai:done", { phone: contactKey });
+            continue;
+          }
+          if (
+            prisma &&
+            await hasRecentPersistedAutoReply(prisma, contactKey, greetingReply)
+          ) {
             broadcast("ai:done", { phone: contactKey });
             continue;
           }

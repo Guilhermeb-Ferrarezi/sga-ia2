@@ -93,7 +93,7 @@ const FAQ_SNIPPET_MAX_CHARS = 900;
 const FAQ_CONTENT_ONLY_PREFIX = "__content__:";
 const FAQ_RELEVANCE_RATIO_THRESHOLD = 0.55;
 const FAQ_SYNONYM_GROUPS = [
-  ["preco", "valor", "valores", "custa", "custa", "custo", "custos", "ticket", "tickets", "ingresso", "ingressos", "inscricao", "inscricoes", "participar", "participacao", "jogador", "jogadores", "individual", "vaga", "vagas", "comprar", "pagamento", "pix", "cartao", "taxa", "taxas", "investimento", "reembolso", "estorno"],
+  ["preco", "valor", "valores", "Inscrição", "Inscriçao", "custa", "custa", "custo", "custos", "ticket", "tickets", "ingresso", "ingressos", "inscricao", "inscricoes", "participar", "participacao", "jogador", "jogadores", "individual", "vaga", "vagas", "comprar", "pagamento", "pix", "cartao", "taxa", "taxas", "investimento", "reembolso", "estorno"],
   ["campeonato", "campeonatos", "torneio", "torneios", "camp", "camps", "evento", "eventos"],
   ["edicao", "edicoes", "temporada"],
   ["data", "dia", "dias", "quando", "inicio", "comeco", "previsto", "previsao", "agenda"],
@@ -320,6 +320,12 @@ type FaqCandidate = {
   edition?: string | null;
 };
 
+type FaqDomain =
+  | "valorant"
+  | "counterstrike"
+  | "corujao"
+  | "mix";
+
 const FAQ_STOP_WORDS = new Set([
   "a",
   "ao",
@@ -405,6 +411,23 @@ const tokenizeFaqText = (value: string): string[] =>
 
 const buildFaqTokenSet = (value: string): Set<string> =>
   new Set(tokenizeFaqText(value));
+
+const resolveFaqDomainFromTokens = (tokens: Set<string>): FaqDomain | null => {
+  if (tokens.has("valorant")) return "valorant";
+  if (tokens.has("counterstrike")) return "counterstrike";
+  if (tokens.has("corujao")) return "corujao";
+  if (tokens.has("mix")) return "mix";
+  return null;
+};
+
+const resolveQueryFaqDomain = (
+  directQueryTokens: Set<string>,
+  historyTokens: Set<string>,
+  contactInfoTokens: Set<string>,
+): FaqDomain | null =>
+  resolveFaqDomainFromTokens(directQueryTokens) ??
+  resolveFaqDomainFromTokens(historyTokens) ??
+  resolveFaqDomainFromTokens(contactInfoTokens);
 
 const hasFaqContentOnlyQuestion = (question: string): boolean =>
   question.startsWith(FAQ_CONTENT_ONLY_PREFIX);
@@ -591,19 +614,26 @@ const buildRelevantFaqContext = (
 ): string | undefined => {
   if (!faqs.length) return undefined;
 
-  const recentHistory = historyMessages
+  const recentUserHistory = historyMessages
+    .filter((message) => message.role === "user")
     .slice(-6)
     .map((message) => message.content.map((item) => item.text).join(" "))
     .join(" ");
-  const query = [userMessage, recentHistory, contactInfo]
+  const query = [userMessage, recentUserHistory, contactInfo]
     .filter(Boolean)
     .join(" ")
     .trim();
   const normalizedQuery = normalizeFaqText(query);
   const directQueryText = normalizeFaqText(userMessage);
   const directQueryTokens = new Set(tokenizeFaqText(userMessage));
-  const historyTokens = new Set(tokenizeFaqText(recentHistory));
+  const historyTokens = new Set(tokenizeFaqText(recentUserHistory));
+  const contactInfoTokens = new Set(tokenizeFaqText(contactInfo ?? ""));
   const queryTokens = expandQueryTokens(new Set(tokenizeFaqText(query)));
+  const queryDomain = resolveQueryFaqDomain(
+    directQueryTokens,
+    historyTokens,
+    contactInfoTokens,
+  );
 
   const rankedFaqs = faqs
     .map((faq) => {
@@ -625,10 +655,16 @@ const buildRelevantFaqContext = (
         ...editionTokens,
         ...contentTokens,
       ]);
+      const faqDomain = resolveFaqDomainFromTokens(combinedTokens);
       let score = 0;
 
       if (subjectText && normalizedQuery.includes(subjectText)) score += 60;
       if (editionText && normalizedQuery.includes(editionText)) score += 40;
+
+      if (queryDomain && faqDomain) {
+        if (queryDomain === faqDomain) score += 70;
+        else score -= 90;
+      }
 
       for (const token of directQueryTokens) {
         if (subjectTokens.has(token)) score += 18;
@@ -692,6 +728,22 @@ const buildRelevantFaqContext = (
         (subjectTokens.has("corujao") || combinedTokens.has("corujao"))
       ) {
         score += 24;
+      }
+
+      if (
+        queryDomain === "valorant" &&
+        faqDomain === "valorant" &&
+        (subjectTokens.has("valorant") || combinedTokens.has("valorant"))
+      ) {
+        score += 30;
+      }
+
+      if (
+        queryDomain === "counterstrike" &&
+        faqDomain === "counterstrike" &&
+        (subjectTokens.has("counterstrike") || combinedTokens.has("counterstrike"))
+      ) {
+        score += 30;
       }
 
       return {
@@ -909,6 +961,7 @@ export class OpenAIService {
         "- Para perguntas curtas como 'quanto custa?', 'qual o horario?', 'qual a edicao?', 'como funciona?', 'onde e?' e 'como faz para se inscrever?', relacione a pergunta atual com a FAQ recuperada mais proxima, mesmo que o texto nao seja identico.",
         "- Se duas FAQs forem complementares, combine as informacoes sem contradizer nenhuma.",
         "- Se a FAQ recuperada trouxer valor, data, horario, regra, local, edicao ou passo a passo, responda diretamente com essa informacao.",
+        "- Se a FAQ recuperada trouxer preco, responda com o valor exato como esta escrito, sem arredondar nem reformular o numero.",
         "- Se a informacao nao estiver claramente presente nas FAQs recuperadas, diga isso explicitamente e faca uma pergunta objetiva ou ofereca encaminhamento humano.",
         "- Nunca diga que nao sabe antes de verificar a secao de FAQs recuperadas.",
         "- Nunca encaminhe para humano so porque a pergunta e sobre preco, funcionamento, regras, data, local, edicao, inscricao ou formato.",
