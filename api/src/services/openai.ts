@@ -491,6 +491,8 @@ const FAQ_INSTRUCTION_HEADING_REGEX =
 const FAQ_FACTUAL_HEADING_REGEX =
   /^(sobre o campeonato|local|data|inicio|encerramento|formato|inscricao|pagamento|times|estrutura|experiencia)\b/i;
 
+const FREE_PRICE_QUERY_REGEX = /\b(gratis|gratuito|gratuita|de graca|free)\b/i;
+
 const isInstructionalFaqParagraph = (paragraph: string): boolean => {
   const normalized = normalizeFaqText(paragraph);
   if (!normalized) return true;
@@ -532,7 +534,9 @@ const extractRelevantFaqSnippet = (
   );
   const preferredParagraphs = factualParagraphs.length > 0 ? factualParagraphs : paragraphs;
 
-  const asksForPrice = textContainsAnyFaqToken(directQueryTokens, FAQ_SYNONYM_GROUPS[0] ?? []);
+  const asksForPrice =
+    textContainsAnyFaqToken(directQueryTokens, FAQ_SYNONYM_GROUPS[0] ?? []) ||
+    FREE_PRICE_QUERY_REGEX.test(directQueryText);
   const asksForDate = textContainsAnyFaqToken(directQueryTokens, FAQ_SYNONYM_GROUPS[3] ?? []);
   const asksForTime = textContainsAnyFaqToken(directQueryTokens, FAQ_SYNONYM_GROUPS[4] ?? []);
   const asksForLocation = textContainsAnyFaqToken(directQueryTokens, FAQ_SYNONYM_GROUPS[5] ?? []);
@@ -748,6 +752,10 @@ const buildRelevantFaqContext = (
         (queryTokens.has("campeonato") || queryTokens.has("torneio"))
       ) {
         score += 2;
+      }
+
+      if (FREE_PRICE_QUERY_REGEX.test(directQueryText) && /r\$\s*\d|valor|preco|desconto/i.test(faq.answer)) {
+        score += 18;
       }
 
       if (directQueryTokens.has("inscricao") && combinedTokens.has("preco")) {
@@ -995,6 +1003,7 @@ export class OpenAIService {
         "- Nunca use saudacao, despedida, nova confirmacao ou frase de transicao quando a proxima acao for encaminhar para humano.",
         "- Se oferecer verificacao com a equipe ou encaminhamento humano, use linguagem explicita como 'Quer que eu encaminhe para a equipe confirmar?'.",
         "- Se o usuario responder com confirmacao curta apos uma oferta de encaminhamento ou verificacao com a equipe, nao gere nova mensagem dizendo que vai encaminhar.",
+        "- Resumo da conversa e apenas contexto auxiliar e pode estar desatualizado. Nunca use o resumo como fonte principal para preco, data, horario, local, formato, regras, edicao ou requisitos.",
       ].join("\n"),
     );
 
@@ -1002,6 +1011,7 @@ export class OpenAIService {
       [
         "\n--- Protocolo de uso das FAQs recuperadas ---",
         "- A secao de FAQs recuperadas abaixo e sua fonte principal para responder sobre campeonatos.",
+        "- Quando houver FAQ recuperada, ela tem prioridade sobre resumo da conversa, memoria do atendimento e inferencias.",
         "- Considere que a recuperacao ja trouxe os itens mais relevantes para a mensagem atual.",
         "- Busque a resposta usando em conjunto: pergunta, resposta, assunto, edicao e detalhes da FAQ.",
         "- Para perguntas curtas como 'quanto custa?', 'qual o horario?', 'qual a edicao?', 'como funciona?', 'onde e?' e 'como faz para se inscrever?', relacione a pergunta atual com a FAQ recuperada mais proxima, mesmo que o texto nao seja identico.",
@@ -1018,14 +1028,14 @@ export class OpenAIService {
       sections.push(`\n--- Informacoes do contato ---\n${extras.contactInfo}`);
     }
 
-    if (extras?.aiSummary) {
-      sections.push(`\n--- Resumo da conversa ate agora ---\n${extras.aiSummary}`);
-    }
-
     if (extras?.faqs) {
       sections.push(
         `\n--- Perguntas frequentes (use como base ao responder) ---\n${extras.faqs}`,
       );
+    }
+
+    if (extras?.aiSummary && !extras?.faqs) {
+      sections.push(`\n--- Resumo da conversa ate agora ---\n${extras.aiSummary}`);
     }
 
     if (extras?.triageMissing?.length) {
@@ -1564,7 +1574,14 @@ export class OpenAIService {
               content: [
                 {
                   type: "input_text",
-                  text: "Resuma a conversa abaixo em no maximo 200 palavras, destacando: assuntos discutidos, preferencias do usuario, e proximos passos combinados. Responda apenas com o resumo.",
+                  text: [
+                    "Resuma a conversa abaixo em no maximo 200 palavras.",
+                    "Destaque: assuntos discutidos, preferencias do usuario, campeonato de interesse e proximos passos combinados.",
+                    "Nao invente fatos.",
+                    "Nao fixe como verdade valores, datas, horarios, locais, regras ou formatos que possam ter vindo de respostas anteriores do assistente.",
+                    "Se houver duvida ou contradicao sobre fatos, descreva de forma neutra sem repetir o dado duvidoso.",
+                    "Responda apenas com o resumo.",
+                  ].join(" "),
                 },
               ],
             },
