@@ -1579,6 +1579,7 @@ let handoffEscalationInterval: ReturnType<typeof setInterval> | null = null;
 const PENDING_AUTO_REPLY_RECOVERY_INTERVAL_MS = 60_000;
 const PENDING_AUTO_REPLY_RECOVERY_LOOKBACK_MS = 23 * 60 * 60 * 1000;
 const PENDING_AUTO_REPLY_RECOVERY_BATCH_SIZE = 80;
+const PENDING_AUTO_REPLY_RECOVERY_GRACE_MS = 30_000;
 let pendingAutoReplyRecoveryInterval: ReturnType<typeof setInterval> | null = null;
 
 const runHandoffEscalation = async (): Promise<void> => {
@@ -1674,10 +1675,14 @@ const runPendingAutoReplyRecovery = async (): Promise<void> => {
 
   try {
     const since = new Date(Date.now() - PENDING_AUTO_REPLY_RECOVERY_LOOKBACK_MS);
+    const recoveryCutoff = new Date(Date.now() - PENDING_AUTO_REPLY_RECOVERY_GRACE_MS);
     const pendingInbound = await prisma.message.findMany({
       where: {
         direction: "in",
-        createdAt: { gte: since },
+        createdAt: {
+          gte: since,
+          lte: recoveryCutoff,
+        },
         contact: {
           botEnabled: true,
           handoffRequested: false,
@@ -2004,11 +2009,32 @@ const IMAGE_MIME_TYPE_EXTENSIONS: Record<string, string> = {
 const sanitizeStorageSegment = (value: string): string =>
   value.replace(/[^a-zA-Z0-9._-]/g, "_");
 
+const IMAGE_ATTACHMENT_URL_RE =
+  /\.(?:gif|heic|heif|jpe?g|png|webp)(?:[?#].*)?$/i;
+
 const describeInboundImage = (caption?: string | null): string => {
   const normalizedCaption = caption?.trim();
   return normalizedCaption
     ? `Imagem recebida: ${normalizedCaption}`
     : "Imagem recebida";
+};
+
+const looksLikeImageAttachment = (attachment: {
+  type: string | null;
+  url: string | null;
+}): boolean => {
+  const normalizedType = attachment.type?.trim().toLowerCase() ?? "";
+  if (
+    normalizedType === "image" ||
+    normalizedType.includes("image") ||
+    normalizedType.includes("photo")
+  ) {
+    return true;
+  }
+
+  const normalizedUrl = attachment.url?.trim() ?? "";
+  if (!normalizedUrl) return false;
+  return IMAGE_ATTACHMENT_URL_RE.test(normalizedUrl);
 };
 
 const buildImageFallbackReply = (
@@ -2176,9 +2202,7 @@ const resolveInstagramInboundContent = async (
 ): Promise<ResolvedInboundContent> => {
   const rawUserText = message.text?.trim() ?? "";
   const imageAttachment = message.attachments.find(
-    (attachment) =>
-      Boolean(attachment.url) &&
-      (!attachment.type || attachment.type.toLowerCase() === "image"),
+    (attachment) => Boolean(attachment.url) && looksLikeImageAttachment(attachment),
   );
 
   if (imageAttachment?.url) {
@@ -2434,7 +2458,7 @@ const hasOutboundAfter = async (
     where: {
       contactId,
       direction: "out",
-      createdAt: { gt: createdAt },
+      createdAt: { gte: createdAt },
     },
     select: { id: true },
   });
@@ -5768,7 +5792,13 @@ const handleContactUpdate = async (
   const currentlyActiveHandoff =
     currentHandoffStatus !== "NONE" && currentHandoffStatus !== "RESOLVED";
   const desiredBotEnabled = requestedBotEnabled ?? existing.botEnabled;
-  const desiredHandoffRequested = requestedHandoff ?? existing.handoffRequested;
+  const desiredHandoffRequested =
+    requestedHandoff ??
+    (requestedBotEnabled === true
+      ? false
+      : requestedBotEnabled === false
+        ? true
+        : existing.handoffRequested);
   const shouldHaveActiveHandoff = !desiredBotEnabled || desiredHandoffRequested;
 
   if (shouldHaveActiveHandoff) {

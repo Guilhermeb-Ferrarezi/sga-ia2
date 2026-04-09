@@ -2,6 +2,8 @@ import { API_BASE } from "./api";
 
 const AUDIO_TAG_RE = /^\[AUDIO:(.+?)\|(.+?)\]$/;
 const IMAGE_TAG_RE = /^\[IMAGE:(.+?)\|(.*?)\]$/;
+const IMAGE_PLACEHOLDER_RE = /^imagem recebida(?::\s*(.+))?$/i;
+const GENERIC_MEDIA_PLACEHOLDER_RE = /^midia recebida$/i;
 
 const collapseWhitespace = (value: string): string =>
   value.replace(/\s+/g, " ").trim();
@@ -35,10 +37,34 @@ export const parseImageMessageContent = (
   };
 };
 
+export const parseImagePlaceholderContent = (
+  content: string,
+): { caption: string | null } | null => {
+  const match = IMAGE_PLACEHOLDER_RE.exec(content.trim());
+  if (!match) return null;
+
+  const caption = collapseWhitespace(match[1] ?? "");
+  return { caption: caption || null };
+};
+
+export const isGenericMediaPlaceholder = (content: string): boolean =>
+  GENERIC_MEDIA_PLACEHOLDER_RE.test(collapseWhitespace(content));
+
 export const getMessagePreviewText = (content: string): string => {
   const image = parseImageMessageContent(content);
   if (image) {
     return image.caption ? `Imagem: ${image.caption}` : "Imagem recebida";
+  }
+
+  const imagePlaceholder = parseImagePlaceholderContent(content);
+  if (imagePlaceholder) {
+    return imagePlaceholder.caption
+      ? `Imagem: ${imagePlaceholder.caption}`
+      : "Imagem recebida";
+  }
+
+  if (isGenericMediaPlaceholder(content)) {
+    return "Midia recebida";
   }
 
   const audio = parseAudioMessageContent(content);

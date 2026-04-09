@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Bot, BotOff, Loader2, Send } from "lucide-react";
+import { Bot, BotOff, ImageIcon, Loader2, Paperclip, Send } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { useWebSocket, type WsEventPayload } from "@/contexts/WebSocketContext";
 import { api, type DashboardTurn } from "@/lib/api";
 import {
   parseAudioMessageContent,
   parseImageMessageContent,
+  parseImagePlaceholderContent,
+  isGenericMediaPlaceholder,
 } from "@/lib/messageContent";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -363,6 +365,8 @@ export default function ConversationDetail({
             {!loading && turns.map((turn) => {
               const audio = parseAudioMessageContent(turn.content);
               const image = parseImageMessageContent(turn.content);
+              const imagePlaceholder = parseImagePlaceholderContent(turn.content);
+              const genericMediaPlaceholder = isGenericMediaPlaceholder(turn.content);
               return (
                 <div
                   key={turn.id}
@@ -408,6 +412,39 @@ export default function ConversationDetail({
                       <p className="text-xs leading-relaxed opacity-90">
                         {image.caption ?? "Imagem recebida"}
                       </p>
+                    </div>
+                  ) : imagePlaceholder ? (
+                    <div className="space-y-3">
+                      <div
+                        className={cn(
+                          "flex min-h-32 items-center justify-center rounded-lg border border-dashed",
+                          turn.role === "assistant"
+                            ? "border-primary-foreground/30 bg-primary-foreground/10"
+                            : "border-secondary-foreground/20 bg-background/40",
+                        )}
+                      >
+                        <div className="flex flex-col items-center gap-2 text-center">
+                          <ImageIcon className="h-8 w-8 opacity-80" />
+                          <p className="text-sm font-medium">Imagem recebida</p>
+                        </div>
+                      </div>
+                      {imagePlaceholder.caption ? (
+                        <p className="text-xs leading-relaxed opacity-90">
+                          {imagePlaceholder.caption}
+                        </p>
+                      ) : null}
+                    </div>
+                  ) : genericMediaPlaceholder ? (
+                    <div
+                      className={cn(
+                        "flex items-center gap-3 rounded-lg border px-3 py-3",
+                        turn.role === "assistant"
+                          ? "border-primary-foreground/20 bg-primary-foreground/10"
+                          : "border-secondary-foreground/20 bg-background/40",
+                      )}
+                    >
+                      <Paperclip className="h-4 w-4 opacity-80" />
+                      <p className="text-sm">Midia recebida</p>
                     </div>
                   ) : (
                     <p className="whitespace-pre-wrap text-sm">{turn.content}</p>
