@@ -4087,6 +4087,17 @@ const whatsappWebhookEvent = async (
           });
         }
 
+        // Skip AI reply if there's a later message from the same sender in this batch
+        // (the debounce sleep can't see unprocessed messages in the same payload)
+        const hasLaterInBatch = inbound.some(
+          (m, i) => i > inbound.indexOf(message) && m.from === message.from,
+        );
+        if (hasLaterInBatch) {
+          console.log(`[webhook] deferring reply for ${message.from} — later message in same batch`);
+          broadcast("ai:done", { phone: message.from });
+          continue;
+        }
+
         if (
           prisma &&
           persistedInboundInfo &&
@@ -4589,6 +4600,16 @@ const instagramWebhookEvent = async (
               contactId: true,
             },
           });
+        }
+
+        // Skip AI reply if there's a later message from the same sender in this batch
+        const hasLaterInBatch = inbound.some(
+          (m, i) => i > inbound.indexOf(message) && m.from === message.from,
+        );
+        if (hasLaterInBatch) {
+          console.log(`[instagram-webhook] deferring reply for ${contactKey} — later message in same batch`);
+          broadcast("ai:done", { phone: contactKey });
+          continue;
         }
 
         if (
