@@ -420,6 +420,22 @@ const resolveFaqDomainFromTokens = (tokens: Set<string>): FaqDomain | null => {
   return null;
 };
 
+const resolveFaqDomain = (faq: FaqCandidate): FaqDomain | null => {
+  const subjectTokens = buildFaqTokenSet(faq.subject ?? "");
+  const questionTokens = buildFaqTokenSet(normalizeFaqQuestion(faq.question));
+  const headerDomain =
+    resolveFaqDomainFromTokens(subjectTokens) ??
+    resolveFaqDomainFromTokens(questionTokens);
+  if (headerDomain) return headerDomain;
+
+  const answerTokens = buildFaqTokenSet(faq.answer);
+  const contentTokens = buildFaqTokenSet(faq.content ?? "");
+  return (
+    resolveFaqDomainFromTokens(answerTokens) ??
+    resolveFaqDomainFromTokens(contentTokens)
+  );
+};
+
 const resolveQueryFaqDomain = (
   directQueryTokens: Set<string>,
   historyTokens: Set<string>,
@@ -655,7 +671,7 @@ const buildRelevantFaqContext = (
         ...editionTokens,
         ...contentTokens,
       ]);
-      const faqDomain = resolveFaqDomainFromTokens(combinedTokens);
+      const faqDomain = resolveFaqDomain(faq);
       let score = 0;
 
       if (subjectText && normalizedQuery.includes(subjectText)) score += 60;

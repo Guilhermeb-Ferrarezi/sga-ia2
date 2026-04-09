@@ -1580,6 +1580,7 @@ const PENDING_AUTO_REPLY_RECOVERY_INTERVAL_MS = 60_000;
 const PENDING_AUTO_REPLY_RECOVERY_LOOKBACK_MS = 23 * 60 * 60 * 1000;
 const PENDING_AUTO_REPLY_RECOVERY_BATCH_SIZE = 80;
 const PENDING_AUTO_REPLY_RECOVERY_GRACE_MS = 30_000;
+const INBOUND_BURST_MERGE_WINDOW_MS = 1_800;
 let pendingAutoReplyRecoveryInterval: ReturnType<typeof setInterval> | null = null;
 
 const runHandoffEscalation = async (): Promise<void> => {
@@ -2464,6 +2465,37 @@ const hasOutboundAfter = async (
   });
 
   return Boolean(newerOutbound);
+};
+
+const hasNewerInboundAfter = async (
+  prisma: PrismaClient,
+  contactId: number,
+  createdAt: Date,
+): Promise<boolean> => {
+  const newerInbound = await prisma.message.findFirst({
+    where: {
+      contactId,
+      direction: "in",
+      createdAt: { gt: createdAt },
+    },
+    select: { id: true },
+  });
+
+  return Boolean(newerInbound);
+};
+
+const shouldDeferAutoReplyToNewerInbound = async (
+  prisma: PrismaClient,
+  contactId: number,
+  createdAt: Date,
+): Promise<boolean> => {
+  await sleep(INBOUND_BURST_MERGE_WINDOW_MS);
+
+  if (await hasOutboundAfter(prisma, contactId, createdAt)) {
+    return true;
+  }
+
+  return hasNewerInboundAfter(prisma, contactId, createdAt);
 };
 
 const canResumeAutoReply = async (
@@ -4038,6 +4070,36 @@ const whatsappWebhookEvent = async (
           });
         }
 
+        let persistedInboundInfo:
+          | { id: number; createdAt: Date; contactId: number }
+          | null = null;
+        if (prisma) {
+          persistedInboundInfo = await prisma.message.findFirst({
+            where: {
+              waMessageId: message.messageId,
+              contact: { waId: message.from },
+            },
+            select: {
+              id: true,
+              createdAt: true,
+              contactId: true,
+            },
+          });
+        }
+
+        if (
+          prisma &&
+          persistedInboundInfo &&
+          await shouldDeferAutoReplyToNewerInbound(
+            prisma,
+            persistedInboundInfo.contactId,
+            persistedInboundInfo.createdAt,
+          )
+        ) {
+          broadcast("ai:done", { phone: message.from });
+          continue;
+        }
+
         if (!userText) {
           const fallbackReply =
             inboundContent.kind === "image"
@@ -4511,6 +4573,36 @@ const instagramWebhookEvent = async (
           messageId: message.messageId,
           preview: inboundContent.previewText.slice(0, 120),
         });
+
+        let persistedInboundInfo:
+          | { id: number; createdAt: Date; contactId: number }
+          | null = null;
+        if (prisma) {
+          persistedInboundInfo = await prisma.message.findFirst({
+            where: {
+              waMessageId: message.messageId,
+              contact: { waId: contactKey },
+            },
+            select: {
+              id: true,
+              createdAt: true,
+              contactId: true,
+            },
+          });
+        }
+
+        if (
+          prisma &&
+          persistedInboundInfo &&
+          await shouldDeferAutoReplyToNewerInbound(
+            prisma,
+            persistedInboundInfo.contactId,
+            persistedInboundInfo.createdAt,
+          )
+        ) {
+          broadcast("ai:done", { phone: contactKey });
+          continue;
+        }
 
         if (!rawUserText) {
           const fallbackReply =
