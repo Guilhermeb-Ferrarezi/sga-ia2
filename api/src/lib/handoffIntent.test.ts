@@ -66,4 +66,12 @@ describe("didMessageOfferHumanHandoff", () => {
       ),
     ).toBe(false);
   });
+
+  it("does not flag generic support wording without an explicit handoff offer", () => {
+    expect(
+      didMessageOfferHumanHandoff(
+        "Um atendente do nosso time pode continuar seu atendimento se necessario.",
+      ),
+    ).toBe(false);
+  });
 });

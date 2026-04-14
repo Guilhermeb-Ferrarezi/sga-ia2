@@ -29,9 +29,6 @@ const HANDOFF_OFFER_PATTERNS = [
   /\bencaminhar sua duvida para (?:a )?equipe\b/i,
   /\bencaminhar para (?:um )?atendente\b/i,
   /\bencaminhar para (?:a )?equipe\b/i,
-  /\batendente do nosso time\b/i,
-  /\bcontinuar seu atendimento\b/i,
-  /\batendimento humano\b/i,
 ];
 
 export const normalizeIntentText = (text: string): string =>
