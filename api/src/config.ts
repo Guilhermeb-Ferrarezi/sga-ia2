@@ -99,6 +99,10 @@ export const config = {
   replyDelayPerCharMs: parseNumber(Bun.env.REPLY_DELAY_PER_CHAR_MS, 35),
   replyDelayMinMs: parseNumber(Bun.env.REPLY_DELAY_MIN_MS, 700),
   replyDelayMaxMs: parseNumber(Bun.env.REPLY_DELAY_MAX_MS, 20000),
+  inboundBurstMergeWindowMs: parseNumber(
+    Bun.env.INBOUND_BURST_MERGE_WINDOW_MS,
+    1800,
+  ),
   enableDb: Bun.env.ENABLE_DB === "true",
   cloudflareAccountId: optional(Bun.env.CLOUDFLARE_ACCOUNT_ID),
   cloudflareAccessKeyId: optional(Bun.env.CLOUDFLARE_ACCESS_KEY_ID),

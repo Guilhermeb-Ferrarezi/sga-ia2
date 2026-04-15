@@ -376,6 +376,7 @@ const wsUpgradePaths = new Set<string>([
 ]);
 
 const processedMessageIds = new Map<string, number>();
+const inboundReplyAttemptVersionByContact = new Map<string, number>();
 const resumedBotReplyLocks = new Set<string>();
 const MESSAGE_ID_TTL_MS = 10 * 60 * 1000;
 const MAX_RESUME_PENDING_MESSAGES = 10;
@@ -1580,7 +1581,6 @@ const PENDING_AUTO_REPLY_RECOVERY_INTERVAL_MS = 60_000;
 const PENDING_AUTO_REPLY_RECOVERY_LOOKBACK_MS = 23 * 60 * 60 * 1000;
 const PENDING_AUTO_REPLY_RECOVERY_BATCH_SIZE = 80;
 const PENDING_AUTO_REPLY_RECOVERY_GRACE_MS = 30_000;
-const INBOUND_BURST_MERGE_WINDOW_MS = 1_800;
 let pendingAutoReplyRecoveryInterval: ReturnType<typeof setInterval> | null = null;
 
 const runHandoffEscalation = async (): Promise<void> => {
@@ -2489,8 +2489,6 @@ const shouldDeferAutoReplyToNewerInbound = async (
   contactId: number,
   createdAt: Date,
 ): Promise<boolean> => {
-  await sleep(INBOUND_BURST_MERGE_WINDOW_MS);
-
   if (await hasOutboundAfter(prisma, contactId, createdAt)) {
     return true;
   }
@@ -2882,6 +2880,26 @@ const shouldProcessMessage = (messageId: string): boolean => {
 
   processedMessageIds.set(messageId, now);
   return true;
+};
+
+const createInboundReplyAttempt = (contactKey: string): number => {
+  const nextVersion = (inboundReplyAttemptVersionByContact.get(contactKey) ?? 0) + 1;
+  inboundReplyAttemptVersionByContact.set(contactKey, nextVersion);
+  return nextVersion;
+};
+
+const isInboundReplyAttemptCurrent = (
+  contactKey: string,
+  attemptVersion: number,
+): boolean =>
+  inboundReplyAttemptVersionByContact.get(contactKey) === attemptVersion;
+
+const awaitInboundReplyTurn = async (
+  contactKey: string,
+  attemptVersion: number,
+): Promise<boolean> => {
+  await sleep(config.inboundBurstMergeWindowMs);
+  return isInboundReplyAttemptCurrent(contactKey, attemptVersion);
 };
 
 const RECENT_AUTOREPLY_TTL_MS = 30_000;
@@ -3985,6 +4003,7 @@ const whatsappWebhookEvent = async (
         console.log(`[webhook] skipping duplicate message ${message.messageId}`);
         continue;
       }
+      const inboundReplyAttempt = createInboundReplyAttempt(message.from);
       console.log(`[webhook] processing message from ${message.from} (${message.type})`);
 
 
@@ -4094,6 +4113,14 @@ const whatsappWebhookEvent = async (
         );
         if (hasLaterInBatch) {
           console.log(`[webhook] deferring reply for ${message.from} — later message in same batch`);
+          broadcast("ai:done", { phone: message.from });
+          continue;
+        }
+
+        if (!await awaitInboundReplyTurn(message.from, inboundReplyAttempt)) {
+          console.log(
+            `[webhook] skipping stale reply for ${message.from} because a newer inbound arrived during the merge window`,
+          );
           broadcast("ai:done", { phone: message.from });
           continue;
         }
@@ -4516,6 +4543,7 @@ const instagramWebhookEvent = async (
       }
 
       const contactKey = buildContactKey("INSTAGRAM", message.from);
+      const inboundReplyAttempt = createInboundReplyAttempt(contactKey);
       console.log(`[instagram-webhook] processing message from ${contactKey}`);
 
       try {
@@ -4608,6 +4636,14 @@ const instagramWebhookEvent = async (
         );
         if (hasLaterInBatch) {
           console.log(`[instagram-webhook] deferring reply for ${contactKey} — later message in same batch`);
+          broadcast("ai:done", { phone: contactKey });
+          continue;
+        }
+
+        if (!await awaitInboundReplyTurn(contactKey, inboundReplyAttempt)) {
+          console.log(
+            `[instagram-webhook] skipping stale reply for ${contactKey} because a newer inbound arrived during the merge window`,
+          );
           broadcast("ai:done", { phone: contactKey });
           continue;
         }
