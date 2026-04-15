@@ -312,7 +312,7 @@ const normalizeImageSummary = (value: string): string => {
 const buildImageDataUrl = (bytes: Uint8Array, mimeType: string): string =>
   `data:${mimeType || "image/jpeg"};base64,${Buffer.from(bytes).toString("base64")}`;
 
-type FaqCandidate = {
+export type FaqCandidate = {
   question: string;
   answer: string;
   content?: string | null;
@@ -325,6 +325,14 @@ type FaqDomain =
   | "counterstrike"
   | "corujao"
   | "mix";
+
+type FaqIntent = {
+  asksForPrice: boolean;
+  asksForDate: boolean;
+  asksForTime: boolean;
+  asksForLocation: boolean;
+  prefersOverview: boolean;
+};
 
 const FAQ_STOP_WORDS = new Set([
   "a",
@@ -479,6 +487,32 @@ const textContainsAnyFaqToken = (
   candidates: readonly string[],
 ): boolean => candidates.some((token) => tokens.has(token));
 
+const resolveFaqIntent = (
+  directQueryTokens: Set<string>,
+  directQueryText: string,
+): FaqIntent => {
+  const asksForPrice =
+    textContainsAnyFaqToken(directQueryTokens, FAQ_SYNONYM_GROUPS[0] ?? []) ||
+    FREE_PRICE_QUERY_REGEX.test(directQueryText);
+  const asksForDate = textContainsAnyFaqToken(directQueryTokens, FAQ_SYNONYM_GROUPS[3] ?? []);
+  const asksForTime = textContainsAnyFaqToken(directQueryTokens, FAQ_SYNONYM_GROUPS[4] ?? []);
+  const asksForLocation = textContainsAnyFaqToken(directQueryTokens, FAQ_SYNONYM_GROUPS[5] ?? []);
+  const prefersOverview =
+    !asksForPrice &&
+    !asksForDate &&
+    !asksForTime &&
+    !asksForLocation &&
+    (directQueryTokens.size <= 2 || GENERIC_OVERVIEW_REQUEST_REGEX.test(directQueryText));
+
+  return {
+    asksForPrice,
+    asksForDate,
+    asksForTime,
+    asksForLocation,
+    prefersOverview,
+  };
+};
+
 const trimFaqSnippet = (value: string, maxChars = FAQ_SNIPPET_MAX_CHARS): string => {
   const normalized = value.replace(/\s+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
   if (normalized.length <= maxChars) return normalized;
@@ -534,18 +568,13 @@ const extractRelevantFaqSnippet = (
   );
   const preferredParagraphs = factualParagraphs.length > 0 ? factualParagraphs : paragraphs;
 
-  const asksForPrice =
-    textContainsAnyFaqToken(directQueryTokens, FAQ_SYNONYM_GROUPS[0] ?? []) ||
-    FREE_PRICE_QUERY_REGEX.test(directQueryText);
-  const asksForDate = textContainsAnyFaqToken(directQueryTokens, FAQ_SYNONYM_GROUPS[3] ?? []);
-  const asksForTime = textContainsAnyFaqToken(directQueryTokens, FAQ_SYNONYM_GROUPS[4] ?? []);
-  const asksForLocation = textContainsAnyFaqToken(directQueryTokens, FAQ_SYNONYM_GROUPS[5] ?? []);
-  const prefersOverview =
-    !asksForPrice &&
-    !asksForDate &&
-    !asksForTime &&
-    !asksForLocation &&
-    (directQueryTokens.size <= 2 || GENERIC_OVERVIEW_REQUEST_REGEX.test(directQueryText));
+  const {
+    asksForPrice,
+    asksForDate,
+    asksForTime,
+    asksForLocation,
+    prefersOverview,
+  } = resolveFaqIntent(directQueryTokens, directQueryText);
 
   const rankedParagraphs = preferredParagraphs
     .map((paragraph, index) => {
@@ -655,7 +684,7 @@ const extractRelevantFaqSnippet = (
   return trimFaqSnippet(selectedParagraphs.join("\n\n"));
 };
 
-const buildRelevantFaqContext = (
+export const buildRelevantFaqContext = (
   faqs: FaqCandidate[],
   userMessage: string,
   historyMessages: ChatMessage[],
@@ -683,6 +712,7 @@ const buildRelevantFaqContext = (
     historyTokens,
     contactInfoTokens,
   );
+  const faqIntent = resolveFaqIntent(directQueryTokens, directQueryText);
 
   const rankedFaqs = faqs
     .map((faq) => {
@@ -705,6 +735,20 @@ const buildRelevantFaqContext = (
         ...contentTokens,
       ]);
       const faqDomain = resolveFaqDomain(faq);
+      const factualSource = [faq.content ?? "", faq.answer ?? ""].join("\n");
+      const hasPrice = /r\$\s*\d|valor|preco|desconto|pix|cartao/i.test(factualSource);
+      const hasDate =
+        /\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b|domingo|segunda|terca|quarta|quinta|sexta|sabado/i.test(
+          factualSource,
+        );
+      const hasTime =
+        /\b\d{1,2}h\b|\b\d{1,2}:\d{2}\b|horario|hora|duracao|manha|tarde|noite/i.test(
+          factualSource,
+        );
+      const hasLocation =
+        /avenida|rua|endereco|local|arena|ribeirao|santos|jardim|presencial/i.test(
+          factualSource,
+        );
       let score = 0;
 
       if (subjectText && normalizedQuery.includes(subjectText)) score += 60;
@@ -802,9 +846,18 @@ const buildRelevantFaqContext = (
         score += 30;
       }
 
+      if (faqIntent.asksForPrice && hasPrice) score += 40;
+      if (faqIntent.asksForDate && hasDate) score += 30;
+      if (faqIntent.asksForTime && hasTime) score += 30;
+      if (faqIntent.asksForLocation && hasLocation) score += 30;
+      if (faqIntent.prefersOverview && (hasPrice || hasDate || hasTime || hasLocation)) {
+        score += 12;
+      }
+
       return {
         ...faq,
         question: normalizedQuestion,
+        faqDomain,
         score,
         snippet: extractRelevantFaqSnippet(
           faq,
@@ -815,12 +868,18 @@ const buildRelevantFaqContext = (
       };
     })
     .filter((faq) => faq.score > 0)
-    .sort((left, right) => right.score - left.score)
-    .slice(0, FAQ_SELECTION_LIMIT);
+    .sort((left, right) => right.score - left.score);
 
-  const topScore = rankedFaqs[0]?.score ?? 0;
+  const domainScopedRankedFaqs =
+    queryDomain && rankedFaqs.some((faq) => faq.faqDomain === queryDomain)
+      ? rankedFaqs.filter((faq) => faq.faqDomain === queryDomain)
+      : rankedFaqs;
+
+  const topRankedFaqs = domainScopedRankedFaqs.slice(0, FAQ_SELECTION_LIMIT);
+
+  const topScore = topRankedFaqs[0]?.score ?? 0;
   const selectedFaqs = topScore > 0
-    ? rankedFaqs.filter((faq) => faq.score >= Math.max(6, topScore * FAQ_RELEVANCE_RATIO_THRESHOLD))
+    ? topRankedFaqs.filter((faq) => faq.score >= Math.max(6, topScore * FAQ_RELEVANCE_RATIO_THRESHOLD))
     : [];
   let totalChars = 0;
   const chunks: string[] = [];
@@ -1024,6 +1083,7 @@ export class OpenAIService {
         "- Para perguntas curtas como 'quanto custa?', 'qual o horario?', 'qual a edicao?', 'como funciona?', 'onde e?' e 'como faz para se inscrever?', relacione a pergunta atual com a FAQ recuperada mais proxima, mesmo que o texto nao seja identico.",
         "- Se duas FAQs forem complementares, combine as informacoes sem contradizer nenhuma.",
         "- Se a FAQ recuperada trouxer valor, data, horario, regra, local, edicao ou passo a passo, responda diretamente com essa informacao.",
+        "- Se a FAQ recuperada trouxer exatamente o valor, a data, o horario ou o local pedidos, use esse dado na primeira frase e nao diga que falta confirmacao.",
         "- Se a FAQ recuperada trouxer preco, responda com o valor exato como esta escrito, sem arredondar nem reformular o numero.",
         "- Se a informacao nao estiver claramente presente nas FAQs recuperadas, diga 'Ainda nao tenho essa informacao confirmada'. So ofereca encaminhamento humano se o usuario pedir ou se a confirmacao humana for realmente necessaria para destravar o atendimento. NUNCA invente informacoes.",
         "- Nunca diga que nao sabe before de verificar a secao de FAQs recuperadas.",
