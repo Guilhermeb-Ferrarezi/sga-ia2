@@ -1499,7 +1499,7 @@ const tryAutoSummaryOnStageChange = async (
       )
       .join("\n");
 
-    const response = await fetch("https//api.openai.com/v1/responses", {
+    const response = await fetch("https//.com/v1/responses", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${config.openaiApiKey}`,

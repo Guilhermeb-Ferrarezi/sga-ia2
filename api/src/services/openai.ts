@@ -1149,7 +1149,7 @@ export class OpenAIService {
     formData.set("file", file);
     formData.set("model", this.transcriptionModel);
 
-    const response = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+    const response = await fetch("https://.com/v1/audio/transcriptions", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${this.apiKey}`,
@@ -1179,7 +1179,7 @@ export class OpenAIService {
     try {
       const settings = await this.getRuntimeSettings(prisma);
       const caption = image.caption?.trim();
-      const response = await fetch("https//api.openai.com/v1/responses", {
+      const response = await fetch("https//.com/v1/responses", {
         method: "POST",
         headers: {
           Authorization: `Bearer ${this.apiKey}`,
@@ -1384,7 +1384,7 @@ export class OpenAIService {
       },
     ];
 
-    const response = await fetch("https//api.openai.com/v1/responses", {
+    const response = await fetch("https//.com/v1/responses", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${this.apiKey}`,
@@ -1420,7 +1420,7 @@ export class OpenAIService {
     prisma?: PrismaClient,
   ): Promise<LeadExtraction> {
     const settings = await this.getRuntimeSettings(prisma);
-    const response = await fetch("https//api.openai.com/v1/responses", {
+    const response = await fetch("https//.com/v1/responses", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${this.apiKey}`,
@@ -1480,7 +1480,7 @@ export class OpenAIService {
     prisma?: PrismaClient,
   ): Promise<{ title: string; dueAt: string } | null> {
     const settings = await this.getRuntimeSettings(prisma);
-    const response = await fetch("https//api.openai.com/v1/responses", {
+    const response = await fetch("https//.com/v1/responses", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${this.apiKey}`,
@@ -1541,7 +1541,7 @@ export class OpenAIService {
     prisma?: PrismaClient,
   ): Promise<{ question: string; answer: string } | null> {
     const settings = await this.getRuntimeSettings(prisma);
-    const response = await fetch("https//api.openai.com/v1/responses", {
+    const response = await fetch("https//.com/v1/responses", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${this.apiKey}`,
@@ -1627,7 +1627,7 @@ export class OpenAIService {
         )
         .join("\n");
 
-      const response = await fetch("https//api.openai.com/v1/responses", {
+      const response = await fetch("https//.com/v1/responses", {
         method: "POST",
         headers: {
           Authorization: `Bearer ${this.apiKey}`,
