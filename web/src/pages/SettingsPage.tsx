@@ -126,6 +126,8 @@ export default function SettingsPage() {
   });
   const [loadingAi, setLoadingAi] = useState(false);
   const [savingAi, setSavingAi] = useState(false);
+  const [botEnabled, setBotEnabled] = useState(true);
+  const [togglingBot, setTogglingBot] = useState(false);
 
   const [customRoles, setCustomRoles] = useState<CustomRoleSummary[]>([]);
   const [loadingRoles, setLoadingRoles] = useState(false);
@@ -161,6 +163,7 @@ export default function SettingsPage() {
         if (cancelled) return;
         setAiForm(toAiForm(settings));
         setAiMeta({ source: settings.source, updatedAt: settings.updatedAt });
+        setBotEnabled(settings.botEnabled);
       } catch (error) {
         if (!cancelled) {
           toast({
@@ -325,6 +328,7 @@ export default function SettingsPage() {
       });
       setAiForm(toAiForm(saved));
       setAiMeta({ source: saved.source, updatedAt: saved.updatedAt });
+      setBotEnabled(saved.botEnabled);
       toast({
         title: "Configuracoes da IA salvas",
         description: "As proximas respostas ja usarao esse perfil.",
@@ -338,6 +342,32 @@ export default function SettingsPage() {
       });
     } finally {
       setSavingAi(false);
+    }
+  };
+
+  const handleToggleBot = async () => {
+    if (!token) return;
+    const next = !botEnabled;
+    setTogglingBot(true);
+    try {
+      const saved = await api.setAiBotEnabled(token, next);
+      setBotEnabled(saved.botEnabled);
+      setAiMeta({ source: saved.source, updatedAt: saved.updatedAt });
+      toast({
+        title: saved.botEnabled ? "Bot ativado" : "Bot desativado",
+        description: saved.botEnabled
+          ? "A IA voltara a responder automaticamente."
+          : "A IA nao respondera mais ninguem ate ser reativada.",
+        variant: "success",
+      });
+    } catch (error) {
+      toast({
+        title: "Falha ao alterar status do bot",
+        description: error instanceof Error ? error.message : "Tente novamente.",
+        variant: "error",
+      });
+    } finally {
+      setTogglingBot(false);
     }
   };
 
@@ -545,6 +575,34 @@ export default function SettingsPage() {
                   <div className="flex flex-wrap gap-2">
                     <Badge variant="outline">{aiStatus}</Badge>
                     {aiUpdatedAt && <Badge variant="outline">Atualizado em {aiUpdatedAt}</Badge>}
+                    <Badge
+                      variant="outline"
+                      className={botEnabled ? "" : "border-destructive text-destructive"}
+                    >
+                      {botEnabled ? "Bot ativo" : "Bot desativado"}
+                    </Badge>
+                  </div>
+                  <div className="flex items-start justify-between gap-3 rounded-lg border border-border/60 bg-background/50 px-3 py-3">
+                    <div className="space-y-1">
+                      <p className="text-sm font-medium">Responder automaticamente</p>
+                      <p className="text-xs text-muted-foreground">
+                        {botEnabled
+                          ? "A IA esta respondendo novas mensagens recebidas."
+                          : "A IA nao respondera ninguem enquanto estiver desativada."}
+                      </p>
+                    </div>
+                    <Button
+                      type="button"
+                      variant={botEnabled ? "destructive" : "default"}
+                      onClick={handleToggleBot}
+                      disabled={togglingBot || loadingAi}
+                    >
+                      {togglingBot
+                        ? "Aplicando..."
+                        : botEnabled
+                          ? "Desativar bot"
+                          : "Ativar bot"}
+                    </Button>
                   </div>
                   {loadingAi ? (
                     <p className="text-sm text-muted-foreground">Carregando configuracoes da IA...</p>

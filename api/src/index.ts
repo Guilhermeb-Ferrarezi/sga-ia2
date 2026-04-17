@@ -32,6 +32,7 @@ import { buildOpenApiDocument, renderSwaggerUiHtml } from "./services/swagger";
 import {
   resolveAiSettings,
   saveAiSettings,
+  setAiBotEnabled,
   type AiSettingsInput,
 } from "./services/aiSettings";
 import {
@@ -369,6 +370,10 @@ const instagramConnectionsPrefix = [
 const aiSettingsPaths = new Set<string>([
   `${config.apiBasePath}/settings/ai`,
   "/settings/ai",
+]);
+const aiBotEnabledPaths = new Set<string>([
+  `${config.apiBasePath}/settings/ai/bot-enabled`,
+  "/settings/ai/bot-enabled",
 ]);
 const wsUpgradePaths = new Set<string>([
   `${config.apiBasePath}/ws`,
@@ -3828,6 +3833,30 @@ const handleAiSettingsUpdate = async (req: Request): Promise<Response> => {
   return json(saved, 200, req);
 };
 
+const handleAiBotEnabledUpdate = async (req: Request): Promise<Response> => {
+  const current = await getAuthenticatedUser(req);
+  if (current instanceof Response) return current;
+  const denied = requirePermission(current, req, PERMISSIONS.USERS_MANAGE);
+  if (denied) return denied;
+
+  let body: unknown;
+  try {
+    body = await req.json();
+  } catch {
+    return json({ error: "Invalid JSON" }, 400, req);
+  }
+
+  const enabled = typeof body === "object" && body !== null
+    ? (body as Record<string, unknown>).enabled
+    : undefined;
+  if (typeof enabled !== "boolean") {
+    return json({ error: "Campo 'enabled' deve ser booleano" }, 400, req);
+  }
+
+  const saved = await setAiBotEnabled(current.prisma, enabled);
+  return json(saved, 200, req);
+};
+
 const dashboardOverview = async (req: Request): Promise<Response> => {
   const current = await getAuthenticatedUser(req);
   if (current instanceof Response) return current;
@@ -4010,6 +4039,12 @@ const whatsappWebhookEvent = async (
       try {
         let skipProcessing = false;
         const prisma = (await getPrismaClient()) ?? undefined;
+        const globalAiSettings = await resolveAiSettings(prisma);
+        if (!globalAiSettings.botEnabled) {
+          console.log(`[webhook] bot globally disabled — skipping message from ${message.from}`);
+          broadcast("ai:done", { phone: message.from });
+          continue;
+        }
         try {
           // Only mark as read if bot is still active for this contact
           const prismaForRead = await getPrismaClient();
@@ -4548,6 +4583,12 @@ const instagramWebhookEvent = async (
 
       try {
         const prisma = await getPrismaClient();
+        const globalAiSettings = await resolveAiSettings(prisma);
+        if (!globalAiSettings.botEnabled) {
+          console.log(`[instagram-webhook] bot globally disabled — skipping message from ${contactKey}`);
+          broadcast("ai:done", { phone: contactKey });
+          continue;
+        }
         const connection = prisma
           ? await prisma.instagramConnection.findUnique({
               where: { pageId: message.pageId },
@@ -8368,6 +8409,10 @@ const server = Bun.serve<WsUserData>({
     }
     if (authMePaths.has(url.pathname) && req.method === "GET") {
       return authMe(req);
+    }
+    if (aiBotEnabledPaths.has(url.pathname)) {
+      if (req.method === "PUT") return handleAiBotEnabledUpdate(req);
+      return json({ error: "Method not allowed" }, 405, req);
     }
     if (aiSettingsPaths.has(url.pathname)) {
       if (req.method === "GET") return handleAiSettingsGet(req);

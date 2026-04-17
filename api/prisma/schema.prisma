@@ -261,6 +261,7 @@ model AiSettings {
   personality  String
   style        String
   systemPrompt String?
+  botEnabled   Boolean  @default(true)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 }

@@ -145,6 +145,7 @@ export interface AiSettingsSummary {
   personality: string;
   style: string;
   systemPrompt: string | null;
+  botEnabled: boolean;
   createdAt: string | null;
   updatedAt: string | null;
   source: "environment" | "database";
@@ -687,6 +688,17 @@ export const api = {
       {
         method: "PUT",
         body: JSON.stringify(input),
+      },
+      token,
+    );
+  },
+
+  async setAiBotEnabled(token: string, enabled: boolean): Promise<AiSettingsSummary> {
+    return request<AiSettingsSummary>(
+      "/settings/ai/bot-enabled",
+      {
+        method: "PUT",
+        body: JSON.stringify({ enabled }),
       },
       token,
     );
