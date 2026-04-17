@@ -2523,7 +2523,7 @@ const replyPendingContactAfterBotResume = async (
 
   try {
     const globalAiSettings = await resolveAiSettings(prisma);
-    if (!globalAiSettings.botEnabled) {
+    if (!globalAiSettings.botEnabled || !config.openaiApiKey) {
       return;
     }
     let contact = await prisma.contact.findUnique({
@@ -4044,9 +4044,13 @@ const whatsappWebhookEvent = async (
         let skipProcessing = false;
         const prisma = (await getPrismaClient()) ?? undefined;
         const globalAiSettings = await resolveAiSettings(prisma);
-        const botGloballyDisabled = !globalAiSettings.botEnabled;
+        const botGloballyDisabled =
+          !globalAiSettings.botEnabled || !config.openaiApiKey;
         if (botGloballyDisabled) {
-          console.log(`[webhook] bot globally disabled — persisting message from ${message.from} without replying`);
+          const reason = globalAiSettings.botEnabled
+            ? "OPENAI_API_KEY not configured"
+            : "bot globally disabled";
+          console.log(`[webhook] ${reason} — persisting message from ${message.from} without replying`);
           skipProcessing = true;
         }
         try {
@@ -4588,7 +4592,8 @@ const instagramWebhookEvent = async (
       try {
         const prisma = await getPrismaClient();
         const globalAiSettings = await resolveAiSettings(prisma);
-        const botGloballyDisabled = !globalAiSettings.botEnabled;
+        const botGloballyDisabled =
+          !globalAiSettings.botEnabled || !config.openaiApiKey;
         const connection = prisma
           ? await prisma.instagramConnection.findUnique({
               where: { pageId: message.pageId },
