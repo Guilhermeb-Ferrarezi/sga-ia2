@@ -80,7 +80,7 @@ export const config = {
     .map((scope) => scope.trim())
     .filter(Boolean),
   openaiApiKey: optional(Bun.env.OPENAI_API_KEY) ?? "",
-  openaiModel: Bun.env.OPENAI_MODEL ?? "gpt-4o-mini",
+  openaiModel: optional(Bun.env.OPENAI_MODEL) ?? "gpt-4o-mini",
   openaiTranscriptionModel:
     Bun.env.OPENAI_TRANSCRIPTION_MODEL ?? "gpt-4o-mini-transcribe",
   assistantLanguage: Bun.env.ASSISTANT_LANGUAGE ?? "pt-BR",
