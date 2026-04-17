@@ -4040,10 +4040,10 @@ const whatsappWebhookEvent = async (
         let skipProcessing = false;
         const prisma = (await getPrismaClient()) ?? undefined;
         const globalAiSettings = await resolveAiSettings(prisma);
-        if (!globalAiSettings.botEnabled) {
-          console.log(`[webhook] bot globally disabled — skipping message from ${message.from}`);
-          broadcast("ai:done", { phone: message.from });
-          continue;
+        const botGloballyDisabled = !globalAiSettings.botEnabled;
+        if (botGloballyDisabled) {
+          console.log(`[webhook] bot globally disabled — persisting message from ${message.from} without replying`);
+          skipProcessing = true;
         }
         try {
           // Only mark as read if bot is still active for this contact
@@ -4056,11 +4056,11 @@ const whatsappWebhookEvent = async (
             if (contactForRead && !contactForRead.botEnabled) {
               // Don't mark as read — handoff is active, let the human agent handle it
               skipProcessing = true;
-            } else {
+            } else if (!botGloballyDisabled) {
               await whatsapp.markAsRead(message.messageId);
               await whatsapp.sendTypingIndicator(message.messageId, "text");
             }
-          } else {
+          } else if (!botGloballyDisabled) {
             await whatsapp.markAsRead(message.messageId);
             await whatsapp.sendTypingIndicator(message.messageId, "text");
           }
@@ -4584,11 +4584,7 @@ const instagramWebhookEvent = async (
       try {
         const prisma = await getPrismaClient();
         const globalAiSettings = await resolveAiSettings(prisma);
-        if (!globalAiSettings.botEnabled) {
-          console.log(`[instagram-webhook] bot globally disabled — skipping message from ${contactKey}`);
-          broadcast("ai:done", { phone: contactKey });
-          continue;
-        }
+        const botGloballyDisabled = !globalAiSettings.botEnabled;
         const connection = prisma
           ? await prisma.instagramConnection.findUnique({
               where: { pageId: message.pageId },
@@ -4646,6 +4642,11 @@ const instagramWebhookEvent = async (
           source: "USER",
           content: storedBody,
         });
+        if (botGloballyDisabled) {
+          console.log(`[instagram-webhook] bot globally disabled — not replying to ${contactKey}`);
+          broadcast("ai:done", { phone: contactKey });
+          continue;
+        }
         broadcast("ai:processing", { phone: contactKey });
         broadcast("notification", {
           phone: contactKey,
