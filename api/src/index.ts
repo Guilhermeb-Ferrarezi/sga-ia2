@@ -2522,6 +2522,10 @@ const replyPendingContactAfterBotResume = async (
   resumedBotReplyLocks.add(waId);
 
   try {
+    const globalAiSettings = await resolveAiSettings(prisma);
+    if (!globalAiSettings.botEnabled) {
+      return;
+    }
     let contact = await prisma.contact.findUnique({
       where: { waId },
       select: resumedReplyContactSelect,
